@@ -1,0 +1,12 @@
+[Unit]
+Description=BookOS Battery Logger — runs every 30 seconds
+Requires=bookos-battery-logger.service
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

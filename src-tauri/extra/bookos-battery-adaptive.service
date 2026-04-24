@@ -1,0 +1,7 @@
+[Unit]
+Description=BookOS Adaptive Charging — adjusts charge threshold based on usage patterns
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/bookos/bookos-battery-adaptive.sh

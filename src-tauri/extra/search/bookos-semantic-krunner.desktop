@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Service
+Name=BookOS Búsqueda Semántica
+Name[es]=BookOS Búsqueda Semántica
+Comment=Busca archivos por significado usando IA local
+Icon=document-open-recent
+X-KDE-ServiceTypes=Plasma/Runner
+X-Plasma-API=DBus
+X-Plasma-DBus-Service=org.bookos.SemanticSearch
+X-Plasma-DBus-Path=/bookos/SemanticSearch
+X-Plasma-DBus-Interface=org.kde.krunner1
+X-KDE-PluginInfo-Name=bookos-semantic
