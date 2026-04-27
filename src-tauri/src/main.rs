@@ -101,13 +101,37 @@ fn esc(s: &str) -> String { s.replace('\\',"\\\\").replace('"',"\\\"").replace('
 }
 #[tauri::command] async fn set_hostname(name: String) -> String { run("hostnamectl",&["set-hostname",&name]).await; r#"{"ok":true}"#.into() }
 
+fn regex_strip_rev(s: &str) -> String {
+    // Remove trailing " (rev XX)" suffix from lspci output
+    if let Some(idx) = s.rfind(" (rev ") {
+        s[..idx].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 // ── System Info ──────────────────────────────────────────────────────────
 #[tauri::command] async fn get_system_info() -> String {
     let host = run("hostname",&[]).await;
     let kern = run("uname",&["-r"]).await;
     let os = read("/etc/os-release");
     let distro = os.lines().find(|l| l.starts_with("PRETTY_NAME=")).map(|l| l.trim_start_matches("PRETTY_NAME=").trim_matches('"').to_string()).unwrap_or("Linux".into());
-    let cpu = run("lscpu",&[]).await.lines().find(|l| l.contains("Model name")).map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string()).unwrap_or_default();
+    // Try /proc/cpuinfo first (locale-independent), fall back to lscpu
+    let cpu = {
+        let proc = read("/proc/cpuinfo");
+        let from_proc = proc.lines()
+            .find(|l| l.starts_with("model name"))
+            .and_then(|l| l.splitn(2,':').nth(1))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if !from_proc.is_empty() { from_proc } else {
+            run("lscpu",&[]).await.lines()
+                .find(|l| l.contains("Model name") || l.contains("Nombre del modelo") || l.contains("model name"))
+                .and_then(|l| l.splitn(2,':').nth(1))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default()
+        }
+    };
     // Parse RAM in bytes and show in GB (decimal, rounded to nearest power of 2 for display)
     let mem_bytes: u64 = run("free",&["-b"]).await.lines()
         .find(|l| l.starts_with("Mem:"))
@@ -121,7 +145,15 @@ fn esc(s: &str) -> String { s.replace('\\',"\\\\").replace('"',"\\\"").replace('
             .unwrap_or(gb.round() as u32);
         format!("{} GB", rounded)
     } else { "—".into() };
-    let gpu = run("lspci",&[]).await.lines().find(|l| l.contains("VGA")||l.contains("3D")).map(|l| l.find(": ").map(|i| l[i+2..].to_string()).unwrap_or(l.to_string())).unwrap_or_default();
+    let gpu = run("lspci",&[]).await.lines()
+        .find(|l| l.contains("VGA")||l.contains("3D"))
+        .map(|l| {
+            let s = l.find(": ").map(|i| l[i+2..].to_string()).unwrap_or(l.to_string());
+            // Strip trailing "(rev XX)"
+            let s = regex_strip_rev(&s);
+            s.trim().to_string()
+        })
+        .unwrap_or_default();
     let plasma = { let v = run("plasmashell",&["--version"]).await; v.split_whitespace().last().unwrap_or(&v).to_string() };
     format!(r#"{{"hostname":"{}","kernel":"{}","distro":"{}","cpu":"{}","ram":"{}","gpu":"{}","plasma":"{}"}}"#,
         esc(&host),esc(&kern),esc(&distro),esc(&cpu),esc(&ram),esc(&gpu),esc(&plasma))
@@ -2219,9 +2251,13 @@ fn main() {
         .manage(p2p::P2PState::default())
         .setup(move |app| {
             use tauri::Manager;
-            if is_hidden {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.hide();
+            if let Some(window) = app.get_webview_window("main") {
+                if is_hidden {
+                    let _ = window.set_skip_taskbar(true);
+                    // Stay hidden — launched as background service
+                } else {
+                    let _ = window.show();
+                    let _ = window.set_focus();
                 }
             }
             if let Some(window) = app.get_webview_window("main") {

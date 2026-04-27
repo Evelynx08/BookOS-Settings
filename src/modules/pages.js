@@ -229,7 +229,7 @@ function setupToggle(id, callback){
             this.classList.toggle('active');
             const active=this.classList.contains('active');
             const sub=this.closest('.detail-item-row')?.querySelector('.ds');
-            if(sub) sub.textContent=active?'Activado':'Desactivado';
+            if(sub&&!sub.querySelector('span')&&!sub.dataset.custom) sub.textContent=active?'Activado':'Desactivado';
             callback(active);
         });
     });
@@ -1267,6 +1267,7 @@ async function _renderBateriaContent(c){
         psMode=s.PowerSaver??'balanced';
         savedChargeLimit=Math.min(100,Math.max(50,parseInt(s.ChargeLimit)||80));
         adaptiveEnabled=(s.AdaptiveCharging??'false')==='true';
+        if(adaptiveEnabled) bprot=false; // mutually exclusive — adaptive takes priority
         // Keep _sc in sync with batch results
         Object.entries(s).forEach(([k,v])=>{if(v!=null)_sc.set(k,v);});
     }catch(e){console.error('[Batería] Error:',e);}
@@ -1316,10 +1317,12 @@ async function _renderBateriaContent(c){
     // Ajustes ANTES del gráfico
     {
         const bprotLabel=bprot?(chargeLimit>=100?'Máxima':`Hasta el ${chargeLimit}%`):'';
+        const bprotDisabled=adaptiveEnabled;
         h+=renderCard([
             renderRowItem('Ahorro de energía','Limita actividad en segundo plano',renderToggle('ps',psMode==='power-saver')),
-            renderRowItem('Protección de la batería',bprotLabel?`<span style="color:var(--blue)">${bprotLabel}</span>`:'Limita carga para alargar vida útil',renderToggle('bprot',bprot)),
-            `<div id="bprot-limit-section"${bprot?'':' style="display:none"'} style="padding:2px 20px 12px">${renderSlider('cl',savedChargeLimit,50,100)}</div>`,
+            renderRowItem('Carga adaptativa',`<span style="color:var(--${adaptiveEnabled?'blue':'tx2'})">${adaptiveEnabled?(chargeLimit<100?`Activa — límite ${chargeLimit}%`:'Activa — carga completa'):'Inactiva'}</span>`,renderToggle('adaptive-charging',adaptiveEnabled)),
+            renderRowItem('Protección de la batería',bprotDisabled?`<span style="color:var(--tx2);opacity:0.45">No disponible con carga adaptativa</span>`:(bprotLabel?`<span style="color:var(--blue)">${bprotLabel}</span>`:'Limita carga para alargar vida útil'),`<span style="opacity:${bprotDisabled?0.35:1};pointer-events:${bprotDisabled?'none':'auto'}">${renderToggle('bprot',bprot&&!bprotDisabled)}</span>`),
+            `<div id="bprot-limit-section"${(bprot&&!bprotDisabled)?'':' style="display:none"'} style="padding:2px 20px 12px">${renderSlider('cl',savedChargeLimit,50,100)}</div>`,
         ]);
     }
 
@@ -1344,6 +1347,8 @@ async function _renderBateriaContent(c){
         h+=`<div class="bat-stats-row">${chips}</div>`;
     }
 
+    // Chart + app usage — combined block
+    h+=`<div style="background:var(--card);border-radius:25px;overflow:hidden;margin-bottom:16px">`;
     // Chart — prefer CSV (per-minute, normalized) over hourly history
     {
         const _jsDayToCSV=(d)=>d===0?7:d;
@@ -1419,7 +1424,7 @@ async function _renderBateriaContent(c){
                 <span style="position:absolute;right:28px;font-size:10px;color:${_c.label}">Ahora</span>`;
             const tickTop=`<div style="position:absolute;right:0;top:0;font-size:10px;color:${_c.label}">${maxL}%</div>`;
             const tickBot=`<div style="position:absolute;right:0;bottom:0;font-size:10px;color:${_c.labelFaint}">${minL}%</div>`;
-            h+=`<div class="bat-chart">
+            h+=`<div class="bat-chart" style="background:transparent;border-radius:0;margin-bottom:0">
                 <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
                     <span class="chart-title" style="color:${_c.tx}">Hoy · ${todayRows.length} registros</span>
                 </div>
@@ -1498,7 +1503,7 @@ async function _renderBateriaContent(c){
                 const xPct=(hi/(HOURS-1)*100).toFixed(1);
                 return`<span style="position:absolute;left:${xPct}%;transform:translateX(-50%);font-size:10px;color:${_c.label};white-space:nowrap">${label}</span>`;
             }).join('');
-            h+=`<div class="bat-chart">
+            h+=`<div class="bat-chart" style="background:transparent;border-radius:0;margin-bottom:0">
                 <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
                     <span class="chart-title" style="color:${_c.tx}">Hoy</span>
                 </div>
@@ -1536,26 +1541,23 @@ async function _renderBateriaContent(c){
                     <span style="font-size:14px;font-weight:500;color:var(--tx2);min-width:52px;text-align:right">${rightLabel}</span>
                 </div>`;
             };
-            const renderAppList=(list,id='bat-app-list')=>{
-                const top=list.slice(0,6);
-                if(!top.length)return`<div class="detail-card" id="${id}"><div style="padding:14px 20px;color:var(--tx2);font-size:13px">Sin actividad significativa</div></div>`;
-                return`<div class="detail-card" id="${id}">${top.map(mkAppRow).join('')}
-                    <div style="padding:12px;text-align:center;border-top:1px solid var(--div)">
-                        <span id="bat-sys-toggle" style="font-size:13px;font-weight:500;color:var(--blue);cursor:pointer">Ver detalles</span>
-                    </div>
-                </div>`;
-            };
             const totalSharePct=Math.min(100,userApps.slice(0,6).reduce((s,a)=>s+(parseFloat(a.cpu)||0)/totalCpuAll*100,0));
-            h+=`<div style="font-size:13px;font-weight:600;color:var(--tx2);margin:18px 0 8px;padding:0 4px">Uso de la batería: ${totalSharePct.toFixed(0)}%</div>`;
-            h+=renderAppList(userApps);
+            const top=userApps.slice(0,6);
+            h+=`<div style="border-top:1px solid var(--div);padding:10px 20px 4px;font-size:13px;font-weight:600;color:var(--tx2)">Uso de la batería: ${totalSharePct.toFixed(0)}%</div>`;
+            if(top.length){
+                h+=top.map(mkAppRow).join('');
+                h+=`<div style="padding:12px;text-align:center;border-top:1px solid var(--div)"><span id="bat-sys-toggle" style="font-size:13px;font-weight:500;color:var(--blue);cursor:pointer">Ver detalles</span></div>`;
+            } else {
+                h+=`<div style="padding:14px 20px;color:var(--tx2);font-size:13px">Sin actividad significativa</div>`;
+            }
         }
     }
+    h+=`</div>`; // close chart+apps combined card
 
     // Ajustes adicionales al fondo (atenuar + porcentaje)
     h+=renderCard([
         renderRowItem('Atenuar pantalla automáticamente','Atenúa cuando la batería es baja',renderToggle('dim-low',dimlow)),
         renderRowItem('Mostrar porcentaje batería','En el widget de batería',renderToggle('show-pct',showpct)),
-        renderInfoItem('Información de la batería',`Capacidad: ${Math.min(ef,efd).toFixed(1)} / ${efd.toFixed(1)} Wh · Salud: ${health}%`),
     ]);
 
     // ── USB-C charging speed indicator ──
@@ -1578,57 +1580,13 @@ async function _renderBateriaContent(c){
         ].filter(Boolean));
     }
 
-    // ── Gráfica térmica ──
-    if(thermalData.ok && thermalData.rows.length>10){
-        const rows=thermalData.rows.slice(-180); // últimos 6 min @ 2s
-        const maxT=Math.max(...rows.map(r=>Math.max(r.cpu_pkg,r.cpu_core,r.nvme,r.wifi)),60);
-        const minT=Math.min(...rows.map(r=>Math.min(r.cpu_pkg||200,r.cpu_core||200)),30);
-        const H=80, W=rows.length;
-        const scale=(v)=>H-Math.max(0,Math.min(H,((v-minT)/(maxT-minT))*H));
-        const line=(key,color)=>{
-            const pts=rows.map((r,i)=>`${(i/(W-1))*100}%,${scale(r[key]||minT).toFixed(1)}`).join(' ');
-            return `<polyline fill="none" stroke="${color}" stroke-width="1.5" points="${pts}" vector-effect="non-scaling-stroke"/>`;
-        };
-        const lastPkg=rows[rows.length-1].cpu_pkg;
-        const lastFan=rows[rows.length-1].fan;
-        const lastProf=rows[rows.length-1].profile;
-        h+=renderSection('Térmica (últimos 6 min)');
-        h+=`<div class="bat-chart" style="padding:14px 16px">
-            <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--tx2);margin-bottom:6px">
-                <span>CPU: <strong style="color:var(--tx)">${lastPkg}°C</strong></span>
-                <span>${lastFan>0?`Fan ${lastFan} RPM · `:''}Perfil: ${esc(lastProf||'—')}</span>
-            </div>
-            <svg viewBox="0 0 100 ${H}" preserveAspectRatio="none" style="width:100%;height:${H}px;display:block;background:var(--sbg);border-radius:8px">
-                ${line('cpu_pkg','#ff6b6b')}
-                ${line('cpu_core','#ffa94d')}
-                ${line('nvme','#4dabf7')}
-                ${line('wifi','#51cf66')}
-            </svg>
-            <div class="bat-chart-legend" style="margin-top:6px;font-size:11px">
-                <span><span class="chart-legend-dot" style="background:#ff6b6b"></span>CPU pkg</span>
-                <span><span class="chart-legend-dot" style="background:#ffa94d"></span>CPU core</span>
-                <span><span class="chart-legend-dot" style="background:#4dabf7"></span>NVMe</span>
-                <span><span class="chart-legend-dot" style="background:#51cf66"></span>WiFi</span>
-                <span style="color:var(--tx2)">· ${minT}°–${maxT}°C</span>
-            </div>
-        </div>`;
-    }
 
-    // ── Carga adaptativa (BookOS CSV system) ──
+    // ── Carga adaptativa — predicciones por día ──
     {
         const days=['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'];
-        const jsDayToCSV=(d)=>d===0?7:d; // JS: 0=Sun…6=Sat → CSV: 1=Mon…7=Sun
+        const jsDayToCSV=(d)=>d===0?7:d;
         const todayCSV=jsDayToCSV(new Date().getDay());
 
-        // Adaptive charging toggle + current threshold
-        const adaptiveLabel=adaptiveEnabled?(chargeLimit<100?`Activa — límite ${chargeLimit}%`:'Activa — carga completa'):'Inactiva';
-        const umbralText=chargeLimit<100?`${chargeLimit}% (protección activa)`:'100% (sin límite)';
-        h+=renderSection('Carga adaptativa')+renderCard([
-            renderRowItem('Carga adaptativa',`<span style="color:var(--${adaptiveEnabled?'blue':'tx2'})">${adaptiveLabel}</span>`,renderToggle('adaptive-charging',adaptiveEnabled)),
-            `<div class="detail-item"><span class="dt">Umbral actual</span><span class="ds" id="umbral-val">${umbralText}</span></div>`,
-        ]);
-
-        // Predictions per weekday
         if(adaptivePreds.ok&&adaptivePreds.predictions.length>0){
             const predsMap=new Map(adaptivePreds.predictions.map(p=>[p.day,p]));
             let predRows='';
@@ -1705,13 +1663,19 @@ async function _renderBateriaContent(c){
         toast(a?'Ahorro de energía activado':'Rendimiento normal', ok?'✓':'⚠');
     });
     setupToggle('bprot',async a=>{
+        if(a){
+            // Disable adaptive charging if active (mutually exclusive)
+            const adaptiveToggle=document.querySelector('[data-toggle="adaptive-charging"]');
+            if(adaptiveToggle?.classList.contains('on')){
+                adaptiveToggle.classList.remove('on');
+                adaptiveToggle.setAttribute('aria-checked','false');
+                setSetting('AdaptiveCharging','false');
+                try{await tauriInvoke('set_adaptive_charging',{enabled:false});}catch(e){}
+            }
+        }
         const section=document.getElementById('bprot-limit-section');
         if(section)section.style.display=a?'':'none';
         const currentLimit=parseInt(document.getElementById('cl')?.value)||80;
-        // Sync umbral text to match bprot state
-        const umbral=document.getElementById('umbral-val');
-        if(umbral)umbral.textContent=a&&currentLimit<100?`${currentLimit}% (protección activa)`:'100% (sin límite)';
-        // await the writes so they complete before the user can close the app
         await Promise.all([
             setSetting('BatteryProtection',a?'true':'false'),
             setSetting('ChargeLimit',String(currentLimit)),
@@ -1775,17 +1739,27 @@ async function _renderBateriaContent(c){
 
     setupToggle('adaptive-charging',async a=>{
         if(a){
+            // Disable battery protection if active (mutually exclusive)
+            const bprotToggle=document.querySelector('[data-toggle="bprot"]');
+            if(bprotToggle?.classList.contains('on')){
+                bprotToggle.classList.remove('on');
+                bprotToggle.setAttribute('aria-checked','false');
+                const section=document.getElementById('bprot-limit-section');
+                if(section)section.style.display='none';
+                setSetting('BatteryProtection','false');
+                try{await tauriInvoke('set_charge_limit',{limit:100});}catch(e){}
+            }
             // Show info popup before enabling
             const toggle=document.querySelector('[data-toggle="adaptive-charging"]');
-            // Revert toggle visually while dialog is open
-            toggle?.classList.remove('active');
+            toggle?.classList.remove('on');
             showDialog(
                 'Activar carga adaptativa',
-                `<p style="margin:0 0 10px">La carga adaptativa aprende cuándo usas el equipo y detiene la carga antes de que llegue al 100%, completándola justo a tiempo.</p><p style="margin:0;font-size:12px;opacity:0.6">Se usará el límite de protección configurado como umbral de parada. Para obtener mejores predicciones, deja el equipo enchufado durante la noche.</p>`,
+                `<p style="margin:0 0 10px">La carga adaptativa aprende cuándo usas el equipo y detiene la carga antes de que llegue al 100%, completándola justo a tiempo.</p><p style="margin:0;font-size:12px;opacity:0.6">Para obtener mejores predicciones, deja el equipo enchufado durante la noche.</p>`,
                 {
                     confirmText:'Activar',
                     onConfirm:async()=>{
-                        toggle?.classList.add('active');
+                        toggle?.classList.add('on');
+                        toggle?.setAttribute('aria-checked','true');
                         setSetting('AdaptiveCharging','true');
                         try{await tauriInvoke('set_adaptive_charging',{enabled:true});}catch(e){}
                         toast('Carga adaptativa activada','🔋');
@@ -2039,13 +2013,11 @@ async function saveSchedule(enabled){
 }
 
 // Fingerprint idle animation — reveals blue rings from center outward
-function _startFpIdleAnim(){
-    const svg=document.getElementById('fp-svg-main');
+function _startFpIdleAnimById(svgId='fp-svg-main'){
+    const svg=document.getElementById(svgId);
     if(!svg)return;
-    const blueRings=[...svg.querySelectorAll('.fp-zone')].reverse(); // innermost first
-    // Start all blue rings hidden
+    const blueRings=[...svg.querySelectorAll('.fp-zone')].reverse();
     blueRings.forEach(r=>{r.style.opacity='0';r.style.transition='none';});
-    // Reveal from center outward with stagger
     blueRings.forEach((r,i)=>{
         setTimeout(()=>{
             r.style.transition='opacity 0.4s ease-out';
@@ -2053,6 +2025,7 @@ function _startFpIdleAnim(){
         }, 300 + i*100);
     });
 }
+function _startFpIdleAnim(){_startFpIdleAnimById('fp-svg-main');}
 
 export async function renderBloqueo(c){
     c.innerHTML=renderHeader('Pantalla de bloqueo')+renderSkeleton(3);
@@ -2121,28 +2094,137 @@ export async function renderBloqueo(c){
         </div>
     </div>`;
 
+    const lockType=await getSetting('LockType','password').catch(()=>'password');
+    const lockTypeLabel=lockType==='pin'?'PIN':'Contraseña del sistema';
+
     c.innerHTML=renderHeader('Pantalla de bloqueo y AOD')+
         renderCard([
-            renderInfoItem('Tipo de bloqueo','Contraseña del sistema'),
-            `<div class="detail-item"><span class="dt">Tiempo de espera</span><div class="slider-container"><input type="range" class="filled" id="lt" min="1" max="30" value="${timeout}" style="--fill:${((timeout-1)/29)*100}%"><span class="slider-label" id="lt-l">${timeout} min</span></div></div>`
-        ])+fpHtml+
-        renderSection('Always On Display')+renderCard([
-            renderRowItem('AOD','Muestra información cuando la pantalla está apagada',renderToggle('aod',aod))
-        ])+
-        renderSection('Book Bar')+renderCard([
+            `<div class="detail-item detail-item-row" id="lock-type-row" style="cursor:pointer">
+                <div class="detail-texts"><span class="dt">Tipo de bloqueo</span><span class="ds" id="lock-type-label">${lockTypeLabel}</span></div>
+                <span style="color:var(--tx2);font-size:18px;line-height:1">›</span>
+            </div>`,
+            `<div class="detail-item"><span class="dt">Tiempo de espera</span><div class="slider-container"><input type="range" class="filled" id="lt" min="1" max="30" value="${timeout}" style="--fill:${((timeout-1)/29)*100}%"><span class="slider-label" id="lt-l">${timeout} min</span></div></div>`,
+            fp.available?`<div class="detail-item detail-item-row" id="fp-open-row" style="cursor:pointer">
+                <div class="detail-texts"><span class="dt">Configurar huella</span><span class="ds">${enrolled?'Huella registrada':'Contraseña huella digital'}</span></div>
+                <span style="color:var(--tx2);font-size:18px;line-height:1">›</span>
+            </div>`:''
+        ].filter(Boolean))+
+        renderCard([
+            renderRowItem('AOD','Muestra información cuando la pantalla está apagada',renderToggle('aod',aod)),
             renderRowItem('Mostrar Book Bar','Pastilla dinámica con música, rutinas y batería',renderToggle('bookbar',bookBarEnabled))
         ])+sddmHtml;
 
     setupSlider('lt',async v=>{try{await tauriInvoke('set_lock_timeout',{minutes:parseInt(v)})}catch(e){}const l=document.getElementById('lt-l');if(l)l.textContent=v+' min';toast('Tiempo de espera: '+v+' min');},false);
+
+    // Lock type — inline dropdown
+    const _lockOpts=[
+        {val:'password',label:'Contraseña',sub:'Contraseña clásica'},
+        {val:'pin',     label:'PIN',        sub:'Hará autologin'},
+    ];
+    document.getElementById('lock-type-row')?.addEventListener('click',()=>{
+        const row=document.getElementById('lock-type-row');
+        const existing=document.getElementById('lock-type-dropdown');
+        if(existing){existing.remove();return;}
+        const cur=document.getElementById('lock-type-label')?.textContent;
+        const dd=document.createElement('div');
+        dd.id='lock-type-dropdown';
+        dd.style.cssText='border-top:1px solid var(--div)';
+        dd.innerHTML=_lockOpts.map(o=>{
+            const active=(o.val==='password'&&(cur==='Contraseña del sistema'||cur==='Contraseña'))||(o.val==='pin'&&cur==='PIN');
+            return`<div class="detail-item detail-item-row lock-type-opt" data-val="${o.val}" style="cursor:pointer;padding:12px 20px;display:flex;justify-content:space-between;align-items:center">
+                <div class="detail-texts">
+                    <span class="dt" style="font-size:15px;${active?'color:var(--blue);font-weight:600':''}">${o.label}</span>
+                    <span class="ds">${o.sub}</span>
+                </div>
+                ${active?'<span style="color:var(--blue);font-size:16px">✓</span>':''}
+            </div>`;
+        }).join('<div style="height:1px;background:var(--div);margin:0 20px"></div>');
+        row.after(dd);
+        dd.querySelectorAll('.lock-type-opt').forEach(opt=>{
+            opt.addEventListener('click',async()=>{
+                const val=opt.dataset.val;
+                await setSetting('LockType',val);
+                const label=document.getElementById('lock-type-label');
+                if(label)label.textContent=val==='pin'?'PIN':'Contraseña del sistema';
+                dd.remove();
+                if(val==='pin'){
+                    try{await tauriInvoke('run_command',{cmd:'sh',args:['-c','klogin --configure-pin 2>/dev/null']});}catch(e){}
+                }
+                toast(val==='pin'?'Tipo de bloqueo: PIN':'Tipo de bloqueo: Contraseña');
+            });
+        });
+        // close on outside click
+        setTimeout(()=>document.addEventListener('click',function _close(e){
+            if(!dd.contains(e.target)&&e.target!==row&&!row.contains(e.target)){dd.remove();document.removeEventListener('click',_close);}
+        }),50);
+    });
+
+    // Fingerprint popup
+    if(fp.available){
+        document.getElementById('fp-open-row')?.addEventListener('click',()=>{
+            showDialog('Configurar huella',
+                `<div style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:8px 0">
+                    <div class="sensor-wrapper" id="fp-rings-pop">${fpSvg.replace('id="fp-svg-main"','id="fp-svg-pop"').replace('id="fp-rings"','id="fp-rings-inner"')}</div>
+                    <p id="fp-status-pop" class="fp-hello-status" style="text-align:center;color:var(--tx2);font-size:14px">${enrolled?'Huella configurada. Puedes volver a registrarla.':'Coloca el dedo en el sensor para registrar'}</p>
+                    <button class="btn btn-primary" id="fp-enroll-pop" style="min-width:160px">${enrolled?'Volver a registrar':'Iniciar registro'}</button>
+                </div>`,
+                {confirmText:null,cancelText:'Cerrar',onCancel:()=>{}}
+            );
+            requestAnimationFrame(()=>{
+                _startFpIdleAnimById('fp-svg-pop');
+                document.getElementById('fp-enroll-pop')?.addEventListener('click',async()=>{
+                    const btn=document.getElementById('fp-enroll-pop');
+                    const status=document.getElementById('fp-status-pop');
+                    const svg=document.getElementById('fp-svg-pop');
+                    const blueRings=svg?[...svg.querySelectorAll('.fp-zone')]:[];
+                    btn.disabled=true;btn.textContent='Registrando...';
+                    status.textContent='Coloca tu dedo repetidamente en el sensor...';
+                    let scanActive=true,tick=0;
+                    const reversed=[...blueRings].reverse();
+                    const scanPulse=()=>{
+                        if(!scanActive)return;
+                        const idx=tick%reversed.length;
+                        reversed.forEach((r,i)=>{
+                            const dist=Math.abs(idx-i);
+                            r.style.opacity=dist===0?'1':dist===1?'0.7':dist===2?'0.4':'0.15';
+                            r.style.transition='opacity 0.15s ease';
+                        });
+                        tick++;
+                        setTimeout(()=>requestAnimationFrame(scanPulse),120);
+                    };
+                    requestAnimationFrame(scanPulse);
+                    try{
+                        const r=JSON.parse(await tauriInvoke('enroll_fingerprint'));
+                        scanActive=false;
+                        blueRings.forEach(ring=>{ring.style.opacity='1';ring.style.transition='opacity 0.3s ease';});
+                        if(r.ok){
+                            status.textContent='¡Huella registrada correctamente!';
+                            btn.textContent='Volver a registrar';
+                            const lbl=document.getElementById('fp-open-row')?.querySelector('.ds');
+                            if(lbl)lbl.textContent='Huella registrada';
+                            toast('Huella registrada','✅');
+                        } else {
+                            status.textContent='No se pudo registrar. Inténtalo de nuevo.';
+                            btn.textContent='Reintentar';
+                        }
+                    }catch(e){
+                        scanActive=false;
+                        blueRings.forEach(ring=>{ring.style.opacity='1';ring.style.transition='opacity 0.3s ease';});
+                        status.textContent='Error: asegúrate de que el sensor está disponible';
+                        btn.textContent='Reintentar';
+                    }
+                    btn.disabled=false;
+                });
+            });
+        });
+    }
+
     setupToggle('aod',async a=>{setSetting('AOD',a?'true':'false');toast(a?'AOD activado':'AOD desactivado');});
     setupToggle('bookbar',async a=>{
         setSetting('BookBarEnabled',a?'true':'false');
         try{await tauriInvoke('run_command',{cmd:'sh',args:['-c',`mkdir -p "$HOME/.config" && echo '{"enabled":${a}}' > "$HOME/.config/bookos-bookbar.json"`]});}catch(e){}
         toast(a?'Book Bar activada':'Book Bar desactivada');
     });
-
-    // Fingerprint: progressive detection animation (center → outer, like a real scan)
-    _startFpIdleAnim();
 
     // SDDM preview
     let _sddmCfg={variant:sddmCfg.variant,background:sddmCfg.background,bgImage:sddmCfg.bgImage};
@@ -2256,61 +2338,6 @@ export async function renderBloqueo(c){
     });
 
     // Fingerprint enroll
-    document.getElementById('fp-enroll')?.addEventListener('click',async()=>{
-        const btn=document.getElementById('fp-enroll');
-        const wrap=document.getElementById('fp-rings');
-        const status=document.getElementById('fp-status');
-        const svg=document.getElementById('fp-svg-main');
-        const blueRings=svg?[...svg.querySelectorAll('.fp-zone')]:[];
-        btn.disabled=true;btn.textContent='Registrando...';
-        wrap?.classList.add('fp-scanning');
-        status.textContent='Coloca tu dedo repetidamente en el sensor...';
-
-        // JS-driven sweep pulse — rings light up from center outward in a loop
-        let scanActive=true;
-        let tick=0;
-        const reversed=[...blueRings].reverse(); // innermost first
-        const scanPulse=()=>{
-            if(!scanActive)return;
-            const idx=tick%reversed.length;
-            reversed.forEach((r,i)=>{
-                const dist=Math.abs(idx-i);
-                const op=dist===0?'1':dist===1?'0.7':dist===2?'0.4':'0.15';
-                r.style.opacity=op;
-                r.style.transition='opacity 0.15s ease';
-            });
-            tick++;
-            setTimeout(()=>requestAnimationFrame(scanPulse),120);
-        };
-        requestAnimationFrame(scanPulse);
-
-        try{
-            const r=JSON.parse(await tauriInvoke('enroll_fingerprint'));
-            scanActive=false;
-            wrap?.classList.remove('fp-scanning');
-            // Show all rings fully
-            blueRings.forEach(ring=>{ring.style.opacity='1';ring.style.transition='opacity 0.3s ease';});
-            if(r.ok){
-                wrap?.classList.add('fp-success');
-                status.textContent='¡Huella registrada correctamente!';
-                status.classList.add('success-text');
-                btn.textContent='Volver a registrar';
-                toast('Huella registrada','✅');
-            } else {
-                wrap?.classList.add('fp-error');
-                status.textContent='No se pudo registrar. Inténtalo de nuevo.';
-                btn.textContent='Reintentar';
-                setTimeout(()=>{wrap?.classList.remove('fp-error');},2000);
-            }
-        }catch(e){
-            scanActive=false;
-            wrap?.classList.remove('fp-scanning');
-            blueRings.forEach(ring=>{ring.style.opacity='1';ring.style.transition='opacity 0.3s ease';});
-            status.textContent='Error: asegúrate de que el sensor está disponible';
-            btn.textContent='Reintentar';
-        }
-        btn.disabled=false;
-    });
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -2684,13 +2711,6 @@ export async function renderAcerca(c){
         renderInfoItem('Tarjeta gráfica',esc(i.gpu)),
     ]);
 
-    // Links section (Samsung style)
-    h+=renderSection('Información adicional');
-    h+=renderCard([
-        `<div class="detail-item detail-item-row" style="cursor:pointer" id="about-legal"><span class="dt">Información legal</span><span style="color:var(--tx2);font-size:18px">›</span></div>`,
-        `<div class="detail-item detail-item-row" style="cursor:pointer" id="about-soft-info"><span class="dt">Información de software</span><span style="color:var(--tx2);font-size:18px">›</span></div>`,
-        `<div class="detail-item detail-item-row" style="cursor:pointer" onclick="window.openPage('actualizacion')"><span class="dt" style="color:var(--blue)">Actualización de software</span><span style="color:var(--tx2);font-size:18px">›</span></div>`,
-    ]);
 
     c.innerHTML=h;
 
@@ -3168,7 +3188,17 @@ function rbActionLabel(a){
     return d.label;
 }
 
+const SNAPS_KEY='bookos_routine_snaps';
+function _loadSnaps(){try{return JSON.parse(localStorage.getItem(SNAPS_KEY)||'{}');}catch{return{};}}
+function _saveSnap(id,snap){const s=_loadSnaps();s[id]=snap;localStorage.setItem(SNAPS_KEY,JSON.stringify(s));}
+function _deleteSnap(id){const s=_loadSnaps();delete s[id];localStorage.setItem(SNAPS_KEY,JSON.stringify(s));}
+function _getSnap(id){return _loadSnaps()[id]||null;}
+
 export async function executeRoutine(routine){
+    if(routine.undo){
+        const snap=await snapshotForRoutine(routine);
+        _saveSnap(routine.id,snap);
+    }
     for(const a of routine.actions){
         try{
             if(a.type==='performance')await tauriInvoke('set_performance_mode',{mode:a.value});
@@ -3224,9 +3254,19 @@ function renderRoutinesList(routines){
 
 function bindRoutineEvents(c){
     c.querySelectorAll('[data-routine-toggle]').forEach(el=>{
-        el.addEventListener('click',()=>{
+        el.addEventListener('click',async()=>{
             const routines=getRoutines(),r=routines.find(x=>x.id===el.dataset.routineToggle);
-            if(r){r.enabled=!r.enabled;saveRoutines(routines);el.classList.toggle('active',r.enabled);toast(r.enabled?`"${r.name}" activada`:`"${r.name}" desactivada`);}
+            if(!r)return;
+            r.enabled=!r.enabled;
+            saveRoutines(routines);
+            el.classList.toggle('active',r.enabled);
+            if(!r.enabled&&r.undo){
+                const snap=_getSnap(r.id);
+                if(snap){await restoreSnapshot(snap);_deleteSnap(r.id);toast(`"${r.name}" desactivada — estado restaurado`,'↩');}
+                else{toast(`"${r.name}" desactivada`);}
+            } else {
+                toast(r.enabled?`"${r.name}" activada`:`"${r.name}" desactivada`);
+            }
         });
     });
     c.querySelectorAll('[data-run]').forEach(btn=>{
@@ -5479,19 +5519,19 @@ export async function renderPantallaInicio(c){
         getSetting('icon_labels','true').then(v=>v==='true'),
     ]);
     let h=renderHeader('Pantalla de inicio');
+    const sizes=[['small','Pequeño'],['medium','Mediano'],['large','Grande']];
     h+=renderSection('Escritorio');
     h+=renderCard([
-        renderRowItem('Iconos en el escritorio','Muestra iconos de archivos y apps en el fondo',renderToggle('desk-icons',desktopIcons)),
-        renderRowItem('Rejilla de alineación','Ajusta los iconos automáticamente a la cuadrícula',renderToggle('desk-grid',gridSnap)),
+        renderRowItem('Iconos en el escritorio','Muestra iconos de archivos y apps de fondo',renderToggle('desk-icons',desktopIcons)),
+        renderRowItem('Rejilla de alineacion','Ajusta los iconos automáticamente a la cuadricula',renderToggle('desk-grid',gridSnap)),
         renderRowItem('Etiquetas de iconos','Muestra el nombre debajo de cada icono',renderToggle('desk-labels',showLabels)),
+        `<div class="detail-item detail-item-row">
+            <div class="detail-texts"><span class="dt">Tamaño de iconos</span><span class="ds">Cambia el tamaño de los iconos en el escritorio</span></div>
+            <div class="seg-ctrl">${sizes.map(([k,l])=>`<button class="seg-btn${iconSize===k?' active':''}" data-size="${k}">${l}</button>`).join('')}</div>
+        </div>`,
     ]);
-    h+=renderSection('Tamaño de iconos');
-    const sizes=[['small','Pequeño'],['medium','Mediano'],['large','Grande']];
-    h+=`<div class="detail-card" style="padding:12px 16px;display:flex;gap:8px;flex-wrap:wrap">
-        ${sizes.map(([k,l])=>`<button class="buds-eq-btn${iconSize===k?' active':''}" data-size="${k}" style="padding:7px 16px;border-radius:20px;border:1.5px solid ${iconSize===k?'var(--blue)':'var(--brd)'};background:${iconSize===k?'var(--blue)':'transparent'};color:${iconSize===k?'#fff':'var(--tx)'};font-size:13px;cursor:pointer;transition:all .15s">${l}</button>`).join('')}
-    </div>`;
-    h+=renderSection('Panel y barra de tareas');
-    const dockPositions=[['top','Arriba'],['bottom','Abajo'],['left','Izquierda'],['right','Derecha']];
+    h+=renderSection('Posicion de la barra de tareas');
+    const dockPositions=[['bottom','Abajo'],['left','Izquierda'],['right','Derecha']];
     h+=renderCard(dockPositions.map(([k,l])=>`<div class="detail-item detail-item-row" style="cursor:pointer" data-dock="${k}">
         <span class="dt" style="flex:1">${l}</span>
         <div style="width:20px;height:20px;border-radius:50%;border:2px solid ${dockPos===k?'var(--blue)':'var(--brd)'};background:${dockPos===k?'var(--blue)':'transparent'};flex-shrink:0;display:flex;align-items:center;justify-content:center">
@@ -5501,11 +5541,11 @@ export async function renderPantallaInicio(c){
     h+=renderSection('Accesos directos');
     h+=renderCard([
         `<div class="detail-item detail-item-row" style="cursor:pointer" id="open-widget-browser">
-            <div style="flex:1"><span class="dt">Añadir widgets</span><span class="ds">Personaliza tu escritorio con widgets de Plasma</span></div>
+            <div class="detail-texts"><span class="dt">Añadir widgets</span><span class="ds">Personaliza tu escritorio con widgets de Plasma</span></div>
             <div style="color:var(--tx2);flex-shrink:0">${SVGI.chevronR}</div>
         </div>`,
         `<div class="detail-item detail-item-row" style="cursor:pointer" id="open-global-theme">
-            <div style="flex:1"><span class="dt">Tema global</span><span class="ds">Gestiona apariencia del escritorio completo</span></div>
+            <div class="detail-texts"><span class="dt">Tema global</span><span class="ds">Gestiona apariencia del escritorio completo</span></div>
             <div style="color:var(--tx2);flex-shrink:0">${SVGI.chevronR}</div>
         </div>`,
     ]);
@@ -5520,10 +5560,7 @@ export async function renderPantallaInicio(c){
         btn.addEventListener('click',()=>{
             setSetting('icon_size',btn.dataset.size);
             c.querySelectorAll('[data-size]').forEach(b=>{
-                const sel=b.dataset.size===btn.dataset.size;
-                b.style.borderColor=sel?'var(--blue)':'var(--brd)';
-                b.style.background=sel?'var(--blue)':'transparent';
-                b.style.color=sel?'#fff':'var(--tx)';
+                b.classList.toggle('active',b.dataset.size===btn.dataset.size);
             });
             toast('Tamaño de icono: '+btn.textContent);
         });
