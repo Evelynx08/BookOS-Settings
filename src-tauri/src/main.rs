@@ -2263,19 +2263,7 @@ fn main() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_icon(tauri::include_image!("icons/icon.png"));
             }
-            // Write a .desktop file so KDE Plasma uses the right icon in alt+tab / app drawer
-            if let Ok(home) = std::env::var("HOME") {
-                let apps_dir = format!("{}/.local/share/applications", home);
-                let _ = fs::create_dir_all(&apps_dir);
-                let icon_path = std::env::current_dir()
-                    .unwrap_or_default()
-                    .join("src/assets/settings.png");
-                let desktop = format!(
-                    "[Desktop Entry]\nName=Ajustes\nExec=bookos-settings\nIcon={}\nType=Application\nStartupWMClass=bookos-settings\nNoDisplay=true\n",
-                    icon_path.display()
-                );
-                let _ = fs::write(format!("{}/bookos-settings-dev.desktop", apps_dir), desktop);
-            }
+            // Removed dynamic creation of bookos-settings-dev.desktop to fix KDE Plasma pin icon issues.
             
             // ── Background battery check thread ───────────────────────
             std::thread::spawn(|| {

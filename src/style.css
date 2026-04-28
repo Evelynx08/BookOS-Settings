@@ -671,25 +671,32 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 
 /* Blue overlay ridges */
 .fp-zone{stroke:var(--fp-blue);transition:stroke .3s ease, opacity .15s ease}
+.fp-zone.fp-drawing{transition:stroke-dashoffset 0.55s cubic-bezier(0.22,1,0.36,1),stroke 0.3s ease,opacity 0.2s ease;}
 
 /* ── Scanning state ── */
 .sensor-wrapper.fp-scanning{animation:fp-scan-breathe 1.5s ease-in-out infinite}
 .sensor-wrapper.fp-scanning .fp-base{opacity:.15}
 @keyframes fp-scan-breathe{
     0%,100%{filter:drop-shadow(0 0 4px var(--fp-glow))}
-    50%{filter:drop-shadow(0 0 16px var(--fp-glow))}
+    50%{filter:drop-shadow(0 0 18px var(--fp-glow))}
 }
+.fp-laser{position:absolute;left:0;right:0;height:28px;top:0;border-radius:4px;background:linear-gradient(to bottom,transparent 0%,rgba(50,115,246,0.12) 20%,rgba(50,115,246,0.45) 50%,rgba(50,115,246,0.12) 80%,transparent 100%);pointer-events:none;opacity:0;transform:translateY(-28px);will-change:transform,opacity;}
+.sensor-wrapper.fp-scanning .fp-laser{opacity:1;animation:fp-laser-sweep 1.8s linear infinite;}
+@keyframes fp-laser-sweep{0%{transform:translateY(-28px)}100%{transform:translateY(220px)}}
 
 /* ── Success state ── */
-.sensor-wrapper.fp-success .fp-zone{stroke:var(--green,#32d74b)!important;filter:drop-shadow(0 0 10px rgba(50,215,75,.4))}
+.sensor-wrapper.fp-success .fp-zone{stroke:var(--green,#32d74b)!important}
 .sensor-wrapper.fp-success .fp-base{stroke:var(--green,#32d74b)!important;opacity:.25}
 .sensor-wrapper.fp-success .mask-anim{stroke-dashoffset:0!important;animation:none}
-.sensor-wrapper.fp-success{animation:fp-success-scale .4s cubic-bezier(.34,1.56,.64,1)}
+.sensor-wrapper.fp-success{animation:fp-success-scale .4s cubic-bezier(.34,1.56,.64,1),fp-success-glow .7s ease-in-out .1s forwards;}
 @keyframes fp-success-scale{0%{transform:scale(.95)}100%{transform:scale(1)}}
+@keyframes fp-success-glow{0%{filter:drop-shadow(0 0 0px rgba(50,215,75,0))}45%{filter:drop-shadow(0 0 22px rgba(50,215,75,0.85))}100%{filter:drop-shadow(0 0 6px rgba(50,215,75,0.2))}}
 
 /* ── Error state ── */
-.sensor-wrapper.fp-error .fp-zone{stroke:var(--red,#ff3b30)!important;filter:drop-shadow(0 0 10px rgba(255,59,48,.4))}
-.sensor-wrapper.fp-error .fp-base{stroke:var(--red,#ff3b30)!important;opacity:.25}
+:root{--fp-red:#c0392b}
+.dark-mode,:root:not(.light-mode){--fp-red:#e05252}
+.sensor-wrapper.fp-error .fp-zone{stroke:var(--fp-red)!important}
+.sensor-wrapper.fp-error .fp-base{stroke:var(--fp-red)!important;opacity:.25}
 .sensor-wrapper.fp-error .mask-anim{stroke-dashoffset:0!important;animation:none}
 .sensor-wrapper.fp-error{animation:fp-shake .4s ease-in-out}
 @keyframes fp-shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-6px)}40%{transform:translateX(6px)}60%{transform:translateX(-4px)}80%{transform:translateX(4px)}}

@@ -97,13 +97,13 @@ function showDialog(title,msg,{confirmText='Confirmar',confirmClass='confirm',ca
         ${msg?`<div class="bk-dialog-msg">${msg}</div>`:''}
         <div class="bk-dialog-btns">
             <button class="bk-dbtn cancel" id="d-cancel">${cancelText}</button>
-            <button class="bk-dbtn ${confirmClass}" id="d-ok">${confirmText}</button>
+            ${confirmText!=null?`<button class="bk-dbtn ${confirmClass}" id="d-ok">${confirmText}</button>`:''}
         </div>
     </div>`;
     document.body.appendChild(ov);
     const close=()=>ov.remove();
     ov.querySelector('#d-cancel').onclick=()=>{close();onCancel?.();};
-    ov.querySelector('#d-ok').onclick=()=>{close();onConfirm?.();};
+    ov.querySelector('#d-ok')?.addEventListener('click',()=>{close();onConfirm?.();});
     ov.addEventListener('click',e=>{if(e.target===ov){close();onCancel?.();}});
 }
 
@@ -2012,18 +2012,57 @@ async function saveSchedule(enabled){
     try{await tauriInvoke('set_theme_schedule',{enabled,light_time:lt,dark_time:dt,light_theme:ltheme,dark_theme:dtheme});}catch(e){}
 }
 
-// Fingerprint idle animation — reveals blue rings from center outward
+// Fingerprint draw-in animation — strokes materialize center→outward via stroke-dashoffset
+const _FP_CIRCS=[624,542,460,379,300,227,161,101,50]; // outermost→innermost (index matches DOM order)
+const _FP_DASH=[
+    '30 9 22 8 16 7 10 6',
+    '26 8 20 7 13 6 8 5',
+    '23 8 17 6 12 5 7 5',
+    '20 7 15 6 10 5',
+    '17 6 13 5 8 4',
+    '15 6 11 4 7 4',
+    '13 5 9 4',
+    '10 4 7 3',
+    '8 3'
+];
 function _startFpIdleAnimById(svgId='fp-svg-main'){
     const svg=document.getElementById(svgId);
     if(!svg)return;
-    const blueRings=[...svg.querySelectorAll('.fp-zone')].reverse();
-    blueRings.forEach(r=>{r.style.opacity='0';r.style.transition='none';});
-    blueRings.forEach((r,i)=>{
-        setTimeout(()=>{
-            r.style.transition='opacity 0.4s ease-out';
-            r.style.opacity='1';
-        }, 300 + i*100);
+    const zones=[...svg.querySelectorAll('.fp-zone')]; // 10 elements: 0=outer…8=inner ring, 9=dot
+    const strokable=zones.slice(0,9);
+    const dot=zones[9];
+    // Reset: hide all, set dashoffset to full circumference (invisible)
+    strokable.forEach((r,i)=>{
+        r.classList.remove('fp-drawing');
+        r.style.transition='none';
+        r.style.opacity='1';
+        r.style.strokeDasharray=`${_FP_CIRCS[i]} ${_FP_CIRCS[i]}`;
+        r.style.strokeDashoffset=String(_FP_CIRCS[i]);
     });
+    if(dot){dot.style.transition='none';dot.style.opacity='0';}
+    // Draw center→out: reverse so index 0 = innermost ring (rx=7)
+    const rev=[...strokable].reverse();
+    const revDash=[..._FP_DASH].reverse();
+    const revCirc=[..._FP_CIRCS].reverse();
+    rev.forEach((r,i)=>{
+        setTimeout(()=>{
+            r.classList.add('fp-drawing');
+            requestAnimationFrame(()=>requestAnimationFrame(()=>{
+                r.style.strokeDashoffset='0';
+            }));
+            // Restore original ridge pattern after transition completes
+            setTimeout(()=>{
+                r.style.strokeDasharray=revDash[i];
+                r.classList.remove('fp-drawing');
+            },650);
+        }, 200 + i*110);
+    });
+    if(dot){
+        setTimeout(()=>{
+            dot.style.transition='opacity 0.35s ease-out';
+            dot.style.opacity='1';
+        }, 200 + rev.length*110);
+    }
 }
 function _startFpIdleAnim(){_startFpIdleAnimById('fp-svg-main');}
 
@@ -2072,7 +2111,7 @@ export async function renderBloqueo(c){
 
     const fpHtml=fp.available?renderSection('Biometría')+`<div class="detail-card">
         <div class="fp-hello-wrap" id="fp-area">
-            <div class="sensor-wrapper" id="fp-rings">${fpSvg}</div>
+            <div class="sensor-wrapper" id="fp-rings">${fpSvg}<div class="fp-laser" aria-hidden="true"></div></div>
             <p id="fp-status" class="fp-hello-status">${enrolled?'Huella configurada correctamente':'Coloca el dedo en el sensor'}</p>
             <button class="btn btn-primary btn-sm" id="fp-enroll" style="margin-top:8px">${enrolled?'Volver a registrar':'Iniciar registro'}</button>
         </div>
@@ -2164,7 +2203,7 @@ export async function renderBloqueo(c){
         document.getElementById('fp-open-row')?.addEventListener('click',()=>{
             showDialog('Configurar huella',
                 `<div style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:8px 0">
-                    <div class="sensor-wrapper" id="fp-rings-pop">${fpSvg.replace('id="fp-svg-main"','id="fp-svg-pop"').replace('id="fp-rings"','id="fp-rings-inner"')}</div>
+                    <div class="sensor-wrapper" id="fp-rings-pop">${fpSvg.replace('id="fp-svg-main"','id="fp-svg-pop"').replace('id="fp-rings"','id="fp-rings-inner"')}<div class="fp-laser" aria-hidden="true"></div></div>
                     <p id="fp-status-pop" class="fp-hello-status" style="text-align:center;color:var(--tx2);font-size:14px">${enrolled?'Huella configurada. Puedes volver a registrarla.':'Coloca el dedo en el sensor para registrar'}</p>
                     <button class="btn btn-primary" id="fp-enroll-pop" style="min-width:160px">${enrolled?'Volver a registrar':'Iniciar registro'}</button>
                 </div>`,
@@ -2179,37 +2218,50 @@ export async function renderBloqueo(c){
                     const blueRings=svg?[...svg.querySelectorAll('.fp-zone')]:[];
                     btn.disabled=true;btn.textContent='Registrando...';
                     status.textContent='Coloca tu dedo repetidamente en el sensor...';
-                    let scanActive=true,tick=0;
-                    const reversed=[...blueRings].reverse();
+                    const wrapper=document.getElementById('fp-rings-pop');
+                    if(wrapper)wrapper.classList.add('fp-scanning');
+                    let scanActive=true;
+                    const LASER_DUR=1800,LASER_H=28,FRAME_H=220;
+                    const _RY_TOP=[17,29,41,52,64,75,85,95,102,107];
+                    const _RY_BOT=[203,191,179,168,156,145,135,125,118,113];
+                    const scanStart=Date.now();
                     const scanPulse=()=>{
                         if(!scanActive)return;
-                        const idx=tick%reversed.length;
-                        reversed.forEach((r,i)=>{
-                            const dist=Math.abs(idx-i);
-                            r.style.opacity=dist===0?'1':dist===1?'0.7':dist===2?'0.4':'0.15';
-                            r.style.transition='opacity 0.15s ease';
+                        const elapsed=(Date.now()-scanStart)%LASER_DUR;
+                        const laserTop=-LASER_H+(LASER_H+FRAME_H)*(elapsed/LASER_DUR);
+                        const laserBot=laserTop+LASER_H;
+                        blueRings.forEach((r,i)=>{
+                            const ov=Math.max(0,Math.min(laserBot,_RY_BOT[i])-Math.max(laserTop,_RY_TOP[i]));
+                            const maxOv=Math.min(LASER_H,_RY_BOT[i]-_RY_TOP[i]);
+                            const op=0.25+0.75*(maxOv>0?ov/maxOv:0);
+                            r.style.opacity=op.toFixed(2);
+                            r.style.transition='opacity 0.08s linear';
                         });
-                        tick++;
-                        setTimeout(()=>requestAnimationFrame(scanPulse),120);
+                        setTimeout(()=>requestAnimationFrame(scanPulse),16);
                     };
                     requestAnimationFrame(scanPulse);
                     try{
                         const r=JSON.parse(await tauriInvoke('enroll_fingerprint'));
                         scanActive=false;
+                        if(wrapper)wrapper.classList.remove('fp-scanning');
                         blueRings.forEach(ring=>{ring.style.opacity='1';ring.style.transition='opacity 0.3s ease';});
                         if(r.ok){
+                            if(wrapper){wrapper.classList.remove('fp-success');void wrapper.offsetWidth;wrapper.classList.add('fp-success');setTimeout(()=>wrapper.classList.remove('fp-success'),900);}
                             status.textContent='¡Huella registrada correctamente!';
                             btn.textContent='Volver a registrar';
                             const lbl=document.getElementById('fp-open-row')?.querySelector('.ds');
                             if(lbl)lbl.textContent='Huella registrada';
                             toast('Huella registrada','✅');
                         } else {
+                            if(wrapper){wrapper.classList.remove('fp-error');void wrapper.offsetWidth;wrapper.classList.add('fp-error');setTimeout(()=>wrapper.classList.remove('fp-error'),450);}
                             status.textContent='No se pudo registrar. Inténtalo de nuevo.';
                             btn.textContent='Reintentar';
                         }
                     }catch(e){
                         scanActive=false;
+                        if(wrapper)wrapper.classList.remove('fp-scanning');
                         blueRings.forEach(ring=>{ring.style.opacity='1';ring.style.transition='opacity 0.3s ease';});
+                        if(wrapper){wrapper.classList.remove('fp-error');void wrapper.offsetWidth;wrapper.classList.add('fp-error');setTimeout(()=>wrapper.classList.remove('fp-error'),450);}
                         status.textContent='Error: asegúrate de que el sensor está disponible';
                         btn.textContent='Reintentar';
                     }

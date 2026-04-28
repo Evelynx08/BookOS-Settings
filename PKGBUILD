@@ -47,6 +47,7 @@ Icon=bookos-settings
 Terminal=false
 Type=Application
 Categories=Settings;
+StartupWMClass=bookos-settings
 EOF
 
     # Icons
