@@ -1,0 +1,35 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Origin: BookOS
+Label: BookOS APT
+Suite: stable
+Codename: bookworm
+Version: 1.0
+Architectures: amd64
+Components: main
+Description: BookOS APT repository for Debian/Ubuntu
+Date: Wed, 29 Apr 2026 21:06:47 UTC
+MD5Sum:
+ d8b78f55781cadbb07c4e4cecea0836c              463 main/binary-amd64/Packages
+ 61491f7d09881e14f7aae870836c99b5              354 main/binary-amd64/Packages.gz
+SHA256:
+ 016f454d537a70b8750400965089bf5fb4f52bc40efd18ae8ec2c9d2c3bbe043              463 main/binary-amd64/Packages
+ 4cdf9542aae09e554f8dde81ac8c0c5976aa954ad0c3180b8361df27f74c29ba              354 main/binary-amd64/Packages.gz
+
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEnggHNBKeD8NPQUJgOxaLqazqjIsFAmnycwcACgkQOxaLqazq
+jIsqRw//Tgcnf6qRrNIRp5EtU7nT/+G1Sly5RU1TmXvuEIIVgS6981MXSoqMVoGy
+04n4iuhJr+DLWMnncs5U+bWsDrhVWFBdI8o2+XUs22+YlcYOpmmM5jeJMi3NRNzC
+1ZG1Tk1/5r4tNDvwNB0YUiJGBYJ8hHhmjZk4748Y7Civ0Kc5h6D6ufmWjhDdAepp
+acsMbRatnJycdhpl9IFOc3PEJr+Wu1+YxWyhJe8+DS6xkZhz42Gv7e6gYV4RtYV/
+jy7VRlPbVOHQrEznBEPvoNcy9F/EpvIkmVaAFTdpWAh9vRlUZDCrDd/daebsZOid
+fo3mKgRT44Q12ibKDP4MkqAQpXUf1pAWTG65XtsT1CA4FiPO5+rca8WMU0Wdf8ud
+kAV+GIEG6r+zt/ReHEYYWFRXW3VPebWUs6M+zQFAgPkFW8MWZjFOGkvCnRCoIFiV
+4xc4SxKdE22zoPmHIKPkcE+cI1QEwf4bO+p4LUnInLWESYak/uzGHqfzuMX9fqn2
+JF/cA7/Nybib1onRN4gUaNU6XFctBaMqG5Dt7bceO9BEkjGwFOB2XTQdVXMQ7Hv8
+bIgSO2B3bTQvlWQPeTEjzJLtnh/Bo25DJChMIH8inqBFw/Wn1bFJx0wTQ6mh0Znr
+AYdjSpW52LIGLQHDfjP9jYsvOfDT5EyY7e+9M6fsSa7hveIvBTw=
+=vLF/
+-----END PGP SIGNATURE-----

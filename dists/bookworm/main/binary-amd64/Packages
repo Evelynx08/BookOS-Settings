@@ -1,0 +1,15 @@
+Package: bookos-settings
+Version: 0.4.0
+Architecture: amd64
+Maintainer: BookOS
+Installed-Size: 27905
+Depends: libwebkit2gtk-4.1-0, libgtk-3-0
+Filename: pool/main/b/bookos-settings/bookos-settings_0.4.0_amd64.deb
+Size: 8105216
+MD5sum: 4a603e07e4f39172eb4f75d390fa201b
+SHA1: 70fe4463aeb43c2a7d85585df62243d8f66a3d8a
+SHA256: 051b560d5e585321b338e36154deea4efb590b899c564dfac18adc7e5779c4a4
+Priority: optional
+Description: BookOS Settings for KDE Plasma 6.6
+ (none)
+

@@ -1,0 +1,15 @@
+Origin: BookOS
+Label: BookOS APT
+Suite: stable
+Codename: bookworm
+Version: 1.0
+Architectures: amd64
+Components: main
+Description: BookOS APT repository for Debian/Ubuntu
+Date: Wed, 29 Apr 2026 21:06:47 UTC
+MD5Sum:
+ d8b78f55781cadbb07c4e4cecea0836c              463 main/binary-amd64/Packages
+ 61491f7d09881e14f7aae870836c99b5              354 main/binary-amd64/Packages.gz
+SHA256:
+ 016f454d537a70b8750400965089bf5fb4f52bc40efd18ae8ec2c9d2c3bbe043              463 main/binary-amd64/Packages
+ 4cdf9542aae09e554f8dde81ac8c0c5976aa954ad0c3180b8361df27f74c29ba              354 main/binary-amd64/Packages.gz
