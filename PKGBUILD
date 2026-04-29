@@ -2,7 +2,7 @@
 pkgname=bookos-settings
 pkgver=0.4.0
 pkgrel=1
-pkgdesc="BookOS Settings — aplicación de ajustes para KDE Plasma (Samsung Galaxy Book)"
+pkgdesc="BookOS Settings — aplicación de ajustes para KDE Plasma con BookOS (o otros sistemas)"
 arch=('x86_64')
 url="https://github.com/Evelynx08/BookOS-Settings"
 license=('MIT')
