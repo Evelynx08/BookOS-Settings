@@ -1,9 +1,16 @@
-import{renderHome,searchIndex}from'./modules/home.js';
+import{renderHome,searchIndex,subSearchIndex}from'./modules/home.js';
+import{t,getLang}from'./modules/i18n.js';
 import{renderConexiones,renderPantalla,renderSonido,renderBateria,renderNotificaciones,renderTemas,renderAcerca,renderActualizacion,renderBloqueo,renderGeneral,renderCuentas,renderMantenimiento,renderSeguridad,renderFondos,renderAplicaciones,renderModos,renderSaludDigital,renderAccesibilidad,renderAvanzadas,renderDispositivos,renderAI,renderUbicacion,renderEmergencia,renderPantallaInicio,renderPlaceholder,getRoutines,executeRoutine,snapshotForRoutine,restoreSnapshot}from'./modules/pages.js';
 import{tauriInvoke,isTauri}from'./tauri-api.js';
 
 document.addEventListener('DOMContentLoaded',async()=>{
     const sb=document.getElementById('sb'),app=document.getElementById('app'),mc=document.getElementById('mc');
+    // Apply translations to static index.html elements
+    document.documentElement.lang=getLang();
+    document.title=t('settings')+' BookOS';
+    const _hdr=document.querySelector('.header-title');if(_hdr)_hdr.textContent=t('settings');
+    const _sIn=document.getElementById('search-in');if(_sIn)_sIn.placeholder=t('search_placeholder');
+    const _noR=document.getElementById('no-res');if(_noR)_noR.textContent=t('no_results');
     let userInfo=null;
     // Run startup fetches in parallel — saves ~50-100ms on cold start
     const [_ui,_theme]=await Promise.allSettled([tauriInvoke('get_user_info'),tauriInvoke('get_current_theme')]);
@@ -46,6 +53,10 @@ document.addEventListener('DOMContentLoaded',async()=>{
         }
         sb.querySelectorAll('.item').forEach(i=>i.classList.remove('active-item'));
         sb.querySelector(`[data-page="${id}"]`)?.classList.add('active-item');
+        // Page-transition: brief fade to mask layout swap
+        app.classList.remove('page-enter');
+        void app.offsetWidth;
+        app.classList.add('page-enter');
         (pages[id]||((c)=>renderPlaceholder(c,id)))(app);
     }
     function goBack(){
@@ -104,9 +115,20 @@ document.addEventListener('DOMContentLoaded',async()=>{
     sIn?.addEventListener('keydown',e=>{if(e.key==='Escape'){sIn.value='';if(sX)sX.style.visibility='hidden';filter('');}});
     sX?.addEventListener('click',()=>{sIn.value='';if(sX)sX.style.visibility='hidden';filter('');sIn.focus();});
 
+    // Container for sub-setting results (created on-demand, lives at end of sidebar)
+    let _subResultsCard=null;
+    function _ensureSubResultsCard(){
+        if(_subResultsCard&&document.body.contains(_subResultsCard))return _subResultsCard;
+        _subResultsCard=document.createElement('div');
+        _subResultsCard.className='card sub-results-card';
+        _subResultsCard.style.display='none';
+        sb.appendChild(_subResultsCard);
+        return _subResultsCard;
+    }
     function filter(q){
-        const cards=sb.querySelectorAll('.card');let any=false;
-        if(!q){cards.forEach(c=>{c.classList.remove('hidden');c.querySelectorAll('.item').forEach(i=>i.classList.remove('hidden'));});noR.style.display='none';return;}
+        const cards=sb.querySelectorAll('.card:not(.sub-results-card)');let any=false;
+        const subCard=_ensureSubResultsCard();
+        if(!q){cards.forEach(c=>{c.classList.remove('hidden');c.querySelectorAll('.item').forEach(i=>i.classList.remove('hidden'));});subCard.style.display='none';subCard.innerHTML='';noR.style.display='none';return;}
         cards.forEach(card=>{
             if(card.classList.contains('card-profile')){const m='cuenta perfil profile'.includes(q);card.classList.toggle('hidden',!m);if(m)any=true;return;}
             let vis=false;
@@ -118,6 +140,20 @@ document.addEventListener('DOMContentLoaded',async()=>{
             });
             card.classList.toggle('hidden',!vis);if(vis)any=true;
         });
+        // Sub-setting matches — show items that didn't already match by parent page
+        const visiblePages=new Set([...sb.querySelectorAll('.card:not(.hidden) .item[data-page]:not(.hidden)')].map(i=>i.dataset.page));
+        const subMatches=subSearchIndex.filter(s=>{
+            if(visiblePages.has(s.parent))return false;
+            return s.title.toLowerCase().includes(q)||s.keywords.some(k=>k.includes(q));
+        }).slice(0,12);
+        if(subMatches.length){
+            const labelOf=id=>searchIndex.find(x=>x.id===id)?.title||id;
+            subCard.innerHTML=subMatches.map(s=>`<div class="item sub-result-item" data-page="${s.parent}" tabindex="0"><div class="item-icon sub-result-ic">›</div><div class="item-texts"><span class="title">${s.title}</span><span class="subtitle">en ${labelOf(s.parent)}</span></div></div>`).join('');
+            subCard.style.display='';
+            any=true;
+        }else{
+            subCard.style.display='none';subCard.innerHTML='';
+        }
         noR.style.display=any?'none':'block';
     }
 

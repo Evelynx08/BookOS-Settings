@@ -1288,29 +1288,50 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
     format!(r#"{{"ok":{}}}"#, output.status.success())
 }
 
-// Get BookOS SDDM theme config (variant, background, bgImage)
+// Get BookOS SDDM theme config
 #[tauri::command] fn get_sddm_config() -> String {
     let conf = fs::read_to_string("/usr/share/sddm/themes/bookos/theme.conf").unwrap_or_default();
     let mut variant = "dark".to_string();
     let mut background = "solid".to_string();
     let mut bg_image = String::new();
+    let mut accent_color = "#007AFF".to_string();
+    let mut clock_format = "24h".to_string();
+    let mut clock_font   = "serif".to_string();
+    let mut blur_radius = "24".to_string();
+    let mut show_date = "true".to_string();
+    let mut show_battery = "true".to_string();
+    let mut show_bookbar = "true".to_string();
     for line in conf.lines() {
         let line = line.trim();
-        if let Some(v) = line.strip_prefix("variant=")    { variant    = v.trim().to_string(); }
-        if let Some(v) = line.strip_prefix("background=") { background = v.trim().to_string(); }
-        if let Some(v) = line.strip_prefix("bgImage=")    { bg_image   = v.trim().to_string(); }
+        if let Some(v) = line.strip_prefix("variant=")      { variant      = v.trim().to_string(); }
+        if let Some(v) = line.strip_prefix("background=")   { background   = v.trim().to_string(); }
+        if let Some(v) = line.strip_prefix("bgImage=")      { bg_image     = v.trim().to_string(); }
+        if let Some(v) = line.strip_prefix("accentColor=")  { accent_color = v.trim().to_string(); }
+        if let Some(v) = line.strip_prefix("clockFormat=")  { clock_format = v.trim().to_string(); }
+        if let Some(v) = line.strip_prefix("clockFont=")    { clock_font   = v.trim().to_string(); }
+        if let Some(v) = line.strip_prefix("blurRadius=")   { blur_radius  = v.trim().to_string(); }
+        if let Some(v) = line.strip_prefix("showDate=")     { show_date    = v.trim().to_string(); }
+        if let Some(v) = line.strip_prefix("showBattery=")  { show_battery = v.trim().to_string(); }
+        if let Some(v) = line.strip_prefix("showBookBar=")  { show_bookbar = v.trim().to_string(); }
     }
-    format!(r#"{{"variant":"{}","background":"{}","bgImage":"{}"}}"#,
-        esc(&variant), esc(&background), esc(&bg_image))
+    format!(r#"{{"variant":"{}","background":"{}","bgImage":"{}","accentColor":"{}","clockFormat":"{}","clockFont":"{}","blurRadius":"{}","showDate":"{}","showBattery":"{}","showBookBar":"{}"}}"#,
+        esc(&variant), esc(&background), esc(&bg_image),
+        esc(&accent_color), esc(&clock_format), esc(&clock_font), esc(&blur_radius),
+        esc(&show_date), esc(&show_battery), esc(&show_bookbar))
 }
 
 // Set BookOS SDDM theme config (requires sudo)
 #[tauri::command] async fn set_sddm_config(
-    variant: String, background: String, bg_image: String, password: String
+    variant: String, background: String, bg_image: String,
+    accent_color: String, clock_format: String, clock_font: String, blur_radius: String,
+    show_date: String, show_battery: String, show_bookbar: String,
+    password: String
 ) -> String {
     use tokio::io::AsyncWriteExt;
-    let conf = format!("[General]\nvariant={}\nbackground={}\nbgImage={}\n",
-        variant, background, bg_image);
+    let conf = format!(
+        "[General]\nvariant={}\nbackground={}\nbgImage={}\naccentColor={}\nclockFormat={}\nclockFont={}\nblurRadius={}\nshowDate={}\nshowBattery={}\nshowBookBar={}\n",
+        variant, background, bg_image, accent_color, clock_format, clock_font, blur_radius, show_date, show_battery, show_bookbar
+    );
     let mut child = Command::new("sudo")
         .args(["-S", "tee", "/usr/share/sddm/themes/bookos/theme.conf"])
         .stdin(std::process::Stdio::piped())
@@ -1322,6 +1343,34 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
     }
     let output = child.wait_with_output().await.unwrap();
     format!(r#"{{"ok":{}}}"#, output.status.success())
+}
+
+// Launch sddm-greeter in test mode (preview)
+#[tauri::command] fn preview_sddm() -> String {
+    use std::process::Stdio;
+    let theme = "/usr/share/sddm/themes/bookos";
+    let res = Command::new("setsid")
+        .args(["sddm-greeter", "--test-mode", "--theme", theme])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    match res {
+        Ok(_) => r#"{"ok":true}"#.into(),
+        Err(e) => {
+            // Fallback without setsid
+            let res2 = Command::new("sddm-greeter")
+                .args(["--test-mode", "--theme", theme])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            match res2 {
+                Ok(_) => r#"{"ok":true}"#.into(),
+                Err(e2) => format!(r#"{{"ok":false,"error":"{} / {}"}}"#, esc(&e.to_string()), esc(&e2.to_string())),
+            }
+        }
+    }
 }
 
 // Get digital wellbeing / app usage (reads from bookos usage log if available)
@@ -1741,6 +1790,32 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
 
 // ── Salud digital daemon helper ──────────────────────────────────────────
 // Logs app focus events — called periodically from the frontend via a simple script
+// Detect active window's app name and log 1 minute of usage.
+// Uses `qdbus6 org.kde.KWin /KWin getWindowInfo` with a fallback to xprop.
+#[tauri::command] async fn track_active_app() -> String {
+    // Try to read the active window's resource class via xprop (works under XWayland)
+    let xprop_root = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        run("xprop", &["-root", "_NET_ACTIVE_WINDOW"])
+    ).await.unwrap_or_default();
+    let win_id = xprop_root.split_whitespace().last().unwrap_or("").trim().to_string();
+    let app_name = if win_id.starts_with("0x") && win_id.len() > 2 {
+        let info = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            run("xprop", &["-id", &win_id, "WM_CLASS"])
+        ).await.unwrap_or_default();
+        // WM_CLASS(STRING) = "instance", "class"
+        info.split('=').nth(1)
+            .and_then(|s| s.split(',').nth(1))
+            .map(|s| s.trim().trim_matches('"').to_string())
+            .unwrap_or_default()
+    } else { String::new() };
+    if app_name.is_empty() || app_name == "plasmashell" || app_name == "BookOS Settings" {
+        return r#"{"ok":false,"reason":"no_active_app"}"#.into();
+    }
+    log_app_usage(app_name, 1.0)
+}
+
 #[tauri::command] fn log_app_usage(app_name: String, minutes: f32) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     let dir = format!("{}/.local/share/bookos", home);
@@ -2450,13 +2525,13 @@ fn main() {
             get_lock_timeout,set_lock_timeout,check_fingerprint,enroll_fingerprint,
             get_locale_info,get_available_locales,set_locale,get_available_keymaps,set_keymap,
             check_system_updates,check_aur_updates,check_flatpak_updates,run_system_update,run_pacman_update_silent,get_update_progress,cancel_update,run_flatpak_update,
-            get_app_power_usage,get_sddm_themes,set_sddm_theme,get_sddm_config,set_sddm_config,get_app_usage,
+            get_app_power_usage,get_sddm_themes,set_sddm_theme,get_sddm_config,set_sddm_config,preview_sddm,get_app_usage,
             run_maintenance,get_kwin_effects,toggle_kwin_effect,fix_cursor_hz,get_cursor_fix_status,get_input_devices,set_input_setting,
             get_firewall_status,run_sudo_command,get_system_users,
             get_autostart_bookos,toggle_autostart_bookos,get_autostart_apps,toggle_autostart_app,setup_polkit_rules,export_settings,import_settings,
             get_accessibility_settings,set_font_scale,set_display_scale,toggle_invert_colors,set_cursor_size,
             change_password,set_avatar,get_labs_settings,set_lab_setting,
-            forget_wifi,get_wifi_details,get_wifi_password,log_app_usage,
+            forget_wifi,get_wifi_details,get_wifi_password,log_app_usage,track_active_app,
             get_wallpapers,get_current_wallpaper,set_wallpaper,
             get_default_apps,open_mime_settings,
             get_bookos_setting,set_bookos_setting,get_settings_batch,configure_auto_update,restore_startup_settings,get_startup_page,check_navigation_request,write_ipc_state,read_ipc_state,

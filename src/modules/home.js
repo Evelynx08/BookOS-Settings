@@ -25,7 +25,114 @@ export const searchIndex=[
 {id:'acerca',title:'Acerca del portátil',subtitle:'Hardware · Info',keywords:['acerca','about','info','kernel','plasma']},
 ];
 
+// Granular sub-settings index — each entry points to its parent page
+export const subSearchIndex=[
+// Pantalla
+{parent:'pantalla',title:'Brillo',keywords:['brillo','brightness','luminosidad']},
+{parent:'pantalla',title:'Modo oscuro',keywords:['oscuro','dark','noche','tema']},
+{parent:'pantalla',title:'Luz nocturna',keywords:['luz','nocturna','night','azul','calor']},
+{parent:'pantalla',title:'Resolución',keywords:['resolucion','tamaño','pixel']},
+{parent:'pantalla',title:'Tasa de refresco',keywords:['refresco','hz','60','120','frecuencia']},
+{parent:'pantalla',title:'Escala',keywords:['escala','zoom','dpi']},
+{parent:'pantalla',title:'HDR',keywords:['hdr','contraste']},
+{parent:'pantalla',title:'Vision Booster',keywords:['vision','booster']},
+{parent:'pantalla',title:'Protector vista',keywords:['protector','vista','ojos','reflector']},
+// Bateria
+{parent:'bateria',title:'Modo de rendimiento',keywords:['rendimiento','performance','balanced','silencioso','potencia']},
+{parent:'bateria',title:'Modo ahorro',keywords:['ahorro','ahorrador','save','baja']},
+{parent:'bateria',title:'Carga adaptativa',keywords:['carga','adaptativa','adaptive','inteligente']},
+{parent:'bateria',title:'Protección de batería',keywords:['proteccion','limite','80','tope']},
+{parent:'bateria',title:'Modo ventilador',keywords:['ventilador','fan','silencio','ruido']},
+{parent:'bateria',title:'Información de la batería',keywords:['info','salud','ciclos','health','wear']},
+// Sonido
+{parent:'sonido',title:'Volumen',keywords:['volumen','volume','sonido']},
+{parent:'sonido',title:'Silenciar',keywords:['silenciar','mute','silencio']},
+{parent:'sonido',title:'Salida de audio',keywords:['salida','output','altavoz','auriculares','speaker']},
+{parent:'sonido',title:'Entrada de micrófono',keywords:['microfono','mic','entrada','input']},
+// Conexiones
+{parent:'conexiones',title:'WiFi',keywords:['wifi','wireless','red','redes']},
+{parent:'conexiones',title:'Bluetooth',keywords:['bluetooth','bt']},
+{parent:'conexiones',title:'Modo avión',keywords:['avion','airplane','vuelo']},
+{parent:'conexiones',title:'VPN',keywords:['vpn','virtual','tunel']},
+// Bloqueo
+{parent:'bloqueo',title:'Tipo de bloqueo',keywords:['bloqueo','contraseña','pin','tipo']},
+{parent:'bloqueo',title:'Huella dactilar',keywords:['huella','fingerprint','biometria','dedo']},
+{parent:'bloqueo',title:'Always On Display',keywords:['aod','always','on','display','reloj','permanente']},
+{parent:'bloqueo',title:'Book Bar',keywords:['bookbar','book','bar','barra']},
+{parent:'bloqueo',title:'Tema SDDM',keywords:['sddm','login','tema','sesion']},
+// Notificaciones
+{parent:'notificaciones',title:'No molestar (DND)',keywords:['dnd','molestar','silencio']},
+{parent:'notificaciones',title:'Notificaciones',keywords:['notificacion','alerta','aviso']},
+// Inicio
+{parent:'inicio',title:'Tamaño de iconos',keywords:['iconos','tamaño','grande','pequeño']},
+{parent:'inicio',title:'Posición de la barra',keywords:['barra','panel','posicion','abajo','arriba','izquierda','derecha']},
+{parent:'inicio',title:'Accesos directos',keywords:['accesos','directos','shortcuts','escritorio']},
+// Fondos
+{parent:'fondos',title:'Fondo de pantalla',keywords:['fondo','wallpaper','imagen']},
+{parent:'fondos',title:'Paleta de colores',keywords:['paleta','colores','acento','tono']},
+// Temas
+{parent:'temas',title:'Esquema de color',keywords:['esquema','color','breeze','dark','light']},
+{parent:'temas',title:'Modo oscuro automático',keywords:['automatico','horario','schedule','noche','dia']},
+{parent:'temas',title:'Iconos del sistema',keywords:['iconos','icon','tema']},
+// Seguridad
+{parent:'seguridad',title:'Firewall (UFW)',keywords:['firewall','ufw','puertos']},
+{parent:'seguridad',title:'Permisos de apps',keywords:['permisos','sandbox','flatpak']},
+// Cuentas
+{parent:'cuentas',title:'Nombre de usuario',keywords:['nombre','usuario','user']},
+{parent:'cuentas',title:'Hostname',keywords:['hostname','equipo','red','nombre']},
+{parent:'cuentas',title:'Avatar',keywords:['avatar','foto','imagen','perfil']},
+// General
+{parent:'general',title:'Idioma',keywords:['idioma','language','lenguaje','locale']},
+{parent:'general',title:'Distribución de teclado',keywords:['teclado','keyboard','distribucion','layout']},
+{parent:'general',title:'Fecha y hora',keywords:['fecha','hora','date','time','zona']},
+{parent:'general',title:'Página de inicio',keywords:['inicio','startup','arranque','default']},
+// Mantenimiento
+{parent:'mantenimiento',title:'Almacenamiento',keywords:['almacenamiento','disco','disk','espacio']},
+{parent:'mantenimiento',title:'Limpiar caché',keywords:['cache','limpiar','clean','memoria']},
+{parent:'mantenimiento',title:'Logs del sistema',keywords:['logs','registros','journal']},
+// Acerca
+{parent:'acerca',title:'Modelo del equipo',keywords:['modelo','equipo','samsung','book','galaxy']},
+{parent:'acerca',title:'Procesador',keywords:['cpu','procesador','intel','amd']},
+{parent:'acerca',title:'Memoria RAM',keywords:['ram','memoria','gb']},
+{parent:'acerca',title:'GPU',keywords:['gpu','grafica','video','intel','nvidia']},
+{parent:'acerca',title:'Kernel',keywords:['kernel','linux','version']},
+{parent:'acerca',title:'Versión de Plasma',keywords:['plasma','kde','version']},
+// Actualizacion
+{parent:'actualizacion',title:'Actualizaciones del sistema',keywords:['actualizacion','update','paru','pacman']},
+{parent:'actualizacion',title:'Flatpak',keywords:['flatpak','app']},
+// Salud digital
+{parent:'salud',title:'Tiempo en pantalla',keywords:['tiempo','pantalla','uso','screen']},
+{parent:'salud',title:'Límites de uso',keywords:['limite','uso','tiempo']},
+// AI
+{parent:'ai',title:'Asistente de escritura',keywords:['asistente','escritura','ai']},
+// Modos
+{parent:'modos',title:'Modos predefinidos',keywords:['modo','predefinido','perfil']},
+{parent:'modos',title:'Rutinas',keywords:['rutina','automatizacion','disparador','trigger']},
+// Avanzadas
+{parent:'avanzadas',title:'Compositor (KWin)',keywords:['kwin','compositor','efectos']},
+{parent:'avanzadas',title:'Inicio automático',keywords:['inicio','autostart','arranque','automatico']},
+// Accesibilidad
+{parent:'accesibilidad',title:'Lupa',keywords:['lupa','zoom','magnifier']},
+{parent:'accesibilidad',title:'Lector de pantalla',keywords:['lector','pantalla','tts','voz']},
+{parent:'accesibilidad',title:'Alto contraste',keywords:['contraste','alto','vision']},
+// Aplicaciones
+{parent:'aplicaciones',title:'Navegador predeterminado',keywords:['navegador','browser','firefox','chromium']},
+{parent:'aplicaciones',title:'Cliente de correo',keywords:['correo','email','mail']},
+{parent:'aplicaciones',title:'Reproductor multimedia',keywords:['reproductor','multimedia','video','audio']},
+// Ubicacion
+{parent:'ubicacion',title:'Servicios de ubicación',keywords:['ubicacion','gps','geo']},
+// Emergencia
+{parent:'emergencia',title:'Información médica',keywords:['medico','medical','grupo','sangre','alergia']},
+{parent:'emergencia',title:'Contactos de emergencia',keywords:['contacto','emergencia','sos']},
+// Dispositivos
+{parent:'dispositivos',title:'Quick Share',keywords:['share','compartir','quick','rquickshare']},
+{parent:'dispositivos',title:'Galaxy Buds',keywords:['buds','audifonos','samsung']},
+];
+
+import{t}from'./i18n.js';
+
 const ic=s=>`<div class="item-icon"><img src="assets/${s}" alt=""></div>`;
+const it=(page,icon,key)=>`<div class="item" data-page="${page}" tabindex="0">${ic(icon)}<div class="item-texts"><span class="title">${t(key)}</span><span class="subtitle">${t(key+'_sub')}</span></div></div>`;
 
 export function renderHome(u){
     const name=u?.display_name||'Usuario';
@@ -33,57 +140,57 @@ export function renderHome(u){
     const av=u?.has_avatar?`<img src="file://${u.avatar_path}" class="profile-avatar">`:`<div class="profile-avatar-placeholder">${ini}</div>`;
     return `
 <div class="card card-profile"><div class="item" data-page="cuentas" tabindex="0">
-    <div class="profile-left"><span class="title">${name}</span><span class="subtitle">BookOS Account</span></div>${av}
+    <div class="profile-left"><span class="title">${name}</span><span class="subtitle">${t('bookos_account')}</span></div>${av}
 </div></div>
 
 <div class="card">
-    <div class="item" data-page="conexiones" tabindex="0">${ic('wifi.svg')}<div class="item-texts"><span class="title">Conexiones</span><span class="subtitle">WiFi · Bluetooth · Modo Avión</span></div></div>
-    <div class="item" data-page="dispositivos" tabindex="0">${ic('connected.svg')}<div class="item-texts"><span class="title">Dispositivos conectados</span><span class="subtitle">Share · Buds</span></div></div>
+    ${it('conexiones','wifi.svg','connections')}
+    ${it('dispositivos','connected.svg','devices')}
 </div>
 
 <div class="card">
-    <div class="item" data-page="ai" tabindex="0">${ic('tips.svg')}<div class="item-texts"><span class="title">AI</span><span class="subtitle">Asistente de escritura · notas</span></div></div>
-    <div class="item" data-page="modos" tabindex="0">${ic('routines.svg')}<div class="item-texts"><span class="title">Modos y rutinas</span><span class="subtitle">Modos · Rutinas</span></div></div>
-    <div class="item" data-page="sonido" tabindex="0">${ic('sound.svg')}<div class="item-texts"><span class="title">Sonidos y vibración</span><span class="subtitle">Volumen · Melodía</span></div></div>
-    <div class="item" data-page="notificaciones" tabindex="0">${ic('notification.svg')}<div class="item-texts"><span class="title">Notificaciones</span><span class="subtitle">No molestar</span></div></div>
+    ${it('ai','tips.svg','ai')}
+    ${it('modos','routines.svg','modes_routines')}
+    ${it('sonido','sound.svg','sound')}
+    ${it('notificaciones','notification.svg','notifications')}
 </div>
 
 <div class="card">
-    <div class="item" data-page="pantalla" tabindex="0">${ic('brightness.svg')}<div class="item-texts"><span class="title">Pantalla</span><span class="subtitle">Brillo · Resolución · Protector vista</span></div></div>
-    <div class="item" data-page="bateria" tabindex="0">${ic('battery.svg')}<div class="item-texts"><span class="title">Batería</span><span class="subtitle">Energía · Carga</span></div></div>
+    ${it('pantalla','brightness.svg','display')}
+    ${it('bateria','battery.svg','battery')}
 </div>
 
 <div class="card">
-    <div class="item" data-page="bloqueo" tabindex="0">${ic('lockscreen.svg')}<div class="item-texts"><span class="title">Pantalla de bloqueo</span><span class="subtitle">Bloqueo · Biometría · AOD</span></div></div>
-    <div class="item" data-page="inicio" tabindex="0">${ic('start.svg')}<div class="item-texts"><span class="title">Pantalla Inicio</span><span class="subtitle">Diseño · Apps</span></div></div>
-    <div class="item" data-page="fondos" tabindex="0">${ic('wallpaper.svg')}<div class="item-texts"><span class="title">Fondo de pantalla</span><span class="subtitle">Fondos · Paleta</span></div></div>
-    <div class="item" data-page="temas" tabindex="0">${ic('themes.svg')}<div class="item-texts"><span class="title">Temas</span><span class="subtitle">Temas · Modo oscuro</span></div></div>
+    ${it('bloqueo','lockscreen.svg','lockscreen')}
+    ${it('inicio','start.svg','homescreen')}
+    ${it('fondos','wallpaper.svg','wallpaper')}
+    ${it('temas','themes.svg','themes')}
 </div>
 
 <div class="card">
-    <div class="item" data-page="seguridad" tabindex="0">${ic('security.svg')}<div class="item-texts"><span class="title">Seguridad y privacidad</span><span class="subtitle">Firewall · Permisos</span></div></div>
-    <div class="item" data-page="ubicacion" tabindex="0">${ic('location.svg')}<div class="item-texts"><span class="title">Ubicación</span><span class="subtitle">Solicitudes</span></div></div>
-    <div class="item" data-page="emergencia" tabindex="0">${ic('emergency.svg')}<div class="item-texts"><span class="title">Seguridad y emergencia</span><span class="subtitle">Datos médicos</span></div></div>
+    ${it('seguridad','security.svg','security')}
+    ${it('ubicacion','location.svg','location')}
+    ${it('emergencia','emergency.svg','emergency')}
 </div>
 
 <div class="card">
-    <div class="item" data-page="cuentas" tabindex="0">${ic('accounts.svg')}<div class="item-texts"><span class="title">Cuentas</span><span class="subtitle">Perfil · Nombre</span></div></div>
-    <div class="item" data-page="avanzadas" tabindex="0">${ic('advanced.svg')}<div class="item-texts"><span class="title">Funciones avanzadas</span><span class="subtitle">Labs</span></div></div>
+    ${it('cuentas','accounts.svg','accounts')}
+    ${it('avanzadas','advanced.svg','advanced')}
 </div>
 
 <div class="card">
-    <div class="item" data-page="salud" tabindex="0">${ic('health.svg')}<div class="item-texts"><span class="title">Salud digital</span><span class="subtitle">Tiempo de uso</span></div></div>
-    <div class="item" data-page="mantenimiento" tabindex="0">${ic('maintanance.svg')}<div class="item-texts"><span class="title">Mantenimiento</span><span class="subtitle">Almacenamiento · RAM</span></div></div>
-    <div class="item" data-page="aplicaciones" tabindex="0">${ic('aplications.svg')}<div class="item-texts"><span class="title">Aplicaciones</span><span class="subtitle">Apps predeterminadas</span></div></div>
+    ${it('salud','health.svg','digital_health')}
+    ${it('mantenimiento','maintanance.svg','maintenance')}
+    ${it('aplicaciones','aplications.svg','apps')}
 </div>
 
 <div class="card">
-    <div class="item" data-page="general" tabindex="0">${ic('general.svg')}<div class="item-texts"><span class="title">Administración general</span><span class="subtitle">Idioma · Teclado</span></div></div>
-    <div class="item" data-page="accesibilidad" tabindex="0">${ic('accesibility.svg')}<div class="item-texts"><span class="title">Accesibilidad</span><span class="subtitle">Visión · Audición</span></div></div>
+    ${it('general','general.svg','general')}
+    ${it('accesibilidad','accesibility.svg','accessibility')}
 </div>
 
 <div class="card">
-    <div class="item" data-page="actualizacion" tabindex="0">${ic('software.svg')}<div class="item-texts"><span class="title">Actualización de software</span><span class="subtitle">Sistema · Flatpak</span></div></div>
-    <div class="item" data-page="acerca" tabindex="0">${ic('about.svg')}<div class="item-texts"><span class="title">Acerca del portátil</span><span class="subtitle">Hardware · Info</span></div></div>
+    ${it('actualizacion','software.svg','updates')}
+    ${it('acerca','about.svg','about')}
 </div>`;
 }

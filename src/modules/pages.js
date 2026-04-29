@@ -1,4 +1,5 @@
 import{tauriInvoke,getAssetUrl}from'../tauri-api.js';
+import{t}from'./i18n.js';
 
 // ── Settings cache — optimistic in-memory store, updated on every write ──
 // Prevents toggle state from "resetting" when navigating back to a page before
@@ -87,6 +88,8 @@ function toast(msg, icon='✓'){
     toastContainer.appendChild(t);
     setTimeout(()=>t.remove(),3000);
 }
+// Expose globally so other modules / event listeners can show toasts
+if(typeof window!=='undefined')window.toast=toast;
 
 // ── Dialog (replaces browser confirm()) ──
 function showDialog(title,msg,{confirmText='Confirmar',confirmClass='confirm',cancelText='Cancelar',onConfirm,onCancel}={}){
@@ -229,7 +232,7 @@ function setupToggle(id, callback){
             this.classList.toggle('active');
             const active=this.classList.contains('active');
             const sub=this.closest('.detail-item-row')?.querySelector('.ds');
-            if(sub&&!sub.querySelector('span')&&!sub.dataset.custom) sub.textContent=active?'Activado':'Desactivado';
+            if(sub&&!sub.querySelector('span')&&!sub.dataset.custom) sub.textContent=active?t('enabled'):t('disabled');
             callback(active);
         });
     });
@@ -283,7 +286,7 @@ function lockIcon(){return`<svg viewBox="0 0 24 24" width="14" height="14" fill=
 
 // ── Conexiones main page ──
 export async function renderConexiones(c){
-    c.innerHTML=renderHeader('Conexiones')+renderSkeleton(3);
+    c.innerHTML=renderHeader(t('hdr_connections'))+renderSkeleton(3);
     let w={enabled:false,ssid:''},bt={enabled:false},air={enabled:false};
     try{[w,bt,air]=await Promise.all([
         tauriInvoke('get_wifi_status').then(JSON.parse).catch(()=>({enabled:false,ssid:''})),
@@ -291,13 +294,13 @@ export async function renderConexiones(c){
         tauriInvoke('get_airplane_mode').then(JSON.parse).catch(()=>({enabled:false}))
     ]);}catch(e){}
 
-    let h=renderHeader('Conexiones');
+    let h=renderHeader(t('hdr_connections'));
     h+=`<div class="detail-card">
         <div class="conn-main-row">
             <div class="conn-main-clickable" id="go-wifi">
                 <div class="conn-main-left">
                     <span class="conn-main-title">Wi-Fi</span>
-                    <span class="conn-main-sub ${w.enabled&&w.ssid?'conn-sub-active':''}" id="conn-wifi-sub">${w.enabled?(w.ssid?esc(w.ssid):'Activado'):'Desactivado'}</span>
+                    <span class="conn-main-sub ${w.enabled&&w.ssid?'conn-sub-active':''}" id="conn-wifi-sub">${w.enabled?(w.ssid?esc(w.ssid):t('enabled')):t('disabled')}</span>
                 </div>
                 ${chevron()}
             </div>
@@ -307,7 +310,7 @@ export async function renderConexiones(c){
             <div class="conn-main-clickable" id="go-bt">
                 <div class="conn-main-left">
                     <span class="conn-main-title">Bluetooth</span>
-                    <span class="conn-main-sub" id="conn-bt-sub">${bt.enabled?'Activado':'Desactivado'}</span>
+                    <span class="conn-main-sub" id="conn-bt-sub">${bt.enabled?t('enabled'):t('disabled')}</span>
                 </div>
                 ${chevron()}
             </div>
@@ -323,43 +326,61 @@ export async function renderConexiones(c){
     setupToggle('wifi',async a=>{
         try{await tauriInvoke('toggle_wifi',{enable:a});}catch(e){}
         const sub=document.getElementById('conn-wifi-sub');
-        if(sub){sub.textContent=a?'Activado':'Desactivado';sub.classList.remove('conn-sub-active');}
+        if(sub){sub.textContent=a?t('enabled'):t('disabled');sub.classList.remove('conn-sub-active');}
         toast(a?'Wi-Fi activado':'Wi-Fi desactivado');
     });
     setupToggle('bt',async a=>{
         try{await tauriInvoke('toggle_bluetooth',{enable:a});}catch(e){}
         const sub=document.getElementById('conn-bt-sub');
-        if(sub)sub.textContent=a?'Activado':'Desactivado';
+        if(sub)sub.textContent=a?t('enabled'):t('disabled');
         toast(a?'Bluetooth activado':'Bluetooth desactivado');
     });
     setupToggle('air',async a=>{try{await tauriInvoke('toggle_airplane_mode',{enable:a})}catch(e){}toast(a?'Modo Avión activado':'Modo Avión desactivado');});
 
-    // Refresh SSID label every 10s
+    // Refresh state every 5s — SSID + toggle sync (catch external changes)
     addInterval(async()=>{
         const sub=document.getElementById('conn-wifi-sub');if(!sub)return;
         try{
-            const w2=JSON.parse(await tauriInvoke('get_wifi_status'));
-            sub.textContent=w2.enabled?(w2.ssid?esc(w2.ssid):'Activado'):'Desactivado';
-            sub.classList.toggle('conn-sub-active',!!(w2.enabled&&w2.ssid));
+            const [w2,bt2,air2]=await Promise.all([
+                tauriInvoke('get_wifi_status').then(JSON.parse).catch(()=>null),
+                tauriInvoke('get_bluetooth_status').then(JSON.parse).catch(()=>null),
+                tauriInvoke('get_airplane_mode').then(JSON.parse).catch(()=>null)
+            ]);
+            if(w2){
+                sub.textContent=w2.enabled?(w2.ssid?esc(w2.ssid):t('enabled')):t('disabled');
+                sub.classList.toggle('conn-sub-active',!!(w2.enabled&&w2.ssid));
+                const wt=document.querySelector('[data-toggle="wifi"]');
+                if(wt)wt.classList.toggle('active',!!w2.enabled);
+            }
+            if(bt2){
+                const bsub=document.getElementById('conn-bt-sub');
+                if(bsub)bsub.textContent=bt2.enabled?t('enabled'):t('disabled');
+                const btt=document.querySelector('[data-toggle="bt"]');
+                if(btt)btt.classList.toggle('active',!!bt2.enabled);
+            }
+            if(air2){
+                const at=document.querySelector('[data-toggle="air"]');
+                if(at)at.classList.toggle('active',!!air2.enabled);
+            }
         }catch(e){}
-    },10000);
+    },5000);
 }
 
 // ── Wi-Fi subpage ──
 async function renderWifiPage(c){
-    c.innerHTML=renderHeader('Wi-Fi','conexiones')+renderSkeleton(2);
+    c.innerHTML=renderHeader(t('hdr_wifi'),'conexiones')+renderSkeleton(2);
     let w={enabled:false,ssid:''};
     try{w=JSON.parse(await tauriInvoke('get_wifi_status'));}catch(e){}
 
-    let h=renderHeader('Wi-Fi','conexiones');
+    let h=renderHeader(t('hdr_wifi'),'conexiones');
     // Toggle card
     h+=`<div class="detail-card">
         <div class="conn-main-row">
-            <span class="conn-main-title" style="font-size:17px;font-weight:700;color:var(--blue)">${w.enabled?'Activado':'Desactivado'}</span>
+            <span class="conn-main-title" style="font-size:17px;font-weight:700;color:var(--blue)">${w.enabled?t('enabled'):t('disabled')}</span>
             ${renderToggle('wifi-page',w.enabled)}
         </div>
     </div>`;
-    h+=renderSection('Red actual');
+    h+=renderSection(t('sec_current_net'));
     h+=`<div class="detail-card" id="wifi-current">${renderLoading('Obteniendo red...')}</div>`;
     h+=`<div class="section-header-row"><p class="section-header" style="margin:0">Redes disponibles</p><button class="refresh-btn" id="btn-wifi-refresh" title="Buscar redes"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>Buscar</button></div>`;
     h+=`<div class="detail-card" id="wl">${renderLoading('Buscando...')}</div>`;
@@ -379,7 +400,7 @@ async function renderWifiPage(c){
     setupToggle('wifi-page',async a=>{
         try{await tauriInvoke('toggle_wifi',{enable:a});}catch(e){}
         const label=document.querySelector('[data-toggle="wifi-page"]')?.previousElementSibling;
-        if(label)label.textContent=a?'Activado':'Desactivado';
+        if(label)label.textContent=a?t('enabled'):t('disabled');
         if(a)loadAll();
         else{
             const cur=document.getElementById('wifi-current');const el=document.getElementById('wl');
@@ -394,14 +415,14 @@ async function renderWifiPage(c){
 
 // ── Bluetooth subpage ──
 async function renderBTPage(c){
-    c.innerHTML=renderHeader('Bluetooth','conexiones')+renderSkeleton(2);
+    c.innerHTML=renderHeader(t('hdr_bluetooth'),'conexiones')+renderSkeleton(2);
     let bt={enabled:false};
     try{bt=JSON.parse(await tauriInvoke('get_bluetooth_status'));}catch(e){}
 
-    let h=renderHeader('Bluetooth','conexiones');
+    let h=renderHeader(t('hdr_bluetooth'),'conexiones');
     h+=`<div class="detail-card">
         <div class="conn-main-row">
-            <span class="conn-main-title" style="font-size:17px;font-weight:700;color:${bt.enabled?'var(--blue)':'var(--tx2)'}">${bt.enabled?'Activado':'Desactivado'}</span>
+            <span class="conn-main-title" style="font-size:17px;font-weight:700;color:${bt.enabled?'var(--blue)':'var(--tx2)'}">${bt.enabled?t('enabled'):t('disabled')}</span>
             ${renderToggle('bt-page',bt.enabled)}
         </div>
     </div>`;
@@ -422,7 +443,7 @@ async function renderBTPage(c){
     setupToggle('bt-page',async a=>{
         try{await tauriInvoke('toggle_bluetooth',{enable:a});}catch(e){}
         const label=document.querySelector('[data-toggle="bt-page"]')?.previousElementSibling;
-        if(label){label.textContent=a?'Activado':'Desactivado';label.style.color=a?'var(--blue)':'var(--tx2)';}
+        if(label){label.textContent=a?t('enabled'):t('disabled');label.style.color=a?'var(--blue)':'var(--tx2)';}
         if(a)loadBT();
         toast(a?'Bluetooth activado':'Bluetooth desactivado');
     });
@@ -525,7 +546,7 @@ async function renderWifiDetailPage(c,{ssid,security,band}){
     window.clearPageIntervals?.();
     if(window.pushSubNav)window.pushSubNav(()=>renderWifiPage(c));
     const bigIcon=`<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1" fill="#fff" stroke="none"/></svg>`;
-    c.innerHTML=renderHeader('Detalles de Wi-Fi')+
+    c.innerHTML=renderHeader(t('hdr_wifi_details'))+
         `<div class="wifi-detail-hero">
             <div class="wifi-detail-icon">${bigIcon}</div>
             <div class="wifi-detail-ssid">${esc(ssid)}</div>
@@ -597,7 +618,7 @@ async function renderWifiDetailPage(c,{ssid,security,band}){
 // ── Pantalla ────────────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════
 export async function renderPantalla(c){
-    c.innerHTML=renderHeader('Pantalla')+renderSkeleton(5);
+    c.innerHTML=renderHeader(t('hdr_display'))+renderSkeleton(5);
     let br=75,nl={active:false,temperature:4500},displays=[],theme={is_dark:false,scheme:''};
     let lockTimeout=5;
     let savedVb=false,savedHdr=false,savedDpst=false;
@@ -662,7 +683,7 @@ export async function renderPantalla(c){
     const toMins=lockTimeout;
     const toLabel=toMins<=1?'1 minuto':toMins>=60?`${Math.round(toMins/60)} hora${toMins>60?'s':''}`:`${toMins} minutos`;
 
-    let h=renderHeader('Pantalla');
+    let h=renderHeader(t('hdr_display'));
 
     // ① Dark/Light mode card
     h+=`<div class="detail-card" style="padding:16px 16px 0;gap:0">
@@ -721,7 +742,7 @@ export async function renderPantalla(c){
 
     // ⑤ Samsung Display extras (if hw)
     if(hasHwDisplayFeatures){
-        h+=renderSection('Samsung Display');
+        h+=renderSection(t('sec_samsung_display'));
         h+=renderCard([
             renderRowItem('Vision Booster','Brillo máximo · Gama amplia P3',renderToggle('vb',savedVb)),
             renderRowItem('HDR','HDR10 nativo · Gama dinámica alta',renderToggle('hdr',savedHdr)),
@@ -819,9 +840,9 @@ async function _pantallaSubDarkMode(c,isDark,styleThemes){
         <span class="dt">${esc(item.name)}</span>${current===item.id?_ckmark():''}
     </div>`;
     let h=renderHeader(`Ajustes del modo ${mode}`);
-    h+=renderSection('Tema Kvantum');
+    h+=renderSection(t('sec_kvantum'));
     h+=renderCard(bookosKv.map(i=>mkRow(i,kvCurrent,'kv')));
-    h+=renderSection('Tema Plasma');
+    h+=renderSection(t('sec_plasma_theme'));
     h+=renderCard(bookosPlasma.map(i=>mkRow(i,ptCurrent,'pt')));
     c.innerHTML=h;
 
@@ -859,7 +880,7 @@ function _pantallaSubFluidez(c,savedRR,displays){
         </div>
         <span class="ds">${opt.desc}</span>
     </div>`;
-    let h=renderHeader('Fluidez de movimientos');
+    let h=renderHeader(t('hdr_motion_smoothness'));
     h+=renderCard(options.map(mkRow));
     c.innerHTML=h;
     document.querySelectorAll('[data-rr]').forEach(row=>row.addEventListener('click',async()=>{
@@ -882,15 +903,15 @@ function _pantallaSubFluidez(c,savedRR,displays){
 
 async function _pantallaSubNightLight(c,nl,nlFrom,nlTo){
     const tempPct=Math.round(((nl.temperature||4500)-1000)/55);
-    let h=renderHeader('Protección de la vista');
+    let h=renderHeader(t('hdr_eye_protection'));
     h+=renderCard([renderRowItem('Protección de la vista',nl.active?'Activada':'Desactivada',renderToggle('nl',nl.active))]);
     h+=`<div id="nl-opts"${nl.active?'':' style="display:none"'}>`;
-    h+=renderSection('Horario automático');
+    h+=renderSection(t('sec_auto_schedule'));
     h+=renderCard([
         `<div class="detail-item"><span class="dt">Desde las</span><input type="time" class="time-input" id="nl-from" value="${nlFrom}"></div>`,
         `<div class="detail-item"><span class="dt">Hasta las</span><input type="time" class="time-input" id="nl-to" value="${nlTo}"></div>`,
     ]);
-    h+=renderSection('Calidez de color');
+    h+=renderSection(t('sec_color_warmth'));
     h+=renderCard([`<div class="detail-item"><span class="dt">Temperatura</span>${renderSlider('nlt',tempPct,0,100)}</div>`]);
     h+=`</div>`;
     c.innerHTML=h;
@@ -922,7 +943,7 @@ async function _pantallaSubNightLight(c,nl,nlFrom,nlTo){
 }
 
 function _pantallaSubDisplayMode(c,iccProfiles,effectiveIcc){
-    let h=renderHeader('Modo de pantalla');
+    let h=renderHeader(t('hdr_screen_mode'));
     h+=renderCard(iccProfiles.map(p=>`
         <div class="detail-item" style="cursor:pointer;justify-content:space-between" data-icc="${p.file}">
             <div style="display:flex;align-items:center;gap:10px">
@@ -947,7 +968,7 @@ function _pantallaSubResolution(c,displays){
     const uniqueRes=[...new Set((d.modes||[]).map(m=>m.split('@')[0].trim()))];
     const resMap={"2880x1800":"WQXGA+","1920x1200":"WUXGA","1440x900":"WXGA+","1280x800":"WXGA","2560x1600":"WQXGA","1920x1080":"FHD"};
     const getResName=m=>{const b=m.split('@')[0].trim();return resMap[b]||b;};
-    let h=renderHeader('Resolución de la pantalla');
+    let h=renderHeader(t('hdr_resolution'));
     h+=renderCard(uniqueRes.map(r=>`
         <div class="detail-item" style="cursor:pointer;justify-content:space-between" data-res="${r}">
             <span class="dt">${getResName(r)}</span>
@@ -973,7 +994,7 @@ function _pantallaSubTimeout(c,lockTimeout){
         {mins:1,label:'1 minuto'},{mins:2,label:'2 minutos'},{mins:5,label:'5 minutos'},
         {mins:10,label:'10 minutos'},{mins:15,label:'15 minutos'},{mins:30,label:'30 minutos'},
     ];
-    let h=renderHeader('Tiempo de espera de pantalla');
+    let h=renderHeader(t('hdr_screen_timeout'));
     h+=renderCard(options.map(opt=>`
         <div class="detail-item" style="cursor:pointer;justify-content:space-between" data-mins="${opt.mins}">
             <span class="dt">${opt.label}</span>
@@ -993,7 +1014,7 @@ function _pantallaSubTimeout(c,lockTimeout){
 // ── Sonido ──────────────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════
 export async function renderSonido(c){
-    c.innerHTML=renderHeader('Sonidos y vibración')+renderSkeleton(2);
+    c.innerHTML=renderHeader(t('hdr_sound'))+renderSkeleton(2);
     let vol=50,muted=false,notifSnd=true,uiSnd=true,devices={sinks:[],sources:[],defaultSink:'',defaultSource:''},apps=[],descs=[];
     try{[{volume:vol,muted},{value:notifSnd},{value:uiSnd},devices,apps,descs]=await Promise.all([
         tauriInvoke('get_volume').then(JSON.parse).catch(()=>({volume:50,muted:false})),
@@ -1008,16 +1029,16 @@ export async function renderSonido(c){
     const sinkLabel=(name)=>descMap[name]||name.split('.').slice(-2).join(' ')||name;
     const srcLabel=(name)=>descMap[name]||name.split('.').slice(-2).join(' ')||name;
 
-    let h=renderHeader('Sonidos y vibración');
-    h+=renderSection('Volumen');
+    let h=renderHeader(t('hdr_sound'));
+    h+=renderSection(t('sec_volume'));
     h+=renderCard([
         `<div class="detail-item"><span class="dt">Volumen del sistema</span>${renderSlider('vol',vol)}</div>`,
-        renderRowItem('Silenciar',muted?'Activado':'Desactivado',renderToggle('mute',muted)),
+        renderRowItem('Silenciar',muted?t('enabled'):t('disabled'),renderToggle('mute',muted)),
     ]);
 
     // Output device
     if(devices.sinks.length>1){
-        h+=renderSection('Salida de audio');
+        h+=renderSection(t('sec_audio_out'));
         h+=`<div class="detail-card"><div class="audio-dev-list" id="audio-sinks">`;
         devices.sinks.forEach(s=>{
             const active=s.name===devices.defaultSink||s.isDefault;
@@ -1031,7 +1052,7 @@ export async function renderSonido(c){
 
     // Input device
     if(devices.sources.length>1){
-        h+=renderSection('Entrada de audio');
+        h+=renderSection(t('sec_audio_in'));
         h+=`<div class="detail-card"><div class="audio-dev-list" id="audio-sources">`;
         devices.sources.forEach(s=>{
             const active=s.name===devices.defaultSource||s.isDefault;
@@ -1046,7 +1067,7 @@ export async function renderSonido(c){
     // Per-app volumes
     const visApps=apps.filter(a=>a.name&&!['pipewire','PulseAudio','pavucontrol'].includes(a.name));
     if(visApps.length>0){
-        h+=renderSection('Volumen por aplicación');
+        h+=renderSection(t('sec_volume_per_app'));
         h+=`<div class="detail-card">`;
         visApps.forEach(a=>{
             h+=`<div class="detail-item audio-app-row" data-app-idx="${a.index}">
@@ -1057,12 +1078,12 @@ export async function renderSonido(c){
         h+=`</div>`;
     }
 
-    h+=renderSection('Sonidos del sistema');
+    h+=renderSection(t('sec_system_sounds'));
     h+=renderCard([
         renderRowItem('Sonidos de notificación','Reproduce sonido al recibir notificaciones',renderToggle('snd-notif',notifSnd)),
         renderRowItem('Sonidos de interfaz','Sonidos al hacer clic, navegar y otras acciones',renderToggle('snd-ui',uiSnd)),
     ]);
-    h+=renderSection('Controles de medios');
+    h+=renderSection(t('sec_media_controls'));
     h+=renderCard([
         renderRowItem('Reproducción anterior','Tecla ⏮',`<span class="ds">⏮</span>`),
         renderRowItem('Reproducir / Pausar','Tecla ⏯',`<span class="ds">⏯</span>`),
@@ -1155,7 +1176,7 @@ function _emitIpcState(profile,chargeLimit){
 }
 
 export async function renderBateria(c){
-    c.innerHTML=renderHeader('Batería')+renderSkeleton(2)+renderSkeletonChart();
+    c.innerHTML=renderHeader(t('hdr_battery'))+renderSkeleton(2)+renderSkeletonChart();
     await _renderBateriaContent(c);
     // Auto-refresh every 5s — updates live data and syncs state with the battery applet
     let _lastIpcTs=0;
@@ -1290,7 +1311,7 @@ async function _renderBateriaContent(c){
     const efd=efdRaw>0?Math.max(efdRaw,ef):ef||1;
     const capacityVal=parseFloat((bat.capacity||'').replace('%','').replace(',','.'))||(efd>0?Math.min(100,Math.round(ef/efd*100)):100);
     const health=Math.min(100,Math.round(capacityVal));
-    let h=renderHeader('Batería');
+    let h=renderHeader(t('hdr_battery'));
     h+=`<div class="bat-page-wrap">`; // max-width wrapper — evita que el chart se estire en pantalla completa
 
     // Hero — número grande + label más pequeño en la misma línea
@@ -1573,7 +1594,7 @@ async function _renderBateriaContent(c){
         const speedColor=chargingInfo.power_uw>30e6?'var(--green)':
                          chargingInfo.power_uw>15e6?'var(--blue)':
                          chargingInfo.power_uw>0?'var(--orange)':'var(--tx2)';
-        h+=renderSection('Carga USB-C');
+        h+=renderSection(t('sec_usbc'));
         h+=renderCard([
             `<div class="detail-item"><div class="detail-texts"><span class="dt">Potencia actual</span><span class="ds" style="color:${speedColor};font-weight:600">${speedLabel}</span></div></div>`,
             pd?`<div class="detail-item"><span class="dt">Protocolo</span><span class="ds">${esc(pd)}${adapter?' · '+adapter:''}</span></div>`:'',
@@ -1615,7 +1636,7 @@ async function _renderBateriaContent(c){
         const perfNames={'ahorro':'Ahorro extremo','power-saver':'Silencioso','balanced':'Optimizado','performance':'Rendimiento'};
         const perfDescs={'ahorro':'Mínimo consumo','power-saver':'Ahorra batería','balanced':'Equilibrado','performance':'Máximo poder'};
         const modes=['ahorro','power-saver','balanced','performance'];
-        h+=renderSection('Modo de rendimiento')+`<div class="perf-modes">${modes.map(m=>`<div class="perf-mode-card ${pm===m?'active':''}" data-mode="${m}"><div class="perf-mode-icon"><img src="${perfIcons[m]}" width="32" height="32" class="perf-icon-img"></div><div class="perf-mode-name">${perfNames[m]}</div><div class="perf-mode-desc">${perfDescs[m]}</div></div>`).join('')}</div>`;
+        h+=renderSection(t('sec_perf_mode'))+`<div class="perf-modes">${modes.map(m=>`<div class="perf-mode-card ${pm===m?'active':''}" data-mode="${m}"><div class="perf-mode-icon"><img src="${perfIcons[m]}" width="32" height="32" class="perf-icon-img"></div><div class="perf-mode-name">${perfNames[m]}</div><div class="perf-mode-desc">${perfDescs[m]}</div></div>`).join('')}</div>`;
     }
     h+=`</div>`; // cierre bat-page-wrap
     c.innerHTML=h;
@@ -1756,7 +1777,7 @@ async function _renderBateriaContent(c){
                 'Activar carga adaptativa',
                 `<p style="margin:0 0 10px">La carga adaptativa aprende cuándo usas el equipo y detiene la carga antes de que llegue al 100%, completándola justo a tiempo.</p><p style="margin:0;font-size:12px;opacity:0.6">Para obtener mejores predicciones, deja el equipo enchufado durante la noche.</p>`,
                 {
-                    confirmText:'Activar',
+                    confirmText:t('activate'),
                     onConfirm:async()=>{
                         toggle?.classList.add('on');
                         toggle?.setAttribute('aria-checked','true');
@@ -1804,7 +1825,7 @@ async function _renderBateriaContent(c){
 // ── Notificaciones ─────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════
 export async function renderNotificaciones(c){
-    c.innerHTML=renderHeader('Notificaciones')+renderSkeleton(2);
+    c.innerHTML=renderHeader(t('hdr_notifications'))+renderSkeleton(2);
 
     let dnd=false,snd=true,onLock=true,popups=true;
     try{
@@ -1816,18 +1837,18 @@ export async function renderNotificaciones(c){
         ]);
     }catch(e){}
 
-    let h=renderHeader('Notificaciones');
-    h+=renderSection('General');
+    let h=renderHeader(t('hdr_notifications'));
+    h+=renderSection(t('sec_general'));
     h+=renderCard([
         renderRowItem('No molestar',dnd?'Silencia todas las notificaciones':'Permite notificaciones',renderToggle('dnd',dnd)),
         renderRowItem('Mostrar en pantalla bloqueada','Ver notificaciones al bloquear',renderToggle('notif-lock',onLock)),
         renderRowItem('Mostrar todas las notificaciones','Desactiva para ver sólo críticas',renderToggle('notif-popups',popups)),
     ]);
-    h+=renderSection('Audio');
+    h+=renderSection(t('sec_audio'));
     h+=renderCard([
         renderRowItem('Sonidos de notificación','Reproduce sonido al recibir notificaciones',renderToggle('notif-snd',snd)),
     ]);
-    h+=renderSection('Historial');
+    h+=renderSection(t('sec_history'));
     h+=renderCard([
         renderRowItem('Historial de notificaciones','Abre el historial de Plasma',`<button class="btn btn-secondary btn-sm" id="notif-hist">Abrir</button>`),
     ]);
@@ -1860,7 +1881,7 @@ export async function renderNotificaciones(c){
 // ── Seguridad ──────────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════
 export async function renderSeguridad(c){
-    c.innerHTML=renderHeader('Seguridad y privacidad')+renderSkeleton(3);
+    c.innerHTML=renderHeader(t('hdr_security'))+renderSkeleton(3);
 
     let fw={active:false},lockTimeout=5,lockAfterSuspend=true,lockGrace=0,camOn=true,micMuted=false;
     try{
@@ -1877,23 +1898,23 @@ export async function renderSeguridad(c){
     const timeoutOpts=[1,2,5,10,15,30].map(m=>`<option value="${m}" ${m==lockTimeout?'selected':''}>${m} min</option>`).join('');
     const graceOpts=[0,5,10,30,60].map(s=>`<option value="${s}" ${s==lockGrace?'selected':''}>${s===0?'Inmediatamente':`${s}s`}</option>`).join('');
 
-    let h=renderHeader('Seguridad y privacidad');
-    h+=renderSection('Cortafuegos');
+    let h=renderHeader(t('hdr_security'));
+    h+=renderSection(t('sec_firewall'));
     h+=renderCard([
         renderRowItem('Cortafuegos (UFW)',fw.active?'Protegido':'Desactivado',renderToggle('fw',fw.active)),
     ]);
-    h+=renderSection('Pantalla de bloqueo');
+    h+=renderSection(t('sec_lockscreen_section'));
     h+=renderCard([
         renderRowItem('Bloquear al reanudar de suspensión','Pide contraseña al despertar',renderToggle('sec-lock-resume',lockAfterSuspend)),
         `<div class="detail-item"><span class="dt">Bloqueo automático</span><select class="sel" id="sec-lock-timeout" style="margin-top:8px">${timeoutOpts}</select></div>`,
         `<div class="detail-item"><span class="dt">Periodo de gracia</span><span class="ds">Tiempo sin pedir contraseña al despertar</span><select class="sel" id="sec-lock-grace" style="margin-top:8px">${graceOpts}</select></div>`,
     ]);
-    h+=renderSection('Cámara y micrófono');
+    h+=renderSection(t('sec_camera_mic'));
     h+=renderCard([
         renderRowItem('Cámara',camOn?'Activada':'Bloqueada a nivel del kernel',renderToggle('sec-camera',camOn)),
         renderRowItem('Micrófono',micMuted?'Silenciado en todo el sistema':'Activo',renderToggle('sec-mic',!micMuted)),
     ]);
-    h+=renderSection('Privacidad');
+    h+=renderSection(t('sec_privacy'));
     h+=renderCard([
         renderRowItem('Historial de actividades','Plasma registra tus archivos y apps recientes',renderToggle('sec-activity',false)),
         `<div class="detail-item" style="cursor:pointer" id="sec-clear-hist"><span class="dt" style="color:var(--red,#e53935)">Borrar historial de actividades</span></div>`,
@@ -1956,7 +1977,7 @@ export async function renderSeguridad(c){
 // ── Temas (schedule uses actual selected themes, not hardcoded) ────────
 // ════════════════════════════════════════════════════════════════════════
 export async function renderTemas(c){
-    c.innerHTML=renderHeader('Temas')+renderSkeleton(3);
+    c.innerHTML=renderHeader(t('hdr_themes'))+renderSkeleton(3);
     let theme={scheme:'',is_dark:false},themes=[],schedule={enabled:false,light_time:'07:00',dark_time:'20:00',light_theme:'BookOS Light',dark_theme:'BookOS Dark'};
     let kcsT={light:'',dark:'',is_global:false};
     try{[theme,themes,schedule,kcsT]=await Promise.all([
@@ -1986,13 +2007,13 @@ export async function renderTemas(c){
         </div>`;
     };
 
-    c.innerHTML=renderHeader('Temas')+
-        renderCard([renderRowItem('Modo oscuro',theme.is_dark?'Activado':'Desactivado',renderToggle('dm',theme.is_dark))])+
-        renderSection('Cambio programado')+renderCard([
+    c.innerHTML=renderHeader(t('hdr_themes'))+
+        renderCard([renderRowItem('Modo oscuro',theme.is_dark?t('enabled'):t('disabled'),renderToggle('dm',theme.is_dark))])+
+        renderSection(t('sec_scheduled_change'))+renderCard([
             renderRowItem('Programar tema','Cambiar automáticamente por hora',renderToggle('sched',schedule.enabled)),
             `<div class="detail-item" id="sched-opts" style="display:${schedule.enabled?'block':'none'}"><div style="display:flex;gap:10px;margin-top:8px"><div style="flex:1"><span class="ds">Claro desde</span><input type="time" id="sched-lt" value="${schedule.light_time}" class="sel" style="margin-top:4px"></div><div style="flex:1"><span class="ds">Oscuro desde</span><input type="time" id="sched-dt" value="${schedule.dark_time}" class="sel" style="margin-top:4px"></div></div><div style="display:flex;gap:10px;margin-top:8px"><div style="flex:1"><span class="ds">Tema claro</span><select id="sched-ltheme" class="sel" style="margin-top:4px">${light.map(t=>`<option value="${esc(t.name)}" ${t.name===schedule.light_theme?'selected':''}>${esc(t.name)}</option>`).join('')}</select></div><div style="flex:1"><span class="ds">Tema oscuro</span><select id="sched-dtheme" class="sel" style="margin-top:4px">${dark.map(t=>`<option value="${esc(t.name)}" ${t.name===schedule.dark_theme?'selected':''}>${esc(t.name)}</option>`).join('')}</select></div></div></div>`
         ])+
-        renderSection('Tema')+`<div class="theme-grid-duo">${themes.map(t=>mkCard(t,t.is_dark)).join('')}</div>`;
+        renderSection(t('sec_theme'))+`<div class="theme-grid-duo">${themes.map(t=>mkCard(t,t.is_dark)).join('')}</div>`;
 
     setupToggle('dm',async a=>{
         const name=a?(kcsT.dark||dark[0]?.name||'BookOS Dark'):(kcsT.light||light[0]?.name||'BookOS Light');
@@ -2067,16 +2088,19 @@ function _startFpIdleAnimById(svgId='fp-svg-main'){
 function _startFpIdleAnim(){_startFpIdleAnimById('fp-svg-main');}
 
 export async function renderBloqueo(c){
-    c.innerHTML=renderHeader('Pantalla de bloqueo')+renderSkeleton(3);
-    let timeout=5,fp={available:false,enrolled:false},aod=false,sddmCfg={variant:'dark',background:'solid',bgImage:''},userInfo={display_name:'',has_avatar:false,avatar_path:''},bookBarEnabled=true;
+    c.innerHTML=renderHeader(t('hdr_lockscreen'))+renderSkeleton(3);
+    const _sddmDefaults={variant:'dark',background:'solid',bgImage:'',accentColor:'#007AFF',clockFormat:'24h',clockFont:'serif',blurRadius:'24',showDate:'true',showBattery:'true',showBookBar:'true'};
+    let timeout=5,fp={available:false,enrolled:false},aod=false,sddmCfg={..._sddmDefaults},userInfo={display_name:'',has_avatar:false,avatar_path:''},bookBarEnabled=true;
     try{[timeout,fp,aod,sddmCfg,userInfo,bookBarEnabled]=await Promise.all([
         tauriInvoke('get_lock_timeout').then(r=>JSON.parse(r).timeout).catch(()=>5),
         tauriInvoke('check_fingerprint').then(JSON.parse).catch(()=>({available:false,enrolled:false})),
         getSetting('AOD','false').then(v=>v==='true'),
-        tauriInvoke('get_sddm_config').then(JSON.parse).catch(()=>({variant:'dark',background:'solid',bgImage:''})),
+        tauriInvoke('get_sddm_config').then(JSON.parse).catch(()=>({..._sddmDefaults})),
         tauriInvoke('get_user_info').then(JSON.parse).catch(()=>({display_name:'',has_avatar:false,avatar_path:''})),
         getSetting('BookBarEnabled','true').then(v=>v!=='false')
     ]);}catch(e){}
+    // Defaults for missing keys (older config)
+    for(const k in _sddmDefaults) if(!sddmCfg[k]) sddmCfg[k]=_sddmDefaults[k];
 
     // Fingerprint SVG — dual-layer: grey base + blue overlay (opacity-controlled)
     const enrolled=fp.enrolled;
@@ -2109,7 +2133,7 @@ export async function renderBloqueo(c){
         </g>
     </svg>`;
 
-    const fpHtml=fp.available?renderSection('Biometría')+`<div class="detail-card">
+    const fpHtml=fp.available?renderSection(t('sec_biometrics'))+`<div class="detail-card">
         <div class="fp-hello-wrap" id="fp-area">
             <div class="sensor-wrapper" id="fp-rings">${fpSvg}<div class="fp-laser" aria-hidden="true"></div></div>
             <p id="fp-status" class="fp-hello-status">${enrolled?'Huella configurada correctamente':'Coloca el dedo en el sensor'}</p>
@@ -2119,7 +2143,11 @@ export async function renderBloqueo(c){
 
     // SDDM theme section
     const bgOpts=[['solid','Sólido'],['image','Imagen'],['blur','Blur']];
-    const sddmHtml=renderSection('Gestor de inicio de sesión (SDDM)')+
+    const fmtOpts=[['24h','24 horas'],['12h','12 horas']];
+    const fontOpts=[['serif','Serif'],['sans','Sans'],['mono','Mono']];
+    const accentSwatches=['#007AFF','#FF3B30','#FF9500','#FFCC00','#34C759','#5AC8FA','#AF52DE','#FF2D55'];
+    const blurPct=parseInt(sddmCfg.blurRadius)||24;
+    const sddmHtml=renderSection(t('sec_sddm'))+
         `<div id="sddm-preview-wrap"></div>`+
         `<div class="detail-card">
         ${renderRowItem('Modo oscuro','Pantalla de inicio oscura o clara',renderToggle('sddm-dark',sddmCfg.variant==='dark'))}
@@ -2131,12 +2159,38 @@ export async function renderBloqueo(c){
             <div class="detail-texts"><span class="dt">Imagen de fondo</span><span class="ds" id="sddm-img-name" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${sddmCfg.bgImage?sddmCfg.bgImage.split('/').pop():'Sin imagen'}</span></div>
             <button class="btn btn-secondary btn-sm" id="sddm-img-btn">Elegir</button>
         </div>
+        <div class="detail-item" id="sddm-blur-row" style="display:${sddmCfg.background==='blur'?'flex':'none'}">
+            <span class="dt">Intensidad del blur</span>
+            <div class="slider-container"><input type="range" class="filled" id="sddm-blur" min="0" max="60" value="${blurPct}" style="--fill:${(blurPct/60)*100}%"><span class="slider-label" id="sddm-blur-l">${blurPct}</span></div>
+        </div>
+        <div class="detail-item detail-item-row">
+            <div class="detail-texts"><span class="dt">Formato del reloj</span></div>
+            <div class="seg-ctrl" id="sddm-fmt-ctrl">${fmtOpts.map(([v,l])=>`<button class="seg-btn${sddmCfg.clockFormat===v?' active':''}" data-val="${v}">${l}</button>`).join('')}</div>
+        </div>
+        <div class="detail-item detail-item-row">
+            <div class="detail-texts"><span class="dt">Tipografía del reloj</span></div>
+            <div class="seg-ctrl" id="sddm-font-ctrl">${fontOpts.map(([v,l])=>`<button class="seg-btn${sddmCfg.clockFont===v?' active':''}" data-val="${v}" style="font-family:${v==='mono'?'monospace':(v==='sans'?'sans-serif':'serif')}">${l}</button>`).join('')}</div>
+        </div>
+        <div class="detail-item detail-item-row">
+            <div class="detail-texts"><span class="dt">Color de acento</span><span class="ds">Botones, enlaces y huella</span></div>
+            <div id="sddm-accent-swatches" style="display:flex;gap:6px;align-items:center">
+                ${accentSwatches.map(c=>`<button class="sddm-swatch${sddmCfg.accentColor.toLowerCase()===c.toLowerCase()?' active':''}" data-color="${c}" style="width:22px;height:22px;border-radius:11px;border:2px solid ${sddmCfg.accentColor.toLowerCase()===c.toLowerCase()?'var(--tx)':'transparent'};background:${c};cursor:pointer;padding:0"></button>`).join('')}
+                <input type="color" id="sddm-accent-custom" value="${sddmCfg.accentColor}" style="width:24px;height:24px;border:none;background:transparent;cursor:pointer;padding:0">
+            </div>
+        </div>
+        ${renderRowItem('Mostrar fecha','Día de la semana bajo el reloj',renderToggle('sddm-show-date',sddmCfg.showDate!=='false'))}
+        ${renderRowItem('Mostrar batería','Pastilla con porcentaje de batería',renderToggle('sddm-show-batt',sddmCfg.showBattery!=='false'))}
+        ${renderRowItem('Mostrar Book Bar','Pastilla con rutina activa o batería',renderToggle('sddm-show-bb',sddmCfg.showBookBar!=='false'))}
+        <div class="detail-item detail-item-row">
+            <div class="detail-texts"><span class="dt">Previsualizar pantalla</span><span class="ds">Abre el greeter en modo prueba</span></div>
+            <button class="btn btn-secondary btn-sm" id="sddm-preview-btn">Previsualizar</button>
+        </div>
     </div>`;
 
     const lockType=await getSetting('LockType','password').catch(()=>'password');
     const lockTypeLabel=lockType==='pin'?'PIN':'Contraseña del sistema';
 
-    c.innerHTML=renderHeader('Pantalla de bloqueo y AOD')+
+    c.innerHTML=renderHeader(t('hdr_lockscreen_aod'))+
         renderCard([
             `<div class="detail-item detail-item-row" id="lock-type-row" style="cursor:pointer">
                 <div class="detail-texts"><span class="dt">Tipo de bloqueo</span><span class="ds" id="lock-type-label">${lockTypeLabel}</span></div>
@@ -2279,7 +2333,18 @@ export async function renderBloqueo(c){
     });
 
     // SDDM preview
-    let _sddmCfg={variant:sddmCfg.variant,background:sddmCfg.background,bgImage:sddmCfg.bgImage};
+    let _sddmCfg={
+        variant:sddmCfg.variant,
+        background:sddmCfg.background,
+        bgImage:sddmCfg.bgImage,
+        accentColor:sddmCfg.accentColor,
+        clockFormat:sddmCfg.clockFormat,
+        clockFont:sddmCfg.clockFont,
+        blurRadius:sddmCfg.blurRadius,
+        showDate:sddmCfg.showDate,
+        showBattery:sddmCfg.showBattery,
+        showBookBar:sddmCfg.showBookBar
+    };
     const _avatarUrl=userInfo.has_avatar&&userInfo.avatar_path
         ?(window.__TAURI__?.core?.convertFileSrc?window.__TAURI__.core.convertFileSrc(userInfo.avatar_path):`file://${userInfo.avatar_path}`):'';
     const _displayName=userInfo.display_name||'Usuario';
@@ -2291,6 +2356,10 @@ export async function renderBloqueo(c){
         const bg=_sddmCfg.background;
         const imgPath=_sddmCfg.bgImage;
         const imgUrl=imgPath?(window.__TAURI__?.core?.convertFileSrc?window.__TAURI__.core.convertFileSrc(imgPath):`file://${imgPath}`):'';
+        const accent=_sddmCfg.accentColor||'#007AFF';
+        const blurPx=Math.max(0,Math.min(60,parseInt(_sddmCfg.blurRadius)||24))*0.6; // scale to preview size
+        const showDate=_sddmCfg.showDate!=='false';
+        const showBatt=_sddmCfg.showBattery!=='false';
 
         const bgColor=dark?'#000':'#f2f2f7';
         const fgColor=dark?'#fff':'#000';
@@ -2299,7 +2368,14 @@ export async function renderBloqueo(c){
         const pillBg=dark?'rgba(28,28,30,.8)':'rgba(255,255,255,.8)';
         const overlay=dark?'rgba(0,0,0,.5)':'rgba(255,255,255,.37)';
         const now=new Date();
-        const clockStr=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+        let clockStr;
+        if(_sddmCfg.clockFormat==='12h'){
+            const h12=((now.getHours()+11)%12)+1;
+            clockStr=h12+':'+String(now.getMinutes()).padStart(2,'0')+' '+(now.getHours()<12?'AM':'PM');
+        } else {
+            clockStr=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+        }
+        const dateStr=now.toLocaleDateString('es-ES',{weekday:'long',day:'numeric',month:'long'});
 
         // Background layers
         let bgLayer='';
@@ -2310,7 +2386,7 @@ export async function renderBloqueo(c){
                      <div style="position:absolute;inset:0;background:${overlay}"></div>`;
         } else { // blur
             bgLayer=`<div style="position:absolute;inset:0;overflow:hidden">
-                <div style="position:absolute;inset:-20px;background:url('${imgUrl}') center/cover no-repeat;filter:blur(12px)"></div>
+                <div style="position:absolute;inset:-${Math.max(20,blurPx*2)}px;background:url('${imgUrl}') center/cover no-repeat;filter:blur(${blurPx}px)"></div>
             </div>
             <div style="position:absolute;inset:0;background:${overlay}"></div>`;
         }
@@ -2318,7 +2394,10 @@ export async function renderBloqueo(c){
         wrap.innerHTML=`<div style="position:relative;width:100%;aspect-ratio:16/10;border-radius:18px;overflow:hidden;margin-bottom:12px;box-shadow:0 8px 32px rgba(0,0,0,.35)">
             ${bgLayer}
             <!-- clock -->
-            <div style="position:absolute;top:8%;left:50%;transform:translateX(-50%);font-family:serif;font-size:clamp(18px,5vw,28px);font-weight:700;color:${fgColor};white-space:nowrap;text-shadow:0 1px 4px rgba(0,0,0,.4)">${clockStr}</div>
+            <div style="position:absolute;top:7%;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:2px">
+                <div style="font-family:${_sddmCfg.clockFont==='mono'?'monospace':(_sddmCfg.clockFont==='sans'?'sans-serif':'serif')};font-size:clamp(18px,5vw,28px);font-weight:700;color:${fgColor};white-space:nowrap;text-shadow:0 1px 4px rgba(0,0,0,.4)">${clockStr}</div>
+                ${showDate?`<div style="font-size:9px;font-weight:500;color:${fgColor};opacity:.85;text-shadow:0 1px 3px rgba(0,0,0,.4)">${dateStr}</div>`:''}
+            </div>
             <!-- avatar + name + password -->
             <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:6px;width:80%">
                 ${_avatarUrl
@@ -2327,16 +2406,21 @@ export async function renderBloqueo(c){
                 <div style="font-size:11px;font-weight:500;color:${fgColor}">${_displayName}</div>
                 <div style="display:flex;gap:4px;width:100%;max-width:160px;margin-top:2px">
                     <div style="flex:1;height:20px;background:${fieldBg};border-radius:10px;display:flex;align-items:center;padding:0 8px">
-                        <span style="font-size:6px;color:${fg2};letter-spacing:3px">●●●●●</span>
+                        <div style="width:10px;height:10px;border-radius:50%;background:${accent};margin-left:auto"></div>
                     </div>
                     <div style="width:20px;height:20px;background:${dark?'#3a3a3c':'#e5e5ea'};border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:10px;color:${fgColor}">→</div>
                 </div>
-                <div style="font-size:8px;color:${fg2};margin-top:1px">o usa tu huella dactilar</div>
+                <div style="display:flex;flex-direction:column;align-items:center;gap:3px;margin-top:3px">
+                    <div style="width:14px;height:14px;border-radius:50%;background:${accent}33;display:flex;align-items:center;justify-content:center">
+                        <div style="width:7px;height:7px;border-radius:50%;border:1.2px solid ${accent}"></div>
+                    </div>
+                    <div style="font-size:8px;color:${accent}">Coloca tu dedo en el lector</div>
+                </div>
             </div>
             <!-- battery pill -->
-            <div style="position:absolute;bottom:6%;left:50%;transform:translateX(-50%);background:${pillBg};border-radius:10px;padding:3px 10px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)">
+            ${showBatt?`<div style="position:absolute;bottom:6%;left:50%;transform:translateX(-50%);background:${pillBg};border-radius:10px;padding:3px 10px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)">
                 <span style="font-size:9px;font-weight:600;color:${fgColor}">🔋 74%</span>
-            </div>
+            </div>`:''}
         </div>`;
     }
     _renderSddmPreview();
@@ -2355,7 +2439,19 @@ export async function renderBloqueo(c){
         });
         if(!pwd)return;
         try{
-            const res=JSON.parse(await tauriInvoke('set_sddm_config',{variant:_sddmCfg.variant,background:_sddmCfg.background,bgImage:_sddmCfg.bgImage,password:pwd}));
+            const res=JSON.parse(await tauriInvoke('set_sddm_config',{
+                variant:_sddmCfg.variant,
+                background:_sddmCfg.background,
+                bgImage:_sddmCfg.bgImage,
+                accentColor:_sddmCfg.accentColor,
+                clockFormat:_sddmCfg.clockFormat,
+                clockFont:_sddmCfg.clockFont,
+                blurRadius:String(_sddmCfg.blurRadius),
+                showDate:_sddmCfg.showDate,
+                showBattery:_sddmCfg.showBattery,
+                showBookBar:_sddmCfg.showBookBar,
+                password:pwd
+            }));
             if(res.ok){toast('Pantalla de inicio actualizada','🖥️');}
             else{toast('Error: '+(res.error||'desconocido'),'❌');}
         }catch(e){toast('Error al guardar configuración SDDM','❌');}
@@ -2389,6 +2485,98 @@ export async function renderBloqueo(c){
         }catch(e){toast('Error al seleccionar imagen','❌');}
     });
 
+    // Show blur slider only when bg=blur
+    document.querySelectorAll('#sddm-bg-ctrl .seg-btn').forEach(btn=>{
+        btn.addEventListener('click',()=>{
+            const blurRow=document.getElementById('sddm-blur-row');
+            if(blurRow)blurRow.style.display=btn.dataset.val==='blur'?'flex':'none';
+        });
+    });
+
+    // Blur slider — debounced save
+    let _blurSaveTimer=null;
+    setupSlider('sddm-blur',v=>{
+        _sddmCfg.blurRadius=String(v);
+        const l=document.getElementById('sddm-blur-l');
+        if(l)l.textContent=v;
+        _renderSddmPreview();
+        clearTimeout(_blurSaveTimer);
+        _blurSaveTimer=setTimeout(()=>{ _sddmPromptAndSave(); }, 600);
+    },false);
+
+    // Clock format
+    document.querySelectorAll('#sddm-fmt-ctrl .seg-btn').forEach(btn=>{
+        btn.addEventListener('click',async()=>{
+            document.querySelectorAll('#sddm-fmt-ctrl .seg-btn').forEach(b=>b.classList.remove('active'));
+            btn.classList.add('active');
+            _sddmCfg.clockFormat=btn.dataset.val;
+            _renderSddmPreview();
+            await _sddmPromptAndSave();
+        });
+    });
+
+    // Accent color swatches
+    function _applyAccent(color){
+        _sddmCfg.accentColor=color;
+        document.querySelectorAll('#sddm-accent-swatches .sddm-swatch').forEach(s=>{
+            const match=s.dataset.color.toLowerCase()===color.toLowerCase();
+            s.classList.toggle('active',match);
+            s.style.borderColor=match?'var(--tx)':'transparent';
+        });
+        const custom=document.getElementById('sddm-accent-custom');
+        if(custom)custom.value=color;
+        _renderSddmPreview();
+    }
+    document.querySelectorAll('#sddm-accent-swatches .sddm-swatch').forEach(s=>{
+        s.addEventListener('click',async()=>{
+            _applyAccent(s.dataset.color);
+            await _sddmPromptAndSave();
+        });
+    });
+    let _accentSaveTimer=null;
+    document.getElementById('sddm-accent-custom')?.addEventListener('input',e=>{
+        _applyAccent(e.target.value);
+        clearTimeout(_accentSaveTimer);
+        _accentSaveTimer=setTimeout(()=>{ _sddmPromptAndSave(); }, 700);
+    });
+
+    // Preview button — launch sddm-greeter in test mode
+    document.getElementById('sddm-preview-btn')?.addEventListener('click',async()=>{
+        try{
+            const res=JSON.parse(await tauriInvoke('preview_sddm'));
+            if(res.ok)toast('Abriendo previsualización…','🖥️');
+            else toast('Error: '+(res.error||'desconocido'),'❌');
+        }catch(e){toast('Error al abrir la previsualización','❌');}
+    });
+
+    // Clock font
+    document.querySelectorAll('#sddm-font-ctrl .seg-btn').forEach(btn=>{
+        btn.addEventListener('click',async()=>{
+            document.querySelectorAll('#sddm-font-ctrl .seg-btn').forEach(b=>b.classList.remove('active'));
+            btn.classList.add('active');
+            _sddmCfg.clockFont=btn.dataset.val;
+            _renderSddmPreview();
+            await _sddmPromptAndSave();
+        });
+    });
+
+    // Show date / battery / bookbar toggles
+    setupToggle('sddm-show-date',async v=>{
+        _sddmCfg.showDate=v?'true':'false';
+        _renderSddmPreview();
+        await _sddmPromptAndSave();
+    });
+    setupToggle('sddm-show-batt',async v=>{
+        _sddmCfg.showBattery=v?'true':'false';
+        _renderSddmPreview();
+        await _sddmPromptAndSave();
+    });
+    setupToggle('sddm-show-bb',async v=>{
+        _sddmCfg.showBookBar=v?'true':'false';
+        _renderSddmPreview();
+        await _sddmPromptAndSave();
+    });
+
     // Fingerprint enroll
 }
 
@@ -2396,7 +2584,7 @@ export async function renderBloqueo(c){
 // ── Actualizaciones (Apple + Windows Hybrid — OS card + progress bar) ──
 // ════════════════════════════════════════════════════════════════════════
 export async function renderActualizacion(c){
-    c.innerHTML=renderHeader('Actualización de software')+
+    c.innerHTML=renderHeader(t('hdr_updates'))+
         `<div class="upd-searching">
             <div class="upd-spinner-wrap"><div class="upd-spinner"></div></div>
             <span class="upd-searching-text">Buscando actualizaciones...</span>
@@ -2426,7 +2614,7 @@ async function renderUpdatesPackages(c, sys, flat, aur, sysInfo){
             </div>`;
         }).join('');
         return `
-        ${renderHeader('Actualizar paquetes')}
+        ${renderHeader(t('sec_update_packages'))}
         <div class="upd-tabs-wrap">
             ${tabs.map(t=>`<button class="upd-tab${t.id===activeTab?' active':''}" data-tab="${t.id}">${t.label}${t.count?` <span class="pkg-count-badge">${t.count}</span>`:''}</button>`).join('')}
         </div>
@@ -2484,7 +2672,7 @@ async function renderUpdateDetail(c, pkg, src, sysInfo, onBack){
         <button class="upd-night-btn" id="upd-night">Actualizar por la noche</button>
         <button class="upd-btn-now" id="upd-now">Actualizar ahora</button>
     </div>
-    ${renderSection('Información')}
+    ${renderSection(t('sec_info'))}
     ${renderCard([
         renderRowItem('Fuente',srcLabel,''),
         pkg.old?renderRowItem('Instalado',esc(pkg.old),''):'',
@@ -2572,7 +2760,7 @@ async function _doCheckUpdates(c){
 
     // ── Up to date ──
     if(total===0){
-        c.innerHTML=renderHeader('Actualización de software')+
+        c.innerHTML=renderHeader(t('hdr_updates'))+
         `<div class="upd-ok">
             <div class="upd-ok-icon">
                 <svg viewBox="0 0 56 56" width="56" height="56" fill="none">
@@ -2584,9 +2772,9 @@ async function _doCheckUpdates(c){
             <span class="upd-ok-sub">Última comprobación: ahora mismo</span>
             <button class="upd-recheck" id="re-check">Buscar actualizaciones</button>
         </div>`+
-        renderSection('Software instalado')+
+        renderSection(t('sec_software_installed'))+
         renderCard([renderRowItem('Sistema',esc(sysInfo.distro||'BookOS'),''),renderRowItem('Kernel',esc(sysInfo.kernel||''),'')])+
-        renderSection('Opciones')+
+        renderSection(t('sec_options'))+
         renderCard([renderRowItem('Actualizaciones automáticas','Descargar e instalar automáticamente',renderToggle('auto-upd',autoupd))]);
         document.getElementById('re-check')?.addEventListener('click',()=>renderActualizacion(c));
         setupToggle('auto-upd',async a=>{
@@ -2598,7 +2786,7 @@ async function _doCheckUpdates(c){
     }
 
     // ── Updates available ──
-    let h=renderHeader('Actualización de software');
+    let h=renderHeader(t('hdr_updates'));
 
     // Summary card
     h+=`<div class="upd-card">
@@ -2626,10 +2814,10 @@ async function _doCheckUpdates(c){
         </div>
     </div>`;
 
-    h+=renderSection('Software instalado');
+    h+=renderSection(t('sec_software_installed'));
     h+=renderCard([renderRowItem('Sistema',esc(sysInfo.distro||'BookOS'),''),renderRowItem('Kernel',esc(sysInfo.kernel||''),'')]);
 
-    h+=renderSection('Opciones');
+    h+=renderSection(t('sec_options'));
     h+=renderCard([
         `<div class="detail-item detail-item-row upd-install-row" id="upd-goto-pkgs" style="cursor:pointer">
             <div style="display:flex;flex-direction:column;gap:2px">
@@ -2663,7 +2851,7 @@ async function _doCheckUpdates(c){
 
 // Renders a dedicated "installing" screen — used when update is already running on page load
 function _renderUpdateRunning(c, initialProgress){
-    c.innerHTML=renderHeader('Actualización de software')+
+    c.innerHTML=renderHeader(t('hdr_updates'))+
     `<div class="upd-card">
         <div class="upd-card-icon"><img src="assets/book-os.svg" alt="BookOS"></div>
         <div class="upd-card-body">
@@ -2728,12 +2916,12 @@ function _startUpdatePolling(c,bar,text,progressWrap,sysInfo){
 // ── Acerca ──────────────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════
 export async function renderAcerca(c){
-    c.innerHTML=renderHeader('Acerca del portátil')+renderSkeleton(4);
+    c.innerHTML=renderHeader(t('hdr_about'))+renderSkeleton(4);
     let i={hostname:'--',kernel:'--',distro:'--',cpu:'--',ram:'--',gpu:'--',plasma:'--'};
     try{i=JSON.parse(await tauriInvoke('get_system_info'));}catch(e){}
 
     // Samsung-style: device image + name + rename + info sections
-    let h=renderHeader('Acerca del portátil');
+    let h=renderHeader(t('hdr_about'));
 
     h+=`<div class="about-hero">
         <div class="about-device-img-wrap">
@@ -2749,14 +2937,14 @@ export async function renderAcerca(c){
     </div>`;
 
     // Info rows (Samsung About phone style)
-    h+=renderSection('Software');
+    h+=renderSection(t('sec_software'));
     h+=renderCard([
         renderInfoItem('Sistema operativo','BookOS · '+esc(i.distro)),
         renderInfoItem('Entorno de escritorio','KDE Plasma '+esc(i.plasma)),
         renderInfoItem('Kernel de Linux',esc(i.kernel)),
     ]);
 
-    h+=renderSection('Hardware');
+    h+=renderSection(t('sec_hardware'));
     h+=renderCard([
         renderInfoItem('Procesador',esc(i.cpu)),
         renderInfoItem('Memoria RAM',esc(i.ram)),
@@ -2788,7 +2976,7 @@ export async function renderAcerca(c){
 // ── Administración General ─────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════
 export async function renderGeneral(c){
-    c.innerHTML=renderHeader('Administración general')+renderSkeleton(2);
+    c.innerHTML=renderHeader(t('hdr_general'))+renderSkeleton(2);
     let loc={locale:'',keymap:''},locales=[],keymaps=[],auto={enabled:false},autostartApps=[];
     try{[loc,locales,keymaps,auto,autostartApps]=await Promise.all([
         tauriInvoke('get_locale_info').then(JSON.parse),
@@ -2801,26 +2989,36 @@ export async function renderGeneral(c){
     const langMap = {'en_US.UTF-8':'🇺🇸 English (US)', 'es_ES.UTF-8':'🇪🇸 Español (España)', 'fr_FR.UTF-8':'🇫🇷 Français'};
     const getLangName = l => langMap[l] || l;
 
-    c.innerHTML=renderHeader('Administración general') + renderSection('Idiomas y entrada') + renderCard([
+    const _curAppLang=(localStorage.getItem('bookos_lang')||'auto');
+    const _appLangOpts=[['auto','Auto / Auto-detect'],['es','Español'],['en','English']];
+    c.innerHTML=renderHeader(t('hdr_general')) + renderSection(t('sec_lang_app')) + renderCard([
+        `<div class="detail-item detail-item-row" id="btn-applang" style="cursor:pointer">
+            <div class="detail-texts"><span class="dt">${t('label_app_lang')}</span><span class="ds">${_appLangOpts.find(o=>o[0]===_curAppLang)?.[1]||'Auto'}</span></div>
+            <div style="color:var(--tx2);font-size:18px">›</div>
+        </div>`,
+        `<div id="applang-list" style="display:none;padding:0 20px 16px"><div class="res-list" style="margin-bottom:0">
+            ${_appLangOpts.map(o=>`<div class="res-item ${o[0]===_curAppLang?'active':''}" data-applang="${o[0]}"><span>${esc(o[1])}</span></div>`).join('')}
+        </div></div>`
+    ]) + renderSection(t('sec_lang_input')) + renderCard([
         `<div class="detail-item detail-item-row" id="btn-lang" style="cursor:pointer">
-            <div class="detail-texts"><span class="dt">Idioma del sistema</span><span class="ds">${getLangName(loc.locale)}</span></div>
+            <div class="detail-texts"><span class="dt">${t('label_system_lang')}</span><span class="ds">${getLangName(loc.locale)}</span></div>
             <div style="color:var(--tx2);font-size:18px">›</div>
         </div>`,
         `<div id="lang-list" style="display:none;padding:0 20px 16px"><div class="res-list" style="margin-bottom:0">
             ${locales.map(l=>`<div class="res-item ${l===loc.locale?'active':''}" data-lang="${esc(l)}"><span>${esc(getLangName(l))}</span></div>`).join('')}
         </div></div>`,
         `<div class="detail-item detail-item-row" id="btn-key" style="cursor:pointer">
-            <div class="detail-texts"><span class="dt">Distribución del teclado</span><span class="ds">${loc.keymap || 'Predeterminado'}</span></div>
+            <div class="detail-texts"><span class="dt">${t('label_keyboard_layout')}</span><span class="ds">${loc.keymap || t('default')}</span></div>
             <div style="color:var(--tx2);font-size:18px">›</div>
         </div>`,
         `<div id="key-list" style="display:none;padding:0 20px 16px"><div class="res-list" style="margin-bottom:0">
             ${keymaps.map(k=>`<div class="res-item ${k===loc.keymap?'active':''}" data-key="${esc(k)}"><span>${esc(k)}</span></div>`).join('')}
         </div></div>`
-    ]) + renderSection('Comportamiento de la aplicación') + renderCard([
-        renderRowItem('Lanzar al iniciar sesión','Abre BookOS Settings en segundo plano al encender',renderToggle('autostart',auto.enabled))
-    ]) + renderSection('Inicio automático') +
+    ]) + renderSection(t('sec_app_behavior')) + renderCard([
+        renderRowItem(t('label_launch_at_login'),t('label_launch_at_login_sub'),renderToggle('autostart',auto.enabled))
+    ]) + renderSection(t('sec_autostart')) +
     (autostartApps.length===0
-        ? renderCard([renderInfoItem('Sin aplicaciones de inicio automático',`Añade apps en ~/.config/autostart/`)])
+        ? renderCard([renderInfoItem(t('label_no_autostart'),t('label_no_autostart_sub'))])
         : `<div class="detail-card">${autostartApps.map(a=>
             `<div class="detail-item detail-item-row autostart-row">
                 <div class="detail-texts"><span class="dt">${esc(a.name)}</span><span class="ds" style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.exec)}</span></div>
@@ -2828,6 +3026,16 @@ export async function renderGeneral(c){
             </div>`).join('')}</div>`
     );
 
+    document.getElementById('btn-applang')?.addEventListener('click', ()=>{ const el=document.getElementById('applang-list'); if(el)el.style.display=el.style.display==='none'?'block':'none'; });
+    document.querySelectorAll('[data-applang]').forEach(b=>b.addEventListener('click',()=>{
+        const v=b.dataset.applang;
+        if(v==='auto')localStorage.removeItem('bookos_lang');
+        else localStorage.setItem('bookos_lang',v);
+        document.querySelectorAll('[data-applang]').forEach(x=>x.classList.remove('active'));
+        b.classList.add('active');
+        document.querySelector('#btn-applang .ds').textContent=b.querySelector('span').textContent;
+        toast(t('tst_app_lang_changed'),'🌐');
+    }));
     document.getElementById('btn-lang')?.addEventListener('click', ()=>{ const el=document.getElementById('lang-list'); el.style.display=el.style.display==='none'?'block':'none'; });
     document.getElementById('btn-key')?.addEventListener('click', ()=>{ const el=document.getElementById('key-list'); el.style.display=el.style.display==='none'?'block':'none'; });
 
@@ -2838,7 +3046,7 @@ export async function renderGeneral(c){
                 document.querySelectorAll('[data-lang]').forEach(x=>x.classList.remove('active'));
                 b.classList.add('active');
                 document.querySelector('#btn-lang .ds').textContent = getLangName(b.dataset.lang);
-                toast('Idioma cambiado (requiere reinicio)');
+                toast(t('tst_lang_changed'));
             }
         } catch(e){}
     }));
@@ -2848,16 +3056,16 @@ export async function renderGeneral(c){
             document.querySelectorAll('[data-key]').forEach(x=>x.classList.remove('active'));
             b.classList.add('active');
             document.querySelector('#btn-key .ds').textContent = b.dataset.key;
-            toast('Teclado cambiado');
+            toast(t('tst_keyboard_changed'));
         } catch(e){}
     }));
 
     setupToggle('autostart', async a => {
-        try { await tauriInvoke('toggle_autostart_bookos',{enable:a}); toast(a?'Configurado para inicio automático':'Inicio automático desactivado'); } catch(e){}
+        try { await tauriInvoke('toggle_autostart_bookos',{enable:a}); toast(a?t('tst_autostart_on'):t('tst_autostart_off')); } catch(e){}
     });
     autostartApps.forEach(a=>{
         setupToggle('ast-'+a.filename, async enabled=>{
-            try { await tauriInvoke('toggle_autostart_app',{filename:a.filename,enabled}); toast((enabled?'Activado':'Desactivado')+': '+a.name); } catch(e){}
+            try { await tauriInvoke('toggle_autostart_app',{filename:a.filename,enabled}); toast((enabled?t('enabled'):t('disabled'))+': '+a.name); } catch(e){}
         });
     });
 }
@@ -2866,7 +3074,7 @@ export async function renderGeneral(c){
 // ── Cuentas ────────────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════
 export async function renderCuentas(c){
-    c.innerHTML=renderHeader('Cuentas')+renderSkeleton(3);
+    c.innerHTML=renderHeader(t('hdr_accounts'))+renderSkeleton(3);
     let u={username:'',display_name:'',hostname:''}, users=[];
     try{[u, users]=await Promise.all([
         tauriInvoke('get_user_info').then(JSON.parse).catch(()=>({username:'',display_name:'',hostname:''})),
@@ -2883,7 +3091,7 @@ export async function renderCuentas(c){
         return `<div class="sys-user-item">${sAv}<div class="sys-user-info"><span class="sys-user-name">${esc(us.display_name||us.username)}</span><span class="sys-user-id">@${esc(us.username)}</span></div></div>`;
     }).join('');
 
-    c.innerHTML=renderHeader('Cuentas') + `
+    c.innerHTML=renderHeader(t('hdr_accounts')) + `
         <div class="acc-hero">
             ${av}
             <div class="acc-hero-info">
@@ -2891,12 +3099,12 @@ export async function renderCuentas(c){
                 <span class="acc-hero-sub">Administrador de BookOS</span>
             </div>
         </div>
-    ` + renderSection('Datos locales') + renderCard([
+    ` + renderSection(t('sec_local_data')) + renderCard([
         `<div class="detail-item"><span class="dt">Nombre visible</span><div style="display:flex;gap:8px;margin-top:8px"><input type="text" id="dn" value="${esc(u.display_name)}" class="sel" style="flex:1"><button class="btn btn-primary btn-sm" id="sn">Guardar</button></div></div>`,
         `<div class="detail-item"><span class="dt">Nombre del equipo</span><div style="display:flex;gap:8px;margin-top:8px"><input type="text" id="hn" value="${esc(u.hostname)}" class="sel" style="flex:1"><button class="btn btn-primary btn-sm" id="sh">Guardar</button></div></div>`
-    ]) + renderSection('Seguridad') + renderCard([
+    ]) + renderSection(t('sec_security')) + renderCard([
         renderRowItem('Contraseña','Cambia la contraseña de tu cuenta',`<button class="btn btn-secondary btn-sm" id="acc-change-pw">Cambiar</button>`),
-    ]) + renderSection('Otros usuarios en el equipo') + `<div class="detail-card"><div class="sys-users-list">${userListHtml}</div></div>`;
+    ]) + renderSection(t('sec_other_users')) + `<div class="detail-card"><div class="sys-users-list">${userListHtml}</div></div>`;
 
     document.getElementById('sn')?.addEventListener('click',async()=>{try{
         const ok = await promptSudo('cambiar el nombre visible', 'chfn', ['-f', document.getElementById('dn').value, u.username]);
@@ -2953,11 +3161,11 @@ export async function renderCuentas(c){
 // ── Mantenimiento ──────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════
 export async function renderMantenimiento(c){
-    c.innerHTML=renderHeader('Mantenimiento')+renderSection('Limpieza')+renderCard([
+    c.innerHTML=renderHeader(t('hdr_maintenance'))+renderSection(t('sec_cleanup'))+renderCard([
         renderRowItem('Limpiar Flatpak','Elimina aplicaciones sin uso',`<button class="btn btn-secondary btn-sm" id="m-flat">Limpiar</button>`),
         renderRowItem('Limpiar caché de paquetes','Limpia archivos de Paru/Pacman',`<button class="btn btn-secondary btn-sm" id="m-pkg">Limpiar</button>`),
         renderRowItem('Miniaturas temporales','Borra caché de thumbnails',`<button class="btn btn-secondary btn-sm" id="m-cache">Borrar</button>`)
-    ])+renderSection('Gestión de BookOS')+renderCard([
+    ])+renderSection(t('sec_bookos_management'))+renderCard([
         renderRowItem('Permisos de Hardware','Añade reglas polkit para obviar contraseñas en control',`<button class="btn btn-secondary btn-sm" id="m-polkit">Configurar</button>`),
         renderRowItem('Exportar a JSON','Exportar configuración de BookOS',`<button class="btn btn-secondary btn-sm" id="m-exp">Exportar</button>`),
         renderRowItem('Importar JSON','Importar configuración (requiere elegir archivo)',`<button class="btn btn-secondary btn-sm" id="m-imp">Importar</button>`)
@@ -2995,7 +3203,7 @@ export async function renderMantenimiento(c){
 // ── Fondo de Pantalla (NEW) ────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════
 export async function renderFondos(c){
-    c.innerHTML=renderHeader('Fondo de pantalla y estilo')+renderSkeleton(2);
+    c.innerHTML=renderHeader(t('hdr_wallpaper_style'))+renderSkeleton(2);
     let wallpapers=[];
     try{wallpapers=JSON.parse(await tauriInvoke('get_wallpapers'));}catch(e){}
     let current='';
@@ -3009,7 +3217,7 @@ export async function renderFondos(c){
     ]);}catch(e){}
 
     if(!wallpapers.length){
-        c.innerHTML=renderHeader('Fondo de pantalla y estilo')+renderCard([renderInfoItem('No se encontraron fondos de pantalla','Añade imágenes a ~/Imágenes o /usr/share/wallpapers')]);
+        c.innerHTML=renderHeader(t('hdr_wallpaper_style'))+renderCard([renderInfoItem('No se encontraron fondos de pantalla','Añade imágenes a ~/Imágenes o /usr/share/wallpapers')]);
         return;
     }
 
@@ -3035,7 +3243,7 @@ export async function renderFondos(c){
     const netSvg=`<svg viewBox="0 0 24 24" width="10" height="10"><path d="M5 12.55a11 11 0 0 1 14.08 0" fill="none" stroke="${panelTx2}" stroke-width="2.2" stroke-linecap="round"/><path d="M1.42 9a16 16 0 0 1 21.16 0" fill="none" stroke="${panelTx2}" stroke-width="2.2" stroke-linecap="round"/><circle cx="12" cy="19" r="1.5" fill="${panelTx2}"/></svg>`;
     const battSvg=`<svg viewBox="0 0 24 24" width="12" height="10"><rect x="2" y="7" width="16" height="10" rx="2" fill="none" stroke="${panelTx2}" stroke-width="1.8"/><path d="M22 11v2" stroke="${panelTx2}" stroke-width="2" stroke-linecap="round"/><rect x="4" y="9" width="9" height="6" rx="1" fill="${panelTx2}"/></svg>`;
 
-    let h=renderHeader('Fondo de pantalla y estilo');
+    let h=renderHeader(t('hdr_wallpaper_style'));
     // Desktop preview matching actual BookOS desktop layout:
     // top bar (thin, system tray right) + wallpaper + bottom floating dock
     h += `<div class="wp-preview-desktop">
@@ -3085,7 +3293,7 @@ export async function renderFondos(c){
         renderRowItem('Atenuar fondo de pantalla','Atenúa en modo oscuro',renderToggle('dimwp',dimWallpaper))
     ]);
 
-    h += `<div id="wp-grid" style="display:none;margin-top:24px">${renderSection('Fondos disponibles')}
+    h += `<div id="wp-grid" style="display:none;margin-top:24px">${renderSection(t('sec_wallpapers_avail'))}
         <div class="wallpaper-grid">
             ${wallpapers.map(w=>{
                 const isActive=w.path===currentWp.path;
@@ -3207,15 +3415,15 @@ const RB_TRIGGERS=[
 ];
 const RB_ACTIONS=[
     // ── Conexiones
-    {type:'wifi',          svg:SVGI.wifi,     label:'WiFi',               valueType:'toggle_val', options:[['true','Activar'],['false','Desactivar']], category:'Conexiones'},
-    {type:'bluetooth',     svg:SVGI.bluetooth,label:'Bluetooth',          valueType:'toggle_val', options:[['true','Activar'],['false','Desactivar']], category:'Conexiones'},
-    {type:'airplane',      svg:SVGI.plane,    label:'Modo avión',         valueType:'toggle_val', options:[['true','Activar'],['false','Desactivar']], category:'Conexiones'},
+    {type:'wifi',          svg:SVGI.wifi,     label:'WiFi',               valueType:'toggle_val', options:[['true',t('activate')],['false',t('deactivate')]], category:'Conexiones'},
+    {type:'bluetooth',     svg:SVGI.bluetooth,label:'Bluetooth',          valueType:'toggle_val', options:[['true',t('activate')],['false',t('deactivate')]], category:'Conexiones'},
+    {type:'airplane',      svg:SVGI.plane,    label:'Modo avión',         valueType:'toggle_val', options:[['true',t('activate')],['false',t('deactivate')]], category:'Conexiones'},
     // ── Pantalla
     {type:'brightness',    svg:SVGI.sun,      label:'Brillo de pantalla', valueType:'range', min:0, max:100, default:50, category:'Pantalla'},
-    {type:'vision_booster',svg:SVGI.sun,      label:'Vision Booster',     valueType:'toggle_val', options:[['true','Activar'],['false','Desactivar']], category:'Pantalla'},
-    {type:'hdr',           svg:SVGI.sun,      label:'HDR',                valueType:'toggle_val', options:[['true','Activar'],['false','Desactivar']], category:'Pantalla'},
+    {type:'vision_booster',svg:SVGI.sun,      label:'Vision Booster',     valueType:'toggle_val', options:[['true',t('activate')],['false',t('deactivate')]], category:'Pantalla'},
+    {type:'hdr',           svg:SVGI.sun,      label:'HDR',                valueType:'toggle_val', options:[['true',t('activate')],['false',t('deactivate')]], category:'Pantalla'},
     {type:'screen_saver',  svg:SVGI.moonSm,   label:'Ahorro de pantalla', valueType:'toggle_val', options:[['true','Activar (90Hz)'],['false','Desactivar (120Hz)']], category:'Pantalla'},
-    {type:'nightlight',    svg:SVGI.moonSm,   label:'Luz nocturna',       valueType:'toggle_val', options:[['true','Activar'],['false','Desactivar']], category:'Pantalla'},
+    {type:'nightlight',    svg:SVGI.moonSm,   label:'Luz nocturna',       valueType:'toggle_val', options:[['true',t('activate')],['false',t('deactivate')]], category:'Pantalla'},
     {type:'icc_profile',   svg:SVGI.palette,  label:'Perfil de color',    valueType:'select', options:[['SDC4189.icm','Estándar'],['SDC4189S.icm','sRGB'],['SDC4189A.icm','Adobe RGB'],['SDC4189P.icm','DCI-P3']], category:'Pantalla'},
     // ── Sonido
     {type:'volume',        svg:SVGI.volume2,  label:'Volumen del sistema', valueType:'range', min:0, max:100, default:50, category:'Sonido'},
@@ -3228,7 +3436,7 @@ const RB_ACTIONS=[
     {type:'theme',         svg:SVGI.palette,  label:'Tema del sistema',   valueType:'select', options:[['BreezeDark','Oscuro'],['BreezeLight','Claro']], category:'Personalización'},
     {type:'kbd_brightness',svg:SVGI.keyboard, label:'Brillo del teclado', valueType:'range', min:0, max:3, default:1, category:'Personalización'},
     // ── Notificaciones
-    {type:'dnd',           svg:SVGI.bellOff,  label:'No molestar',        valueType:'toggle_val', options:[['true','Activar'],['false','Desactivar']], category:'Notificaciones'},
+    {type:'dnd',           svg:SVGI.bellOff,  label:'No molestar',        valueType:'toggle_val', options:[['true',t('activate')],['false',t('deactivate')]], category:'Notificaciones'},
 ];
 
 function rbTriggerLabel(t){const d=RB_TRIGGERS.find(x=>x.type===t.type);return d?(d.label+(t.value?' — '+t.value:'')):t.type;}
@@ -3560,8 +3768,8 @@ function showSelectInput(def,cb){
 }
 
 export async function renderModos(c){
-    c.innerHTML=renderHeader('Modos y rutinas')+renderSkeleton(2);
-    let h=renderHeader('Modos y rutinas');
+    c.innerHTML=renderHeader(t('hdr_modes_routines'))+renderSkeleton(2);
+    let h=renderHeader(t('hdr_modes_routines'));
 
     // Mode cards — 4-column horizontal row
     const modes=[
@@ -3580,7 +3788,7 @@ export async function renderModos(c){
         </div>`).join('')+`</div>`;
 
     const routines=getRoutines();
-    h+=renderSection('Rutinas')+`<div id="routines-list">${renderRoutinesList(routines)}</div>`;
+    h+=renderSection(t('sec_routines'))+`<div id="routines-list">${renderRoutinesList(routines)}</div>`;
     h+=`<div class="routine-add-wrap">
         <button class="rb-new-btn" id="btn-create-routine">${SVGI.plus}<span>Nueva rutina</span></button>
     </div>`;
@@ -3673,7 +3881,7 @@ export async function restoreSnapshot(snap){
 // ── Aplicaciones Predeterminadas (NEW) ─────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════
 export async function renderAplicaciones(c){
-    c.innerHTML=renderHeader('Aplicaciones')+renderSkeleton(3);
+    c.innerHTML=renderHeader(t('hdr_apps'))+renderSkeleton(3);
     let defaults={browser:'',email:'',filemanager:''};
     try{defaults=JSON.parse(await tauriInvoke('get_default_apps'));}catch(e){}
 
@@ -3683,9 +3891,9 @@ export async function renderAplicaciones(c){
         {key:'filemanager',icon:'📁',label:'Gestor de archivos',current:defaults.filemanager}
     ];
 
-    c.innerHTML=renderHeader('Aplicaciones')+renderSection('Apps predeterminadas')+`<div class="detail-card">${apps.map(a=>
+    c.innerHTML=renderHeader(t('hdr_apps'))+renderSection(t('sec_default_apps'))+`<div class="detail-card">${apps.map(a=>
         `<div class="app-default-item"><div class="app-default-icon">${a.icon}</div><div class="app-default-info"><span class="app-default-name">${a.label}</span><span class="app-default-current">${esc(a.current||'No configurada')}</span></div></div>`
-    ).join('')}</div>`+renderSection('Acciones')+renderCard([
+    ).join('')}</div>`+renderSection(t('sec_actions'))+renderCard([
         `<div class="detail-item" style="text-align:center"><button class="btn btn-secondary btn-sm" id="open-mime">Abrir configuración MIME</button></div>`
     ]);
 
@@ -3699,7 +3907,7 @@ export async function renderAplicaciones(c){
 // ── Salud Digital (Android-style Digital Wellbeing) ───────────────────
 // ════════════════════════════════════════════════════════════════════════
 export async function renderSaludDigital(c){
-    c.innerHTML=renderHeader('Salud digital')+renderSkeleton(3);
+    c.innerHTML=renderHeader(t('hdr_digital_health'))+renderSkeleton(3);
     let appUsage=[];
     let vol=50,muted=false;
     try{[appUsage,{volume:vol,muted}]=await Promise.all([
@@ -3712,7 +3920,7 @@ export async function renderSaludDigital(c){
     const totalMin=hasData?appUsage.reduce((s,a)=>s+(a.minutes||0),0):0;
     const totalH=Math.floor(totalMin/60),totalM=totalMin%60;
 
-    let h=renderHeader('Salud digital');
+    let h=renderHeader(t('hdr_digital_health'));
 
     // Hero: today's total
     h+=`<div class="sd-hero">
@@ -3738,8 +3946,13 @@ export async function renderSaludDigital(c){
     const goalMin=parseInt(await getSetting('sd_goal_min','480').catch(()=>'480'))||480;
 
     // App usage bars
+    // Track active app every 60s when on this page (Wayland-aware)
+    addInterval(async()=>{
+        try{await tauriInvoke('track_active_app');}catch(e){}
+    },60000);
+
     if(hasData){
-        h+=renderSection('Uso por aplicación');
+        h+=renderSection(t('sec_per_app_usage'));
         const maxMin=Math.max(...appUsage.map(a=>a.minutes||0),1);
         h+=`<div class="detail-card">${appUsage.slice(0,8).map(a=>{
             const pct=Math.round((a.minutes||0)/maxMin*100);
@@ -3756,12 +3969,12 @@ export async function renderSaludDigital(c){
             </div>`;
         }).join('')}</div>`;
     } else {
-        h+=renderSection('Uso por aplicación');
+        h+=renderSection(t('sec_per_app_usage'));
         h+=renderCard([renderInfoItem('Sin datos de uso aún','El uso se registra cuando actives el seguimiento')]);
     }
 
     // Volume
-    h+=renderSection('Volumen y audio');
+    h+=renderSection(t('sec_volume_audio'));
     h+=renderCard([
         `<div class="detail-item"><span class="dt">Volumen del sistema</span>${renderSlider('sd-vol',vol)}</div>`,
         renderRowItem('Silenciar','Sin sonido',renderToggle('sd-mute',muted))
@@ -3769,7 +3982,7 @@ export async function renderSaludDigital(c){
 
     // Screen time goal
     const goalH=Math.floor(goalMin/60),goalM=goalMin%60;
-    h+=renderSection('Objetivo de tiempo de pantalla');
+    h+=renderSection(t('sec_screen_time_goal'));
     h+=renderCard([
         `<div class="detail-item">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -3782,7 +3995,7 @@ export async function renderSaludDigital(c){
     ]);
 
     // Focus mode
-    h+=renderSection('Modo enfoque');
+    h+=renderSection(t('sec_focus_mode'));
     h+=renderCard([
         renderRowItem('No molestar al activar enfoque','Silencia notificaciones en modo enfoque',renderToggle('sd-focus-dnd',await getSetting('sd_focus_dnd','false').then(v=>v==='true').catch(()=>false))),
         renderRowItem('Activar modo enfoque','Minimiza distracciones',renderToggle('sd-focus',false)),
@@ -3839,7 +4052,7 @@ export async function renderSaludDigital(c){
 // ── Accesibilidad ───────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════
 export async function renderAccesibilidad(c){
-    c.innerHTML=renderHeader('Accesibilidad')+renderSkeleton(3);
+    c.innerHTML=renderHeader(t('hdr_accessibility'))+renderSkeleton(3);
     // Rust returns: {font_dpi, contrast, invert, cursor_size} — all strings
     let s={font_dpi:'0',contrast:'5',invert:'false',cursor_size:'24'};
     let reduceMotion=false;
@@ -3854,12 +4067,12 @@ export async function renderAccesibilidad(c){
     const cursorSize=parseInt(s.cursor_size)||24;
     const invertActive=s.invert==='true';
 
-    let h=renderHeader('Accesibilidad');
+    let h=renderHeader(t('hdr_accessibility'));
     h+=`<div class="acc-preview-wrap">
         <span class="acc-preview-label">Vista previa de texto</span>
         <span class="acc-preview-text" id="acc-prev-text" style="font-size:${Math.round(14*fontPct/100)}px">El texto del sistema se verá así</span>
     </div>`;
-    h+=renderSection('Visión');
+    h+=renderSection(t('sec_vision'));
     h+=renderCard([
         `<div class="detail-item">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -3871,7 +4084,7 @@ export async function renderAccesibilidad(c){
         renderRowItem('Colores invertidos','Invierte los colores (KWin)',renderToggle('acc-invert',invertActive)),
         renderRowItem('Reducir movimiento','Minimiza animaciones del compositor',renderToggle('acc-reduce-motion',reduceMotion))
     ]);
-    h+=renderSection('Puntero del ratón');
+    h+=renderSection(t('sec_mouse_pointer'));
     h+=renderCard([
         `<div class="detail-item">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -3923,7 +4136,7 @@ export async function renderAccesibilidad(c){
 // ── Funciones Avanzadas / Labs ──────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════
 export async function renderAvanzadas(c){
-    c.innerHTML=renderHeader('Funciones avanzadas')+renderSkeleton(3);
+    c.innerHTML=renderHeader(t('hdr_advanced'))+renderSkeleton(3);
 
     // Load KWin effects + compositor perf state in parallel
     let fx={blur:false,wobbly:false,magic:false},cursorFix=false;
@@ -3934,16 +4147,16 @@ export async function renderAvanzadas(c){
         ]);
     }catch(e){}
 
-    let h=renderHeader('Funciones avanzadas');
+    let h=renderHeader(t('hdr_advanced'));
 
-    h+=renderSection('Efectos del compositor');
+    h+=renderSection(t('sec_compositor_fx'));
     h+=renderCard([
         renderRowItem('Desenfoque de fondo','Fondo desenfocado bajo ventanas translúcidas',renderToggle('fx-blur',fx.blur)),
         renderRowItem('Ventanas elásticas','Efecto de movimiento suave al arrastrar',renderToggle('fx-wobbly',fx.wobbly)),
         renderRowItem('Efecto lámpara mágica','Animación al minimizar ventanas',renderToggle('fx-magic',fx.magic)),
     ]);
 
-    h+=renderSection('Rendimiento');
+    h+=renderSection(t('sec_perf'));
     h+=renderCard([
         renderRowItem('Optimizar latencia del cursor','Ajusta KWin para menor latencia de entrada',renderToggle('fx-cursorfix',cursorFix)),
         renderRowItem('Reiniciar compositor','Útil si hay artefactos gráficos',`<button class="btn btn-secondary btn-sm" id="fx-restart-kwin">Reiniciar</button>`),
@@ -3961,13 +4174,13 @@ export async function renderAvanzadas(c){
     const labGet=(k,def='false')=>{try{return localStorage.getItem('bookos_lab_'+k)||def;}catch{return def;}};
     const labSet=(k,v)=>{try{localStorage.setItem('bookos_lab_'+k,v);}catch{}};
 
-    h+=renderSection('Activas');
+    h+=renderSection(t('sec_active'));
     h+=renderCard([
         renderRowItem('Animaciones reducidas','Menos movimiento en la interfaz',renderToggle('lab-reducedmotion',labGet('reducedmotion')==='true')),
         renderRowItem('Barra de estado extendida','Muestra más datos en la barra lateral',renderToggle('lab-extendedstatus',labGet('extendedstatus')==='true')),
     ]);
 
-    h+=renderSection('En desarrollo');
+    h+=renderSection(t('sec_in_dev'));
     h+=`<div class="labs-grid">
         <div class="lab-card">
             <div class="lab-card-icon" style="background:#0a84ff20;color:#0a84ff">
@@ -4640,7 +4853,7 @@ async function _renderBudsTouch(c,device,status,sppConnected,gbcAvail){
     }).join('')}</div>`;
     const sectionTitle=t=>`<div style="padding:20px 20px 6px;font-size:13px;color:var(--tx2);font-weight:500">${esc(t)}</div>`;
 
-    let h=renderHeader('Controles táctiles');
+    let h=renderHeader(t('hdr_touch_controls'));
     // Bloquear toques
     h+=card([rowHTML('tc-lock','Bloquear toques','Deshabilitar toques','tc-lock-tg',!!status.touchpad_locked,false)]);
     // Pinch & hold
@@ -4710,7 +4923,7 @@ async function _renderBudsTouch(c,device,status,sppConnected,gbcAvail){
 
 // ── Book Share sub-page ──────────────────────────────────────────────────
 async function _renderBookShare(c){
-    c.innerHTML=renderHeader('Book Share')+renderSkeleton(2);
+    c.innerHTML=renderHeader(t('hdr_book_share'))+renderSkeleton(2);
 
     // ── Fetch KDE Connect devices ──
     let kdeDevices=[];
@@ -4720,10 +4933,10 @@ async function _renderBookShare(c){
     const _SVG_PHONE=`<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="17" r="1" fill="currentColor" stroke="none"/></svg>`;
     const _SVG_LAPTOP=`<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M0 21h24"/></svg>`;
 
-    let h=renderHeader('Book Share');
+    let h=renderHeader(t('hdr_book_share'));
 
     // ── KDE Connect / Teléfono ──
-    h+=renderSection('Dispositivos vinculados');
+    h+=renderSection(t('sec_paired_devices'));
     if(kdeDevices.length===0){
         h+=renderCard([_devRow({
             icon:_SVG_PHONE,iconColor:'var(--tx2)',
@@ -4743,7 +4956,7 @@ async function _renderBookShare(c){
     }
 
     // ── Quick Share (rqs_lib built-in) ──
-    h+=renderSection('Quick Share');
+    h+=renderSection(t('sec_quickshare'));
     h+=renderCard([_devRow({
         icon:_SVG_SHARE,iconColor:'var(--blue)',
         title:'Compartir cercano',
@@ -4764,7 +4977,7 @@ async function _renderBookShare(c){
 
     // ── Discovered devices (mDNS — same WiFi) ──
     h+=`<div id="qs-discover-section" style="display:none">`;
-    h+=renderSection('Dispositivos cercanos');
+    h+=renderSection(t('sec_nearby'));
     h+=`<div id="qs-devices-list">`;
     h+=renderCard([_devRow({icon:_SVG_LAPTOP,iconColor:'var(--tx2)',title:'Buscando dispositivos…',subtitle:'Mantén Quick Share activo en el otro equipo'})]);
     h+=`</div></div>`;
@@ -4772,7 +4985,7 @@ async function _renderBookShare(c){
     // ── Wi-Fi Direct P2P devices (no WiFi compartida necesaria) ──
     const _SVG_WIFI_DIRECT=`<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1" fill="currentColor" stroke="none"/></svg>`;
     h+=`<div id="p2p-section" style="display:none">`;
-    h+=renderSection('Wi-Fi Direct');
+    h+=renderSection(t('sec_wifi_direct'));
     h+=`<div id="p2p-devices-list">`;
     h+=renderCard([_devRow({icon:_SVG_WIFI_DIRECT,iconColor:'var(--tx2)',title:'Buscando por Wi-Fi Direct…',subtitle:'Abre Nearby Share en el S22 Ultra'})]);
     h+=`</div></div>`;
@@ -4781,7 +4994,7 @@ async function _renderBookShare(c){
     const _SVG_DOWNLOAD=`<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
     const _SVG_FOLDER=`<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
     h+=`<div id="qs-recv-section" style="display:none">`;
-    h+=renderSection('Recibir');
+    h+=renderSection(t('sec_receive'));
     h+=renderCard([
         _devRow({
             icon:_SVG_DOWNLOAD,iconColor:'var(--green)',
@@ -4800,7 +5013,7 @@ async function _renderBookShare(c){
     h+=`</div>`;
 
     // ── Send file shortcut ──
-    h+=renderSection('Enviar');
+    h+=renderSection(t('sec_send'));
     h+=renderCard([_devRow({
         id:'qs-send-btn',extraStyle:'cursor:pointer',
         icon:_SVG_UPLOAD,iconColor:'var(--blue)',
@@ -5176,7 +5389,7 @@ async function _renderBookShare(c){
 
 // ── Main dispositivos list ──────────────────────────────────────────────
 export async function renderDispositivos(c){
-    c.innerHTML=renderHeader('Dispositivos conectados')+renderSkeleton(2);
+    c.innerHTML=renderHeader(t('hdr_devices'))+renderSkeleton(2);
 
     let btDevices=[], scanning=false;
     let btEnabled=false;
@@ -5214,7 +5427,7 @@ export async function renderDispositivos(c){
 
     const _SVG_SCAN=`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>`;
 
-    let h=renderHeader('Dispositivos conectados');
+    let h=renderHeader(t('hdr_devices'));
 
     // ── Galaxy Buds ──
     h+=`<div class="section-header-row"><p class="section-header" style="margin:0">Galaxy Buds</p>
@@ -5251,7 +5464,7 @@ export async function renderDispositivos(c){
     }
 
     // ── Book Share ──
-    h+=renderSection('Book Share');
+    h+=renderSection(t('sec_book_share'));
     h+=renderCard([_devRow({id:'bc-row',extraStyle:'cursor:pointer',
         icon:_SVG_SHARE,iconColor:'var(--blue)',
         title:'Book Share',subtitle:'Quick Share · KDE Connect · Archivos cercanos',
@@ -5343,8 +5556,8 @@ export async function renderDispositivos(c){
 
 // ── Book AI ────────────────────────────────────────────────────────────
 export async function renderAI(c){
-    c.innerHTML=renderHeader('Inteligencia artificial')+renderSkeleton(1);
-    let h=renderHeader('Inteligencia artificial');
+    c.innerHTML=renderHeader(t('hdr_ai'))+renderSkeleton(1);
+    let h=renderHeader(t('hdr_ai'));
     h+=`<div id="sem-search-card"></div>`;
     c.innerHTML=h;
 
@@ -5395,7 +5608,7 @@ export async function renderAI(c){
         let body=renderCard(rows);
 
         if(inst && !busy){
-            body+=renderSection('Probar búsqueda');
+            body+=renderSection(t('sec_search_test'));
             body+=`<div style="background:var(--card);border-radius:14px;padding:14px">
                 <input id="sem-q" placeholder="Escribe para buscar…" style="width:100%;padding:10px 14px;border-radius:10px;border:none;background:var(--sbg);color:var(--tx);font-size:14px;outline:none">
                 <div id="sem-results" style="margin-top:10px"></div>
@@ -5456,22 +5669,22 @@ export async function renderAI(c){
 
 // ── Ubicación ─────────────────────────────────────────────────────────────
 export async function renderUbicacion(c){
-    c.innerHTML=renderHeader('Ubicación')+renderSkeleton(2);
+    c.innerHTML=renderHeader(t('hdr_location'))+renderSkeleton(2);
     let locEnabled=false;
     try{const r=JSON.parse(await tauriInvoke('get_location_status'));locEnabled=!!r.enabled;}catch(e){}
     const accuracy=await getSetting('loc_accuracy','high');
-    let h=renderHeader('Ubicación');
+    let h=renderHeader(t('hdr_location'));
     h+=renderCard([
         renderRowItem('Servicios de ubicación',locEnabled?'<span style="color:var(--green)">Activos</span>':'Desactivados',renderToggle('loc-svc',locEnabled)),
     ]);
-    h+=renderSection('Precisión');
+    h+=renderSection(t('sec_precision'));
     const accOpts=[['high','Alta precisión','GPS, WiFi y redes móviles'],['medium','Ahorro de batería','Solo WiFi y redes'],['device','Solo dispositivo','Sin conexión a internet']];
     h+=renderCard(accOpts.map(([k,n,d])=>`<div class="detail-item detail-item-row" style="cursor:pointer" data-acc="${k}">
         <div style="flex:1"><span class="dt">${n}</span><span class="ds">${d}</span></div>
         <div style="width:20px;height:20px;border-radius:50%;border:2px solid ${accuracy===k?'var(--blue)':'var(--brd)'};background:${accuracy===k?'var(--blue)':'transparent'};flex-shrink:0;display:flex;align-items:center;justify-content:center">
             ${accuracy===k?'<div style="width:8px;height:8px;border-radius:50%;background:#fff"></div>':''}
         </div></div>`));
-    h+=renderSection('Permisos de aplicaciones');
+    h+=renderSection(t('sec_app_permissions'));
     const locApps=[{name:'Firefox',icon:'firefox',perm:'always'},{name:'Thunderbird',icon:'thunderbird',perm:'ask'},{name:'KDE Connect',icon:'kdeconnect',perm:'always'},{name:'Plasma',icon:'kde',perm:'always'}];
     h+=renderCard(locApps.map(a=>`<div class="detail-item detail-item-row">
         <span class="dt" style="flex:1">${a.name}</span>
@@ -5493,15 +5706,15 @@ export async function renderUbicacion(c){
 
 // ── Seguridad y emergencia ────────────────────────────────────────────────
 export async function renderEmergencia(c){
-    c.innerHTML=renderHeader('Seguridad y emergencia')+renderSkeleton(2);
+    c.innerHTML=renderHeader(t('hdr_emergency'))+renderSkeleton(2);
     const medRaw=await getSetting('med_info','{}');
     const sosEnabled=await getSetting('sos_enabled','false').then(v=>v==='true');
     const locSos=await getSetting('sos_location','true').then(v=>v==='true');
     let med={};try{med=JSON.parse(medRaw);}catch(e){}
     const contactsRaw=await getSetting('emer_contacts','[]');
     let contacts=[];try{contacts=JSON.parse(contactsRaw);}catch(e){}
-    let h=renderHeader('Seguridad y emergencia');
-    h+=renderSection('Información médica');
+    let h=renderHeader(t('hdr_emergency'));
+    h+=renderSection(t('sec_medical_info'));
     h+=renderCard([
         `<div class="detail-item" style="padding:14px 20px">
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
@@ -5513,7 +5726,7 @@ export async function renderEmergencia(c){
             <button class="bk-dbtn confirm" id="med-save" style="margin-top:12px;width:100%">Guardar</button>
         </div>`
     ]);
-    h+=renderSection('Contactos de emergencia');
+    h+=renderSection(t('sec_emergency_contacts'));
     if(contacts.length){
         h+=renderCard(contacts.map((ct,i)=>`<div class="detail-item detail-item-row">
             <div style="flex:1"><span class="dt">${esc(ct.name)}</span><span class="ds">${esc(ct.phone)}</span></div>
@@ -5527,7 +5740,7 @@ export async function renderEmergencia(c){
         </div>
         <button class="bk-dbtn confirm" id="ec-add" style="margin-top:12px;width:100%">Añadir contacto</button>
     </div>`]);
-    h+=renderSection('Ajustes SOS');
+    h+=renderSection(t('sec_sos'));
     h+=renderCard([
         renderRowItem('Llamada de emergencia rápida','Pulsa el botón de encendido 3 veces',renderToggle('sos-btn',sosEnabled)),
         renderRowItem('Compartir ubicación','Envía tu posición al contacto de emergencia',renderToggle('sos-loc',locSos)),
@@ -5562,7 +5775,7 @@ export async function renderEmergencia(c){
 
 // ── Pantalla de inicio ────────────────────────────────────────────────────
 export async function renderPantallaInicio(c){
-    c.innerHTML=renderHeader('Pantalla de inicio')+renderSkeleton(2);
+    c.innerHTML=renderHeader(t('hdr_homescreen'))+renderSkeleton(2);
     const [desktopIcons,gridSnap,dockPos,iconSize,showLabels]=await Promise.all([
         getSetting('desktop_icons','true').then(v=>v==='true'),
         getSetting('desktop_grid','true').then(v=>v==='true'),
@@ -5570,9 +5783,9 @@ export async function renderPantallaInicio(c){
         getSetting('icon_size','medium'),
         getSetting('icon_labels','true').then(v=>v==='true'),
     ]);
-    let h=renderHeader('Pantalla de inicio');
+    let h=renderHeader(t('hdr_homescreen'));
     const sizes=[['small','Pequeño'],['medium','Mediano'],['large','Grande']];
-    h+=renderSection('Escritorio');
+    h+=renderSection(t('sec_desktop'));
     h+=renderCard([
         renderRowItem('Iconos en el escritorio','Muestra iconos de archivos y apps de fondo',renderToggle('desk-icons',desktopIcons)),
         renderRowItem('Rejilla de alineacion','Ajusta los iconos automáticamente a la cuadricula',renderToggle('desk-grid',gridSnap)),
@@ -5582,7 +5795,7 @@ export async function renderPantallaInicio(c){
             <div class="seg-ctrl">${sizes.map(([k,l])=>`<button class="seg-btn${iconSize===k?' active':''}" data-size="${k}">${l}</button>`).join('')}</div>
         </div>`,
     ]);
-    h+=renderSection('Posicion de la barra de tareas');
+    h+=renderSection(t('sec_taskbar_pos'));
     const dockPositions=[['bottom','Abajo'],['left','Izquierda'],['right','Derecha']];
     h+=renderCard(dockPositions.map(([k,l])=>`<div class="detail-item detail-item-row" style="cursor:pointer" data-dock="${k}">
         <span class="dt" style="flex:1">${l}</span>
@@ -5590,7 +5803,7 @@ export async function renderPantallaInicio(c){
             ${dockPos===k?'<div style="width:8px;height:8px;border-radius:50%;background:#fff"></div>':''}
         </div>
     </div>`));
-    h+=renderSection('Accesos directos');
+    h+=renderSection(t('sec_shortcuts'));
     h+=renderCard([
         `<div class="detail-item detail-item-row" style="cursor:pointer" id="open-widget-browser">
             <div class="detail-texts"><span class="dt">Añadir widgets</span><span class="ds">Personaliza tu escritorio con widgets de Plasma</span></div>
