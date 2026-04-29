@@ -4,81 +4,148 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>BookOS APT Repository</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%230a84ff'%3E%3Cpath d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/%3E%3C/svg%3E">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0d1117;color:#c9d1d9;line-height:1.6;padding:2rem;min-height:100vh}
-.container{max-width:780px;margin:0 auto}
-header{text-align:center;padding:3rem 0 2rem;border-bottom:1px solid #30363d;margin-bottom:2rem}
-h1{font-size:2.5rem;color:#58a6ff;margin-bottom:0.5rem}
-.subtitle{color:#8b949e;font-size:1.1rem}
-h2{color:#58a6ff;margin:2rem 0 1rem;font-size:1.4rem;border-bottom:1px solid #21262d;padding-bottom:0.5rem}
-h3{color:#c9d1d9;margin:1.5rem 0 0.75rem;font-size:1.05rem}
-p{margin-bottom:1rem;color:#c9d1d9}
-pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:1rem;overflow-x:auto;margin:0.75rem 0;font-size:0.875rem}
-code{font-family:"SF Mono",Monaco,"Cascadia Code",monospace;color:#79c0ff}
-pre code{color:#c9d1d9;background:none;padding:0}
-a{color:#58a6ff;text-decoration:none}
-a:hover{text-decoration:underline}
-.badge{display:inline-block;background:#1f6feb;color:#fff;padding:0.25rem 0.6rem;border-radius:12px;font-size:0.75rem;font-weight:600;margin-right:0.5rem}
-footer{text-align:center;padding:2rem 0 1rem;color:#6e7681;font-size:0.875rem;border-top:1px solid #30363d;margin-top:3rem}
-.note{background:#1f2d4a;border-left:4px solid #1f6feb;padding:0.75rem 1rem;border-radius:4px;margin:1rem 0;color:#a5c0e8}
+:root{
+    --bg:#f2f2f7;
+    --card:#fff;
+    --tx:#000;
+    --tx2:#8e8e93;
+    --tx3:#3c3c43;
+    --div:rgba(0,0,0,.08);
+    --brd:rgba(0,0,0,.1);
+    --blue:#007aff;
+    --blue-dim:rgba(0,122,255,.1);
+    --code-bg:#f5f5f7;
+    --code-tx:#1d1d1f;
+    --shadow:0 1px 3px rgba(0,0,0,.04),0 4px 12px rgba(0,0,0,.04);
+}
+@media (prefers-color-scheme: dark){
+    :root{
+        --bg:#000;
+        --card:#1c1c1e;
+        --tx:#fff;
+        --tx2:#8e8e93;
+        --tx3:#ebebf5;
+        --div:rgba(255,255,255,.08);
+        --brd:rgba(255,255,255,.1);
+        --blue:#0a84ff;
+        --blue-dim:rgba(10,132,255,.15);
+        --code-bg:#2c2c2e;
+        --code-tx:#f5f5f7;
+        --shadow:0 1px 3px rgba(0,0,0,.3),0 4px 12px rgba(0,0,0,.4);
+    }
+}
+html,body{background:var(--bg);color:var(--tx);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,system-ui,sans-serif;line-height:1.55;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+body{padding:3rem 1.5rem 4rem;min-height:100vh}
+.container{max-width:760px;margin:0 auto}
+header{text-align:center;padding:2rem 0 3rem}
+h1{font-size:2.75rem;font-weight:700;letter-spacing:-0.025em;color:var(--tx);margin-bottom:0.75rem}
+.subtitle{color:var(--tx2);font-size:1.0625rem;font-weight:400}
+.tags{display:flex;justify-content:center;gap:0.5rem;margin-top:1.5rem;flex-wrap:wrap}
+.tag{display:inline-block;background:var(--blue-dim);color:var(--blue);padding:0.3rem 0.75rem;border-radius:980px;font-size:0.75rem;font-weight:600;letter-spacing:0.02em}
+section{background:var(--card);border-radius:14px;padding:1.75rem 2rem;margin-bottom:1.25rem;box-shadow:var(--shadow)}
+section + section{margin-top:1.25rem}
+h2{font-size:1.375rem;font-weight:600;letter-spacing:-0.015em;color:var(--tx);margin-bottom:1.25rem;padding-bottom:0.75rem;border-bottom:1px solid var(--div)}
+h3{font-size:0.9375rem;font-weight:600;color:var(--tx2);text-transform:uppercase;letter-spacing:0.05em;margin:1.5rem 0 0.625rem}
+h3:first-of-type{margin-top:0}
+p{color:var(--tx3);font-size:0.9375rem;margin-bottom:0.75rem}
+p:last-child{margin-bottom:0}
+ul{list-style:none;padding-left:0}
+ul li{padding:0.5rem 0;border-bottom:1px solid var(--div);color:var(--tx3);font-size:0.9375rem}
+ul li:last-child{border-bottom:none}
+ul li a{color:var(--blue);text-decoration:none}
+ul li a:hover{text-decoration:underline}
+pre{background:var(--code-bg);border-radius:10px;padding:1rem 1.125rem;overflow-x:auto;margin:0.625rem 0;font-size:0.8125rem;line-height:1.55}
+code{font-family:"SF Mono",ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;color:var(--code-tx);font-size:0.8125rem}
+p code,li code{background:var(--code-bg);padding:0.125rem 0.4rem;border-radius:5px;font-size:0.8125rem}
+pre code{background:none;padding:0}
+.callout{background:var(--blue-dim);border-radius:10px;padding:0.875rem 1.125rem;margin-top:1rem;color:var(--tx3);font-size:0.875rem;border:1px solid rgba(0,122,255,.15)}
+.callout strong{color:var(--blue);font-weight:600}
+.fingerprint{font-family:"SF Mono",ui-monospace,monospace;font-size:0.8125rem;color:var(--tx2);margin-top:0.5rem;letter-spacing:0.01em}
+footer{text-align:center;padding:3rem 0 0;color:var(--tx2);font-size:0.8125rem}
+footer a{color:var(--blue);text-decoration:none}
+footer a:hover{text-decoration:underline}
+@media (max-width:600px){
+    body{padding:1.5rem 1rem 2rem}
+    h1{font-size:2rem}
+    section{padding:1.25rem 1.25rem;border-radius:12px}
+    pre{font-size:0.75rem}
+}
 </style>
 </head>
 <body>
 <div class="container">
     <header>
-        <h1>📦 BookOS APT</h1>
-        <p class="subtitle">Debian/Ubuntu package repository for BookOS Settings</p>
-        <p style="margin-top:1rem">
-            <span class="badge">stable</span>
-            <span class="badge">amd64</span>
-            <span class="badge">GPG signed</span>
-        </p>
+        <h1>BookOS APT</h1>
+        <p class="subtitle">Debian and Ubuntu package repository for BookOS Settings</p>
+        <div class="tags">
+            <span class="tag">stable</span>
+            <span class="tag">amd64</span>
+            <span class="tag">GPG signed</span>
+        </div>
     </header>
 
-    <h2>🚀 Installation</h2>
-    <p>Add the repository to your system in two steps:</p>
+    <section>
+        <h2>Installation</h2>
 
-    <h3>1. Import the GPG signing key</h3>
+        <h3>Step 1 — Import the signing key</h3>
 <pre><code>sudo install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://evelynx08.github.io/BookOS-Settings/KEY.gpg | sudo tee /etc/apt/keyrings/bookos.asc &gt; /dev/null</code></pre>
+curl -fsSL https://evelynx08.github.io/BookOS-Settings/KEY.gpg \
+    | sudo tee /etc/apt/keyrings/bookos.asc &gt; /dev/null</code></pre>
 
-    <h3>2. Add the repository source</h3>
-<pre><code>echo "deb [signed-by=/etc/apt/keyrings/bookos.asc] https://evelynx08.github.io/BookOS-Settings bookworm main" | sudo tee /etc/apt/sources.list.d/bookos.list</code></pre>
+        <h3>Step 2 — Register the repository</h3>
+<pre><code>echo "deb [signed-by=/etc/apt/keyrings/bookos.asc] \
+https://evelynx08.github.io/BookOS-Settings bookworm main" \
+    | sudo tee /etc/apt/sources.list.d/bookos.list</code></pre>
 
-    <h3>3. Install BookOS Settings</h3>
+        <h3>Step 3 — Install the package</h3>
 <pre><code>sudo apt update
 sudo apt install bookos-settings</code></pre>
 
-    <div class="note">
-        💡 The <code>bookworm</code> codename works on Debian 12+ and Ubuntu 22.04+. The package depends on <code>libwebkit2gtk-4.1-0</code> and <code>libgtk-3-0</code>.
-    </div>
+        <div class="callout">
+            <strong>Compatibility.</strong> The <code>bookworm</code> codename is built against Debian 12 and is also compatible with Debian 13 and Ubuntu 22.04 or newer. Required runtime libraries: <code>libwebkit2gtk-4.1-0</code> and <code>libgtk-3-0</code>.
+        </div>
+    </section>
 
-    <h2>🔄 Updating</h2>
-    <p>New versions are picked up automatically through your normal system updates:</p>
+    <section>
+        <h2>Updates</h2>
+        <p>New releases are delivered automatically through your normal system update workflow:</p>
 <pre><code>sudo apt update
 sudo apt upgrade</code></pre>
+    </section>
 
-    <h2>🗑️ Removal</h2>
+    <section>
+        <h2>Removal</h2>
+        <p>To remove the package and unregister the repository:</p>
 <pre><code>sudo apt remove bookos-settings
 sudo rm /etc/apt/sources.list.d/bookos.list
 sudo rm /etc/apt/keyrings/bookos.asc</code></pre>
+    </section>
 
-    <h2>🔑 GPG Key</h2>
-    <p>This repository is signed with the following key:</p>
-<pre><code>Fingerprint: 9E08 0734 129E 0FC3 4F41  4260 3B16 8BA9 ACEA 8C8B
-Owner:       Jose &lt;josrebe333@gmail.com&gt;</code></pre>
-    <p>Public key file: <a href="KEY.gpg">KEY.gpg</a></p>
+    <section>
+        <h2>Repository signing key</h2>
+        <p>All package indexes in this repository are signed with the following OpenPGP key:</p>
+<pre><code>Owner:       Jose &lt;josrebe333@gmail.com&gt;
+Type:        RSA 4096
+Fingerprint: 9E08 0734 129E 0FC3 4F41
+             4260 3B16 8BA9 ACEA 8C8B</code></pre>
+        <p>Public key file: <a href="KEY.gpg" style="color:var(--blue);text-decoration:none">KEY.gpg</a></p>
+    </section>
 
-    <h2>📚 Resources</h2>
-    <ul style="margin-left:1.5rem;color:#c9d1d9">
-        <li><a href="https://github.com/Evelynx08/BookOS-Settings">Source code on GitHub</a></li>
-        <li><a href="https://github.com/Evelynx08/BookOS-Settings/releases">Standalone .deb / .rpm / .pkg.tar.zst downloads</a></li>
-        <li><a href="https://aur.archlinux.org/packages/bookos-settings">Arch Linux (AUR)</a></li>
-    </ul>
+    <section>
+        <h2>Resources</h2>
+        <ul>
+            <li><a href="https://github.com/Evelynx08/BookOS-Settings">Source code on GitHub</a></li>
+            <li><a href="https://github.com/Evelynx08/BookOS-Settings/releases">Standalone downloads (.deb, .rpm, .pkg.tar.zst)</a></li>
+            <li><a href="https://aur.archlinux.org/packages/bookos-settings">Arch Linux User Repository</a></li>
+        </ul>
+    </section>
 
     <footer>
-        <p>BookOS Settings &copy; 2026 — Native settings application for KDE Plasma 6 on Samsung Galaxy Book</p>
+        <p>BookOS Settings — native settings application for KDE Plasma 6 on Samsung Galaxy Book.<br>
+        Maintained by <a href="https://github.com/Evelynx08">Evelynx08</a>.</p>
     </footer>
 </div>
 </body>
