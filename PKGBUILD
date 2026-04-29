@@ -1,10 +1,10 @@
-# Maintainer: femby08
+# Maintainer: Jose <tu_email@ejemplo.com>
 pkgname=bookos-settings
 pkgver=0.4.0
 pkgrel=1
 pkgdesc="BookOS Settings — aplicación de ajustes para KDE Plasma (Samsung Galaxy Book)"
 arch=('x86_64')
-url="https://github.com/femby08/BookOS"
+url="https://github.com/Evelynx08/BookOS-Settings"
 license=('MIT')
 depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3')
 optdepends=(
@@ -16,26 +16,37 @@ optdepends=(
     'python-dbus: plugin KRunner búsqueda semántica'
     'python-gobject: plugin KRunner búsqueda semántica'
 )
-makedepends=('rust' 'cargo' 'protobuf')
+# Añadimos nodejs y npm porque Tauri los necesita para el frontend
+makedepends=('rust' 'cargo' 'protobuf' 'nodejs' 'npm')
 
-_projectdir="/home/evelyn/Descargas/BookOS-Settings"
+# Ahora el código se baja de GitHub automáticamente
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/Evelynx08/BookOS-Settings/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP') # Usa 'updpkgsums' luego para generar esto
 
 build() {
-    cd "$_projectdir"
+    # Entramos a la carpeta que se crea al descomprimir el source
+    cd "BookOS-Settings-${pkgver}"
+    
+    # Instalamos dependencias de node si son necesarias
+    # npm install 
+    
+    # Construimos usando el directorio relativo
     cargo tauri build --no-bundle
 }
 
 package() {
-    local _bin="$_projectdir/src-tauri/target/release"
-    local _extra="$_projectdir/src-tauri/extra"
-    local _search="$_projectdir/src-tauri/extra/search"
-    local _src="$_projectdir/src"
+    # Definimos las rutas relativas al directorio de compilación
+    local _builddir="${srcdir}/BookOS-Settings-${pkgver}"
+    local _bin="${_builddir}/src-tauri/target/release"
+    local _extra="${_builddir}/src-tauri/extra"
+    local _search="${_builddir}/src-tauri/extra/search"
+    local _src="${_builddir}/src"
 
     # Binary
     install -Dm755 "$_bin/bookos-settings" \
         "$pkgdir/usr/bin/bookos-settings"
 
-    # Desktop entry (generated inline — no source file exists)
+    # Desktop entry
     install -dm755 "$pkgdir/usr/share/applications"
     cat > "$pkgdir/usr/share/applications/bookos-settings.desktop" << EOF
 [Desktop Entry]
