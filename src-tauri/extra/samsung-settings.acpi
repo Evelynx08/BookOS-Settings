@@ -1,0 +1,2 @@
+event=samsung-galaxybook SAM0430:00 0000007c
+action=/usr/lib/bookos/bookos-toggle-as-user.sh

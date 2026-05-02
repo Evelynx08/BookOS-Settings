@@ -1,3 +1,0 @@
-[D-BUS Service]
-Name=org.bookos.SemanticSearch
-Exec=/opt/bookos-search/venv/bin/python /opt/bookos-search/bookos-krunner.py

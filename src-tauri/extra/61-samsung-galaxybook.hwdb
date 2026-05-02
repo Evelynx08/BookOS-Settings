@@ -1,0 +1,7 @@
+# Samsung Galaxy Book — Fn key scancode mappings
+# Fn+F1 (0x7c) → KEY_PROG1 so KDE can bind it as a global shortcut
+evdev:atkbd:dmi:bvn*:bvr*:bd*:svnSAMSUNG*:pn*:*
+ KEYBOARD_KEY_7c=prog1
+
+evdev:input:b0019v0000p0000*
+ KEYBOARD_KEY_7c=prog1

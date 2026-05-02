@@ -1,7 +1,0 @@
-[Unit]
-Description=BookOS Battery Logger — records one CSV sample
-After=local-fs.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/lib/bookos/bookos-battery-logger.sh

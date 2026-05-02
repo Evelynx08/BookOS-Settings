@@ -748,16 +748,16 @@ fn parse_upower(info: &str) -> String {
         esc(&status), esc(&kernel_pd_rev), esc(&op_mode_raw), esc(&protocol), adapter_w, esc(&selected_type))
 }
 
-/// Camera privacy toggle — enable/disable kernel module or device access.
+/// Camera privacy toggle — chmod /dev/video* devices to block access.
+/// More reliable than modprobe -r (which can fail if any app holds the device).
 #[tauri::command] async fn set_camera_enabled(enable: bool) -> String {
-    // Intel IPU7 camera stack on Galaxy Book 5 Pro
-    let module = "intel_ipu7";
-    let arg = if enable { "" } else { "-r" };
-    let r = if enable {
-        Command::new("pkexec").args(&["modprobe", module]).output().await
-    } else {
-        Command::new("pkexec").args(&["modprobe", arg, module]).output().await
-    };
+    let mode = if enable { "0660" } else { "0000" };
+    // chmod every /dev/video* device. Requires pkexec (root).
+    let script = format!(
+        "for d in /dev/video*; do [ -e \"$d\" ] && chmod {} \"$d\"; done",
+        mode
+    );
+    let r = Command::new("pkexec").args(&["sh", "-c", &script]).output().await;
     match r {
         Ok(o) if o.status.success() => r#"{"ok":true}"#.into(),
         Ok(o) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&String::from_utf8_lossy(&o.stderr))),
@@ -766,11 +766,19 @@ fn parse_upower(info: &str) -> String {
 }
 
 #[tauri::command] fn get_camera_enabled() -> String {
-    let loaded = std::fs::read_to_string("/proc/modules")
-        .map(|c| c.lines().any(|l| l.starts_with("intel_ipu7 ")))
-        .unwrap_or(true);
-    let has_videos = std::fs::read_dir("/sys/class/video4linux").is_ok();
-    format!(r#"{{"enabled":{}}}"#, loaded && has_videos)
+    // Camera "enabled" if at least one /dev/video* has read perm for group
+    let enabled = std::fs::read_dir("/dev").map(|d| {
+        d.flatten().any(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with("video") { return false; }
+            std::fs::metadata(e.path()).map(|m| {
+                use std::os::unix::fs::PermissionsExt;
+                m.permissions().mode() & 0o060 != 0
+            }).unwrap_or(false)
+        })
+    }).unwrap_or(true);
+    format!(r#"{{"enabled":{}}}"#, enabled)
 }
 
 /// Microphone global mute — via PulseAudio/PipeWire.
@@ -1188,7 +1196,25 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
 }
 #[tauri::command] async fn set_lock_timeout(minutes: u32) -> String {
     run("kwriteconfig6",&["--file","kscreenlockerrc","--group","Daemon","--key","Timeout",&minutes.to_string()]).await;
+    // Reload kscreenlocker so change applies without logout
+    run("qdbus6",&["org.kde.screensaver","/ScreenSaver","org.kde.screensaver.configure"]).await;
     r#"{"ok":true}"#.into()
+}
+/// Grace period (seconds without prompting password after wake).
+/// Pass 0 for "immediately".
+#[tauri::command] async fn set_lock_grace(seconds: u32) -> String {
+    run("kwriteconfig6",&["--file","kscreenlockerrc","--group","Daemon","--key","LockGrace",&seconds.to_string()]).await;
+    run("qdbus6",&["org.kde.screensaver","/ScreenSaver","org.kde.screensaver.configure"]).await;
+    r#"{"ok":true}"#.into()
+}
+#[tauri::command] async fn get_lock_grace() -> String {
+    let out = Command::new("kreadconfig6")
+        .args(&["--file","kscreenlockerrc","--group","Daemon","--key","LockGrace","--default","0"])
+        .output().await
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "0".into());
+    let s: u32 = out.parse().unwrap_or(0);
+    format!(r#"{{"seconds":{}}}"#, s)
 }
 /// Validate the user's password without running anything privileged.
 /// Returns `{"ok":true}` if accepted, `{"ok":false}` otherwise.
@@ -1926,8 +1952,25 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
     format!("[{}]", wallpapers.join(","))
 }
 #[tauri::command] async fn get_current_wallpaper() -> String {
-    let out = run("kreadconfig6", &["--file", "plasma-org.kde.plasma.desktop-appletsrc", "--group", "Containments", "--group", "1", "--group", "Wallpaper", "--group", "org.kde.image", "--group", "General", "--key", "Image"]).await;
-    format!(r#"{{"path":"{}"}}"#, esc(&out.replace("file://", "")))
+    // Plasma stores the wallpaper inside a Containment whose number varies.
+    // Parse the appletsrc directly to find the first Wallpaper Image key.
+    let cfg = std::env::var("HOME").map(|h| format!("{}/.config/plasma-org.kde.plasma.desktop-appletsrc", h)).unwrap_or_default();
+    let contents = std::fs::read_to_string(&cfg).unwrap_or_default();
+    let mut in_image_general = false;
+    for line in contents.lines() {
+        let l = line.trim();
+        if l.starts_with('[') {
+            in_image_general = l.contains("Wallpaper") && l.contains("org.kde.image") && l.ends_with("][General]");
+            continue;
+        }
+        if in_image_general {
+            if let Some(val) = l.strip_prefix("Image=") {
+                let path = val.trim().replace("file://", "");
+                return format!(r#"{{"path":"{}"}}"#, esc(&path));
+            }
+        }
+    }
+    r#"{"path":""}"#.into()
 }
 #[tauri::command] async fn set_wallpaper(path: String) -> String {
     run("plasma-apply-wallpaperimage", &[&path]).await;
@@ -1971,10 +2014,17 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
 #[tauri::command] async fn toggle_invert_colors(enable: bool) -> String {
     run("kwriteconfig6",&["--file","kwinrc","--group","Plugins","--key","invertEnabled",if enable {"true"} else {"false"}]).await;
     run("qdbus6",&["org.kde.KWin","/KWin","reconfigure"]).await;
+    // Trigger the effect via D-Bus (the plugin exposes Invert.toggleScreenInvert)
+    run("qdbus6",&["org.kde.KWin","/org/kde/KWin/Effect/Invert1","org.kde.kwin.Effect.toggleScreenInvert"]).await;
     r#"{"ok":true}"#.into()
 }
 #[tauri::command] async fn set_cursor_size(size: i32) -> String {
-    run("kwriteconfig6",&["--file","kcminputrc","--group","Mouse","--key","cursorSize",&size.to_string()]).await;
+    let s = size.to_string();
+    run("kwriteconfig6",&["--file","kcminputrc","--group","Mouse","--key","cursorSize",&s]).await;
+    // Also write to kdeglobals (used by some apps) and notify cursor change via KGlobalSettings
+    run("kwriteconfig6",&["--file","kdeglobals","--group","KDE","--key","CursorSize",&s]).await;
+    // Set XCURSOR_SIZE for new processes via env (won't affect running ones)
+    run("dbus-send",&["--session","--dest=org.kde.KWin","--type=method_call","/KWin","org.kde.KWin.reconfigure"]).await;
     r#"{"ok":true}"#.into()
 }
 
@@ -2774,7 +2824,16 @@ fn save_bookos_settings(v: &serde_json::Value) {
     if std::fs::copy(&src, &p).is_ok() { r#"{"ok":true}"#.into() } else { r#"{"ok":false}"#.into() }
 }
 
-const LOCK_FILE: &str = "/tmp/bookos-settings.lock";
+// Lock + IPC files in user runtime dir ($XDG_RUNTIME_DIR), not /tmp,
+// to avoid root-owned files when launched from acpid.
+fn lock_path() -> String {
+    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+    format!("{}/bookos-settings.lock", dir)
+}
+fn toggle_path() -> String {
+    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+    format!("{}/bookos-toggle", dir)
+}
 
 /// Returns true if a process with the given PID is currently running.
 fn pid_alive(pid: u32) -> bool {
@@ -2786,19 +2845,16 @@ fn pid_alive(pid: u32) -> bool {
 /// /tmp/bookos-start-page) and return false → caller should exit immediately.
 /// Otherwise write our PID to the lock file and return true → caller continues.
 fn acquire_instance_lock() -> bool {
-    if let Ok(contents) = std::fs::read_to_string(LOCK_FILE) {
+    let lock = lock_path();
+    if let Ok(contents) = std::fs::read_to_string(&lock) {
         if let Ok(pid) = contents.trim().parse::<u32>() {
             if pid_alive(pid) {
-                // Another instance is alive: forward the page request and bail out.
-                // (The page may have been written to /tmp/bookos-start-page already
-                //  by the applet before launching us — leave it for the live instance.)
                 return false;
             }
         }
-        // Stale lock — remove it before we write ours.
-        let _ = std::fs::remove_file(LOCK_FILE);
+        let _ = std::fs::remove_file(&lock);
     }
-    let _ = std::fs::write(LOCK_FILE, std::process::id().to_string());
+    let _ = std::fs::write(&lock, std::process::id().to_string());
     true
 }
 
@@ -2812,12 +2868,14 @@ fn main() {
 
     // ── Single-instance guard ─────────────────────────────────────────────
     if !acquire_instance_lock() {
-        // A live instance is already running. If the user passed --toggle,
-        // forward the request via /tmp/bookos-toggle so the running instance
-        // shows / hides itself. Otherwise, fall back to the legacy navigation
-        // hand-off (a second non-flag launch raises the existing window).
+        // A live instance is already running. Forward intent via /tmp/bookos-toggle:
+        //   "1" → toggle (show if hidden, hide if visible)
+        //   "show" → always show + focus (used when launched without --toggle)
+        let tp = toggle_path();
         if args.iter().any(|a| a == "--toggle") {
-            let _ = std::fs::write("/tmp/bookos-toggle", "1");
+            let _ = std::fs::write(&tp, "1");
+        } else {
+            let _ = std::fs::write(&tp, "show");
         }
         std::process::exit(0);
     }
@@ -2844,19 +2902,30 @@ fn main() {
                 // Watch for /tmp/bookos-toggle requests (from `bookos-settings --toggle`)
                 let win = window.clone();
                 std::thread::spawn(move || {
-                    let path = "/tmp/bookos-toggle";
+                    let path = toggle_path();
+                    let path = path.as_str();
                     loop {
                         std::thread::sleep(std::time::Duration::from_millis(400));
                         if std::fs::metadata(path).is_ok() {
+                            let mode = std::fs::read_to_string(path).unwrap_or_default().trim().to_string();
                             let _ = std::fs::remove_file(path);
                             let visible = win.is_visible().unwrap_or(false);
                             let minimized = win.is_minimized().unwrap_or(false);
-                            if visible && !minimized {
-                                let _ = win.hide();
-                            } else {
+                            // Force raise + focus on Wayland/KDE (request_user_attention triggers KWin)
+                            let raise = || {
                                 let _ = win.unminimize();
                                 let _ = win.show();
+                                let _ = win.set_always_on_top(true);
                                 let _ = win.set_focus();
+                                let _ = win.set_always_on_top(false);
+                                let _ = win.request_user_attention(Some(tauri::UserAttentionType::Critical));
+                            };
+                            if mode == "show" {
+                                raise();
+                            } else if visible && !minimized {
+                                let _ = win.hide();
+                            } else {
+                                raise();
                             }
                         }
                     }
@@ -3049,7 +3118,7 @@ fn main() {
             get_current_theme,get_available_themes,set_color_scheme,get_theme_schedule,set_theme_schedule,
             get_kde_light_dark_themes,apply_kde_theme,
             get_dnd_status,toggle_dnd,
-            get_lock_timeout,set_lock_timeout,check_fingerprint,enroll_fingerprint,verify_password,verify_fingerprint,
+            get_lock_timeout,set_lock_timeout,set_lock_grace,get_lock_grace,check_fingerprint,enroll_fingerprint,verify_password,verify_fingerprint,
             get_locale_info,get_available_locales,set_locale,get_available_keymaps,set_keymap,
             check_system_updates,check_aur_updates,check_flatpak_updates,run_system_update,run_pacman_update_silent,get_update_progress,cancel_update,run_flatpak_update,
             get_app_power_usage,get_sddm_themes,set_sddm_theme,get_sddm_config,set_sddm_config,preview_sddm,get_app_usage,
@@ -3093,5 +3162,5 @@ fn main() {
         .expect("error while running tauri application");
 
     // Clean up lock file when the app exits normally.
-    let _ = std::fs::remove_file(LOCK_FILE);
+    let _ = std::fs::remove_file(lock_path());
 }

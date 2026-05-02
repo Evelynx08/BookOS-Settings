@@ -1107,12 +1107,6 @@ export async function renderSonido(c){
         renderRowItem('Sonidos de notificación','Reproduce sonido al recibir notificaciones',renderToggle('snd-notif',notifSnd)),
         renderRowItem('Sonidos de interfaz','Sonidos al hacer clic, navegar y otras acciones',renderToggle('snd-ui',uiSnd)),
     ]);
-    h+=renderSection(t('sec_media_controls'));
-    h+=renderCard([
-        renderRowItem('Reproducción anterior','Tecla ⏮',`<span class="ds">⏮</span>`),
-        renderRowItem('Reproducir / Pausar','Tecla ⏯',`<span class="ds">⏯</span>`),
-        renderRowItem('Siguiente pista','Tecla ⏭',`<span class="ds">⏭</span>`),
-    ]);
     c.innerHTML=h;
 
     setupSlider('vol',async v=>{try{await tauriInvoke('set_volume',{value:parseInt(v)})}catch(e){}});
@@ -2002,7 +1996,7 @@ export async function renderSeguridad(c){
         toast('Tiempo de bloqueo: '+e.target.value+' min');
     });
     document.getElementById('sec-lock-grace')?.addEventListener('change',async e=>{
-        try{await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','kscreenlockerrc','--group','Daemon','--key','LockGracePeriod',e.target.value]});}catch(e2){}
+        try{await tauriInvoke('set_lock_grace',{seconds:parseInt(e.target.value)});}catch(e2){}
         toast('Periodo de gracia actualizado');
     });
     setupToggle('sec-camera',async a=>{
@@ -3198,7 +3192,15 @@ export async function renderGeneral(c){
         </div>`,
         `<div id="key-list" style="display:none;padding:0 20px 16px"><div class="res-list" style="margin-bottom:0">
             ${keymaps.map(k=>`<div class="res-item ${k===loc.keymap?'active':''}" data-key="${esc(k)}"><span>${esc(k)}</span></div>`).join('')}
-        </div></div>`
+        </div></div>`,
+        `<div class="detail-item detail-item-row" style="cursor:pointer" id="open-kde-shortcuts">
+            <div class="detail-texts"><span class="dt">Atajos del sistema</span><span class="ds">Asigna teclas a acciones de KDE Plasma</span></div>
+            <div style="color:var(--tx2);font-size:18px">›</div>
+        </div>`,
+        `<div class="detail-item detail-item-row" style="cursor:pointer" id="open-custom-shortcuts">
+            <div class="detail-texts"><span class="dt">Atajos personalizados</span><span class="ds">Crea atajos para lanzar apps</span></div>
+            <div style="color:var(--tx2);font-size:18px">›</div>
+        </div>`
     ]) + renderSection(t('sec_app_behavior')) + renderCard([
         renderRowItem(t('label_launch_at_login'),t('label_launch_at_login_sub'),renderToggle('autostart',auto.enabled))
     ]) + renderSection(t('sec_autostart')) +
@@ -3223,6 +3225,12 @@ export async function renderGeneral(c){
     }));
     document.getElementById('btn-lang')?.addEventListener('click', ()=>{ const el=document.getElementById('lang-list'); el.style.display=el.style.display==='none'?'block':'none'; });
     document.getElementById('btn-key')?.addEventListener('click', ()=>{ const el=document.getElementById('key-list'); el.style.display=el.style.display==='none'?'block':'none'; });
+    document.getElementById('open-kde-shortcuts')?.addEventListener('click',()=>{
+        try{tauriInvoke('run_command',{cmd:'kcmshell6',args:['kcm_keys']}).catch(()=>{});}catch(e){}
+    });
+    document.getElementById('open-custom-shortcuts')?.addEventListener('click',()=>{
+        try{tauriInvoke('run_command',{cmd:'kcmshell6',args:['kcm_khotkeys']}).catch(()=>{});}catch(e){}
+    });
 
     document.querySelectorAll('[data-lang]').forEach(b => b.addEventListener('click', async()=>{
         try {
@@ -3692,6 +3700,7 @@ export async function renderFondos(c){
 
     setupToggle('palette',async a=>{
         setSetting('ColorPalette',a?'true':'false');
+        try{await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','kdeglobals','--group','General','--key','AccentColorFromWallpaper',a?'true':'false']});}catch(e){}
         toast(a?'Paleta de colores activada':'Paleta desactivada');
     });
     setupToggle('dimwp',async a=>{
@@ -4408,7 +4417,7 @@ export async function renderAccesibilidad(c){
     let reduceMotion=false;
     try{[s,reduceMotion]=await Promise.all([
         tauriInvoke('get_accessibility_settings').then(JSON.parse),
-        tauriInvoke('run_command',{cmd:'kreadconfig6',args:['--file','kwinrc','--group','Compositing','--key','AnimationSpeed','--default','3']}).then(v=>parseInt(v.trim())>=5).catch(()=>false),
+        tauriInvoke('run_command',{cmd:'kreadconfig6',args:['--file','kwinrc','--group','Compositing','--key','AnimationSpeed','--default','3']}).then(v=>{const n=parseInt(v.trim());return n===0||n>=5;}).catch(()=>false),
     ]);}catch(e){}
 
     // font_dpi=0 means "auto" (system default ~96). Map to 75-150% range.
@@ -4458,7 +4467,7 @@ export async function renderAccesibilidad(c){
         const pct=parseInt(fontSlider.value);
         const dpi=pct===100?0:Math.round(pct/100*96); // 0 = auto/system default
         try{await tauriInvoke('set_font_scale',{dpi});}catch(e){}
-        toast('Tamaño de texto actualizado');
+        toast('Tamaño actualizado — cierra sesión para aplicar');
     });
 
     const cursorSlider=document.getElementById('cursor-size');
@@ -4475,8 +4484,8 @@ export async function renderAccesibilidad(c){
         toast(a?'Colores invertidos':'Colores normales');
     });
     setupToggle('acc-reduce-motion',async a=>{
-        // Reduce animation speed in KWin
-        try{await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','kwinrc','--group','Compositing','--key','AnimationSpeed',a?'6':'3']});}catch(e){}
+        // 0 = instant (no animations), 3 = default
+        try{await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','kwinrc','--group','Compositing','--key','AnimationSpeed',a?'0':'3']});}catch(e){}
         try{await tauriInvoke('run_command',{cmd:'qdbus6',args:['org.kde.KWin','/KWin','reconfigure']});}catch(e){}
         toast(a?'Movimiento reducido':'Animaciones normales');
     });
@@ -6138,17 +6147,6 @@ export async function renderPantallaInicio(c){
             ${dockPos===k?'<div style="width:8px;height:8px;border-radius:50%;background:#fff"></div>':''}
         </div>
     </div>`));
-    h+=renderSection(t('sec_shortcuts'));
-    h+=renderCard([
-        `<div class="detail-item detail-item-row" style="cursor:pointer" id="open-widget-browser">
-            <div class="detail-texts"><span class="dt">Añadir widgets</span><span class="ds">Personaliza tu escritorio con widgets de Plasma</span></div>
-            <div style="color:var(--tx2);flex-shrink:0">${SVGI.chevronR}</div>
-        </div>`,
-        `<div class="detail-item detail-item-row" style="cursor:pointer" id="open-global-theme">
-            <div class="detail-texts"><span class="dt">Tema global</span><span class="ds">Gestiona apariencia del escritorio completo</span></div>
-            <div style="color:var(--tx2);flex-shrink:0">${SVGI.chevronR}</div>
-        </div>`,
-    ]);
     c.innerHTML=h;
     setupToggle('desk-icons',async a=>{
         setSetting('desktop_icons',a);
@@ -6171,13 +6169,6 @@ export async function renderPantallaInicio(c){
             try{await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','plasmashellrc','--group','PlasmaViews','--group','Panel','--key','location',row.dataset.dock]});}catch(e){}
             renderPantallaInicio(c);
         });
-    });
-    document.getElementById('open-widget-browser')?.addEventListener('click',()=>{
-        try{tauriInvoke('run_command',{cmd:'qdbus',args:['org.kde.plasmashell','/PlasmaShell','org.kde.PlasmaShell.toggleWidgetExplorer']}).catch(()=>{});}catch(e){}
-        toast('Abriendo explorador de widgets…');
-    });
-    document.getElementById('open-global-theme')?.addEventListener('click',()=>{
-        try{tauriInvoke('run_command',{cmd:'kcmshell6',args:['lookandfeel']}).catch(()=>{});}catch(e){}
     });
 }
 

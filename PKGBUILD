@@ -19,12 +19,11 @@ optdepends=(
 makedepends=('rust' 'cargo' 'protobuf' 'nodejs' 'npm')
 
 # Ahora el código se baja de GitHub automáticamente
-source=("${pkgname}-${pkgver}.tar.gz::https://github.com/Evelynx08/BookOS-Settings/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('SKIP') # Usa 'updpkgsums' luego para generar esto
+source=("${pkgname}::git+file:///home/evelyn/Descargas/BookOS-Settings")
+sha256sums=('SKIP')
 
 build() {
-    # Entramos a la carpeta que se crea al descomprimir el source
-    cd "BookOS-Settings-${pkgver}"
+    cd "${pkgname}"
     
     # Instalamos dependencias de node si son necesarias
     # npm install 
@@ -35,7 +34,7 @@ build() {
 
 package() {
     # Definimos las rutas relativas al directorio de compilación
-    local _builddir="${srcdir}/BookOS-Settings-${pkgver}"
+    local _builddir="${srcdir}/${pkgname}"
     local _bin="${_builddir}/src-tauri/target/release"
     local _extra="${_builddir}/src-tauri/extra"
     local _search="${_builddir}/src-tauri/extra/search"
@@ -93,6 +92,12 @@ EOF
     # udev rules
     install -Dm644 "$_extra/99-bookos-power.rules" \
         "$pkgdir/usr/lib/udev/rules.d/99-bookos-power.rules"
+    install -Dm644 "$_extra/61-samsung-galaxybook.hwdb" \
+        "$pkgdir/usr/lib/udev/hwdb.d/61-samsung-galaxybook.hwdb"
+
+    # ACPI event — Fn+F1 triggers bookos-settings --toggle
+    install -Dm644 "$_extra/samsung-settings.acpi" \
+        "$pkgdir/etc/acpi/events/samsung-settings"
 
     # Shell scripts
     install -Dm755 "$_extra/bookos-battery-adaptive.sh" \
@@ -103,6 +108,8 @@ EOF
         "$pkgdir/usr/lib/bookos/bookos-thermal-logger.sh"
     install -Dm755 "$_extra/bookos-register-shortcut.sh" \
         "$pkgdir/usr/lib/bookos/bookos-register-shortcut.sh"
+    install -Dm755 "$_extra/bookos-toggle-as-user.sh" \
+        "$pkgdir/usr/lib/bookos/bookos-toggle-as-user.sh"
 
     # D-Bus service
     install -Dm644 "$_search/org.bookos.SemanticSearch.service" \
@@ -129,7 +136,4 @@ EOF
     install -Dm644 "$_ai/bookos-battery-train.timer" \
         "$pkgdir/usr/lib/systemd/system/bookos-battery-train.timer"
 
-    # Pacman hooks
-    install -Dm644 "${_extra}/scripts/bookos-settings.install" \
-        "$pkgdir/.INSTALL"
 }
