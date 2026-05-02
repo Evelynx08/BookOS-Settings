@@ -1,0 +1,17 @@
+#!/bin/sh
+# Debian/Ubuntu postrm — apt passes "purge" or "remove" as $1.
+set -e
+
+systemctl daemon-reload >/dev/null 2>&1 || true
+
+case "$1" in
+    purge)
+        echo "Purging BookOS data (logs, ML model, snapshots)..."
+        rm -rf /var/log/bookos /var/lib/bookos-ai /var/lib/bookos /etc/bookos /opt/bookos-ai
+        ;;
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        # Keep user data
+        ;;
+esac
+
+exit 0

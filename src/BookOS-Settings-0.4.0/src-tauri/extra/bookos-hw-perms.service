@@ -1,0 +1,48 @@
+# bookos-hw-perms.service — BookOS hardware permissions daemon
+#
+# Instalación (una sola vez):
+#   sudo cp src-tauri/extra/bookos-hw-perms.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now bookos-hw-perms
+#   sudo usermod -aG power,video $USER   # cerrar sesión y volver a entrar
+#
+# Tras eso, BookOS Settings controla el hardware sin contraseña.
+
+[Unit]
+Description=BookOS Hardware Permissions
+Documentation=https://github.com/bookos/bookos-settings
+After=systemd-udev-settle.service
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '\
+  # RAPL — límites térmicos PL1/PL2 \
+  for f in \
+    /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw \
+    /sys/class/powercap/intel-rapl:0/constraint_1_power_limit_uw; do \
+    [ -f "$f" ] && chgrp power "$f" && chmod g+w "$f"; \
+  done; \
+  # Perfil de plataforma moderno (samsung-galaxybook / genérico) \
+  for f in /sys/class/platform-profile/platform-profile-*/profile; do \
+    [ -e "$f" ] && chgrp power "$f" 2>/dev/null && chmod g+w "$f" 2>/dev/null; \
+  done; \
+  # Perfil de plataforma legacy (fallback si no hay power-profiles-daemon) \
+  f=/sys/firmware/acpi/platform_profile; \
+  [ -f "$f" ] && chgrp power "$f" && chmod g+w "$f"; \
+  # Retroiluminación de pantalla \
+  f=/sys/class/backlight/intel_backlight/brightness; \
+  [ -f "$f" ] && chgrp video "$f" && chmod g+w "$f"; \
+  # GPU Intel Arc Xe — runtime power management \
+  f=/sys/bus/pci/devices/0000:00:02.0/power/control; \
+  [ -f "$f" ] && chgrp power "$f" && chmod g+w "$f"; \
+  # Batería — límite de carga (BAT0 y BAT1 por compatibilidad) \
+  for bat in BAT0 BAT1; do \
+    f=/sys/class/power_supply/$bat/charge_control_end_threshold; \
+    [ -f "$f" ] && chgrp power "$f" && chmod g+w "$f"; \
+  done; \
+  true'
+
+[Install]
+WantedBy=multi-user.target

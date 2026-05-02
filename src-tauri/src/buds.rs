@@ -325,6 +325,7 @@ pub struct BudsConn {
     pub fd:     libc::c_int,
     pub legacy: bool,
     pub status: Arc<Mutex<BudsStatus>>,
+    #[allow(dead_code)]  // Kept for diagnostics — surfaces in UI/debugging.
     pub mac:    String,
     stop:       Arc<AtomicBool>,
     reader:     Option<std::thread::JoinHandle<()>>,

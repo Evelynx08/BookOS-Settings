@@ -8,10 +8,15 @@ html,body{height:100%;overflow:hidden;background:transparent}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Roboto,sans-serif;color:var(--tx);-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
 .main-container{width:100%;height:100%;background:var(--bg);display:flex;flex-direction:column;overflow:hidden}
 .main-container.windowed{border-radius:20px;border:1px solid var(--brd);overflow:hidden}
-.titlebar{height:36px;display:flex;justify-content:flex-end;align-items:center;padding:0 12px;user-select:none;flex-shrink:0}
+.titlebar{height:36px;display:flex;justify-content:space-between;align-items:center;padding:0 12px;user-select:none;flex-shrink:0}
+.sb-toggle{background:0;border:0;color:var(--tx);cursor:pointer;opacity:.55;width:32px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;transition:.12s;-webkit-app-region:no-drag}
+.sb-toggle:hover{opacity:1;background:var(--hov)}
 .controls{display:flex;gap:2px}
 .controls button{background:0;border:0;color:var(--tx);font-size:13px;cursor:pointer;opacity:.6;width:32px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;transition:.12s}
 .controls button:hover{opacity:1;background:var(--hov)}
+/* Sidebar collapse state */
+.sidebar{transition:width .25s cubic-bezier(.4,0,.2,1),padding .25s cubic-bezier(.4,0,.2,1),opacity .2s ease}
+.main-container.sidebar-collapsed .sidebar{width:0;padding-left:0;padding-right:0;opacity:0;pointer-events:none;overflow:hidden}
 .split-view{display:flex;flex:1;min-height:0}
 
 /* Sidebar */
@@ -162,6 +167,7 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 .btn{border:0;border-radius:12px;padding:8px 18px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;transition:.12s}
 .btn-primary{background:var(--blue);color:#fff}.btn-primary:hover{opacity:.85}
 .btn-secondary{background:var(--hov);color:var(--tx)}
+.btn-danger{background:var(--red,#ff3b30);color:#fff}.btn-danger:hover{opacity:.85}
 .btn-sm{padding:6px 14px;font-size:12px;border-radius:10px}
 
 /* ═══════════════════════════════════════════════════════════ */
@@ -203,16 +209,17 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 .bat-chart-legend{display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;margin-top:14px;font-size:12px;color:var(--tx2)}
 .chart-legend-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px;vertical-align:middle}
 /* Battery stats chips row */
-.bat-stats-row{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px;padding:0 4px}
-.bat-stat-chip{background:var(--card);border-radius:14px;padding:8px 14px;display:flex;flex-direction:column;gap:2px;min-width:72px}
-.bat-stat-label{font-size:11px;color:var(--tx2);font-weight:500}
-.bat-stat-val{font-size:15px;font-weight:700;letter-spacing:-.2px}
+.bat-stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin:0 0 14px;padding:0 4px}
+.bat-stat-chip{background:var(--card);border-radius:16px;padding:14px 16px;display:flex;flex-direction:column;gap:4px;min-height:64px;justify-content:center}
+.bat-stat-label{font-size:12px;color:var(--tx2);font-weight:500;letter-spacing:0}
+.bat-stat-val{font-size:17px;font-weight:700;letter-spacing:-.3px;line-height:1.1}
 
 /* Perf modes */
 .perf-modes{display:flex;gap:10px;margin-bottom:16px}
 .perf-mode-card{flex:1;background:var(--card);border-radius:18px;padding:14px 10px;text-align:center;cursor:pointer;transition:.15s;border:2px solid transparent}
-.perf-mode-card.active{border-color:var(--blue)}
-.perf-mode-card:hover{background:var(--hov)}
+.perf-mode-card.active{border-color:var(--blue);background:color-mix(in srgb,var(--blue) 14%,var(--card));box-shadow:0 0 0 1px var(--blue) inset,0 4px 12px -4px var(--blue)}
+.perf-mode-card.active .perf-mode-name{color:var(--blue)}
+.perf-mode-card:hover:not(.active){background:var(--hov)}
 .perf-mode-icon{font-size:20px;margin-bottom:4px}.perf-mode-name{font-size:12px;font-weight:600}.perf-mode-desc{font-size:10px;color:var(--tx2);margin-top:2px}
 /* Performance icons: dark in light mode, white in dark mode */
 .perf-icon-img{transition:filter .2s;display:block;margin:0 auto}
@@ -817,6 +824,15 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 .upd-auth-input-bar{height:2px;border-radius:1px;background:transparent;transition:background .25s,transform .25s;transform:scaleX(0);transform-origin:center}
 .upd-auth-input-bar.active{background:var(--blue);transform:scaleX(1)}
 .upd-auth-error{font-size:12px;color:var(--red,#ff3b30);margin:0;text-align:center}
+/* Fingerprint hint inside the auth modal */
+.upd-auth-fp{display:flex;align-items:center;justify-content:center;gap:10px;padding:10px 14px;background:var(--sbg);border-radius:12px;margin-top:6px;transition:.18s}
+.upd-auth-fp-icon{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--card);color:var(--tx2);transition:.18s;flex-shrink:0}
+.upd-auth-fp-icon.scanning{color:var(--blue);animation:fp-pulse 1.4s ease-in-out infinite}
+.upd-auth-fp-icon.success{color:var(--green,#34c759);background:color-mix(in srgb,var(--green,#34c759) 18%,var(--card));animation:none}
+.upd-auth-fp-icon.error{color:var(--red,#ff3b30);background:color-mix(in srgb,var(--red,#ff3b30) 18%,var(--card));animation:fp-shake-mini .3s ease}
+.upd-auth-fp-text{font-size:12px;color:var(--tx2);flex:1}
+@keyframes fp-pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.08);opacity:.7}}
+@keyframes fp-shake-mini{0%,100%{transform:translateX(0)}25%{transform:translateX(-3px)}75%{transform:translateX(3px)}}
 .upd-auth-btns{display:flex;gap:10px}
 .upd-auth-btn{flex:1;height:44px;border:0;border-radius:14px;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit;transition:.12s}
 .upd-auth-btn.cancel{background:var(--sbg);color:var(--tx)}
@@ -883,20 +899,22 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 /* ═══════════════════════════════════════════════════════════ */
 /* ── FUNCIONES AVANZADAS / LABS ──────────────────────────── */
 /* ═══════════════════════════════════════════════════════════ */
-.labs-badge{display:inline-flex;align-items:center;gap:4px;background:linear-gradient(90deg,#5856d6,#af52de);color:#fff;font-size:10px;font-weight:700;letter-spacing:.5px;border-radius:20px;padding:3px 9px;text-transform:uppercase}
-.labs-hero{background:var(--card);border-radius:20px;padding:16px 18px;margin-bottom:16px;display:flex;align-items:center;gap:14px}
-.labs-hero-icon{width:44px;height:44px;border-radius:14px;background:linear-gradient(135deg,#5856d6,#af52de);display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0}
-.labs-hero-text{display:flex;flex-direction:column;gap:3px}
-.labs-hero-title{font-size:15px;font-weight:700}
-.labs-hero-sub{font-size:12px;color:var(--tx2);line-height:1.4}
-/* Lab experiment grid */
-.labs-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
-.lab-card{background:var(--card);border-radius:16px;padding:14px;display:flex;flex-direction:column;gap:10px}
-.lab-card-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
-.lab-card-info{display:flex;flex-direction:column;gap:3px;flex:1}
-.lab-card-title{font-size:13px;font-weight:600;color:var(--tx)}
-.lab-card-desc{font-size:11px;color:var(--tx2);line-height:1.4}
-.lab-status-chip{display:inline-flex;align-self:flex-start;font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;background:var(--hov);color:var(--tx2)}
+.labs-badge{display:inline-flex;align-items:center;gap:4px;background:linear-gradient(90deg,#5856d6,#af52de);color:#fff;font-size:10px;font-weight:700;letter-spacing:.5px;border-radius:20px;padding:2px 8px;text-transform:uppercase;vertical-align:middle;margin-left:6px}
+/* Slim divider hero — sits between stable and experimental sections */
+.labs-divider{display:flex;align-items:center;gap:14px;margin:24px 4px 8px;padding-top:18px;border-top:1px solid var(--div)}
+.labs-divider-icon{width:36px;height:36px;border-radius:12px;background:linear-gradient(135deg,#5856d6,#af52de);color:#fff;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.labs-divider-text{display:flex;flex-direction:column;gap:2px}
+.labs-divider-title{font-size:14px;font-weight:700;color:var(--tx)}
+.labs-divider-sub{font-size:12px;color:var(--tx2);line-height:1.4}
+/* Upcoming features list — same row geometry as the rest of the app */
+.lab-list{margin-bottom:16px}
+.lab-row{display:flex;align-items:center;gap:14px;padding:14px 18px;border-bottom:1px solid var(--div);opacity:.78}
+.lab-row:last-child{border-bottom:none}
+.lab-row-icon{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.lab-row-info{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.lab-row-title{font-size:14px;font-weight:600;color:var(--tx)}
+.lab-row-desc{font-size:12px;color:var(--tx2);line-height:1.4}
+.lab-status-chip{display:inline-flex;font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;background:var(--hov);color:var(--tx2);flex-shrink:0}
 
 /* ═══════════════════════════════════════════════════════════ */
 /* ── STYLE THEME DROPDOWNS ───────────────────────────────── */

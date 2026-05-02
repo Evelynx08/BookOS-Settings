@@ -71,6 +71,37 @@ fn read(p: &str) -> String { fs::read_to_string(p).unwrap_or_default().trim().to
 fn esc(s: &str) -> String { s.replace('\\',"\\\\").replace('"',"\\\"").replace('\n',"\\n").replace('\r',"") }
 
 // ── User ─────────────────────────────────────────────────────────────────
+/// Locate user picture and return (path, base64-data-url) — searches the
+/// standard locations: ~/.face, ~/.face.icon, /var/lib/AccountsService/icons/<user>.
+fn find_avatar(home: &str, user: &str) -> (String, String) {
+    let candidates = [
+        format!("{}/.face", home),
+        format!("{}/.face.icon", home),
+        format!("/var/lib/AccountsService/icons/{}", user),
+    ];
+    let path = match candidates.iter().find(|p| std::path::Path::new(p).exists()) {
+        Some(p) => p.clone(),
+        None => return (String::new(), String::new()),
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => return (path, String::new()),
+    };
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        s.push(T[(b0 >> 2) as usize] as char);
+        s.push(T[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        s.push(if chunk.len() > 1 { T[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char } else { '=' });
+        s.push(if chunk.len() > 2 { T[(b2 & 0x3f) as usize] as char } else { '=' });
+    }
+    let mime = if path.ends_with(".png") { "image/png" } else { "image/jpeg" };
+    (path, format!("data:{};base64,{}", mime, s))
+}
+
 #[tauri::command] async fn get_user_info() -> String {
     let user = run("whoami",&[]).await;
     let home = std::env::var("HOME").unwrap_or_default();
@@ -84,10 +115,10 @@ fn esc(s: &str) -> String { s.replace('\\',"\\\\").replace('"',"\\\"").replace('
                 .filter(|s| !s.is_empty()).unwrap_or_else(|| user.clone())
         });
     let host = run("hostname",&[]).await;
-    let avatar = format!("{}/.face", home);
-    let has_av = std::path::Path::new(&avatar).exists();
-    format!(r#"{{"username":"{}","display_name":"{}","hostname":"{}","has_avatar":{},"avatar_path":"{}"}}"#,
-        esc(&user),esc(&display),esc(&host),has_av,esc(&avatar))
+    let (avatar, avatar_data) = find_avatar(&home, &user);
+    let has_av = !avatar.is_empty();
+    format!(r#"{{"username":"{}","display_name":"{}","hostname":"{}","has_avatar":{},"avatar_path":"{}","avatar_data":"{}"}}"#,
+        esc(&user),esc(&display),esc(&host),has_av,esc(&avatar),avatar_data)
 }
 #[tauri::command] async fn set_display_name(name: String) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -197,6 +228,104 @@ fn regex_strip_rev(s: &str) -> String {
         run("powerprofilesctl",&["set",&mode]).await;
     }
     r#"{"ok":true}"#.into()
+}
+
+/// Calls the bookos-ai predict.py to estimate minutes remaining until 20%.
+/// Returns model JSON or `{"ok":false,"reason":"..."}`.
+#[tauri::command] async fn predict_battery_runtime() -> String {
+    fn read_u64(p: &str) -> u64 { std::fs::read_to_string(p).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0) }
+    // Prefer /var/lib (user-writable, set up at first run) over /opt (system,
+    // populated by the post-install hook on packaged installs).
+    let candidates = [
+        ("/var/lib/bookos-ai/venv/bin/python", "/var/lib/bookos-ai/predict.py"),
+        ("/opt/bookos-ai/venv/bin/python", "/opt/bookos-ai/predict.py"),
+    ];
+    let (py, script) = match candidates.iter().find(|(p, s)|
+        std::path::Path::new(p).exists() && std::path::Path::new(s).exists()
+    ) {
+        Some((p, s)) => (*p, *s),
+        None => return r#"{"ok":false,"reason":"venv_not_installed"}"#.into(),
+    };
+    // Gather current state
+    let bat = if std::path::Path::new("/sys/class/power_supply/BAT1").exists() { "BAT1" } else { "BAT0" };
+    let level   = read_u64(&format!("/sys/class/power_supply/{bat}/capacity"));
+    let cur_ua  = read_u64(&format!("/sys/class/power_supply/{bat}/current_now"));
+    let volt_uv = read_u64(&format!("/sys/class/power_supply/{bat}/voltage_now"));
+    let power_w = (cur_ua.saturating_mul(volt_uv) / 1_000_000) as f64 / 1e6;
+
+    // Local time without chrono — `date` provides it consistently
+    let date_out = std::process::Command::new("date").arg("+%H %M %u").output();
+    let (hora, minute, dow) = match date_out {
+        Ok(o) => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            let mut it = s.split_whitespace();
+            let h: u32 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            let m: u32 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            let d: u32 = it.next().and_then(|x| x.parse().ok()).unwrap_or(1);
+            (h, m, d)
+        }
+        Err(_) => (0u32, 0u32, 1u32),
+    };
+    let t_min = hora * 60 + minute;
+
+    let input = format!(
+        r#"{{"nivel":{},"power_w":{:.3},"hora":{},"dia":{},"t_min":{}}}"#,
+        level, power_w, hora, dow, t_min
+    );
+    let out = tokio::process::Command::new(py)
+        .args([script, "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match out { Ok(c) => c, Err(e) => return format!(r#"{{"ok":false,"reason":"spawn:{}"}}"#, esc(&e.to_string())) };
+    if let Some(mut sin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = sin.write_all(input.as_bytes()).await;
+        drop(sin);
+    }
+    match child.wait_with_output().await {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        Ok(o) => format!(r#"{{"ok":false,"reason":"py_exit","stderr":"{}"}}"#, esc(&String::from_utf8_lossy(&o.stderr))),
+        Err(e) => format!(r#"{{"ok":false,"reason":"wait:{}"}}"#, esc(&e.to_string())),
+    }
+}
+
+/// Background throttling: lowers cpufreq for non-foreground tasks and renices
+/// existing user processes that aren't part of the active session.
+/// `enable=true` => restrict, `false` => restore defaults.
+#[tauri::command] async fn set_background_throttle(enable: bool) -> String {
+    use std::process::Command;
+    // 1. cpufreq governor
+    let gov = if enable { "powersave" } else { "schedutil" };
+    let mut gov_changed = 0u32;
+    if let Ok(rd) = std::fs::read_dir("/sys/devices/system/cpu/cpufreq") {
+        for e in rd.flatten() {
+            let p = e.path().join("scaling_governor");
+            if p.exists() && std::fs::write(&p, gov).is_ok() { gov_changed += 1; }
+        }
+    }
+    // 2. Renice non-foreground user processes (background tasks).
+    // Heuristic: any process owned by current UID, that has no controlling
+    // tty AND isn't the active foreground window's PID, gets nice +10 / ionice idle.
+    if enable {
+        let _ = Command::new("sh").arg("-c").arg(
+            "for pid in $(ps -u \"$(id -u)\" -o pid= --no-headers); do \
+                tty=$(ps -o tty= -p $pid 2>/dev/null | tr -d ' '); \
+                [ \"$tty\" = '?' ] || continue; \
+                renice -n 10 -p $pid >/dev/null 2>&1; \
+                ionice -c 3 -p $pid >/dev/null 2>&1; \
+            done"
+        ).status();
+    } else {
+        let _ = Command::new("sh").arg("-c").arg(
+            "for pid in $(ps -u \"$(id -u)\" -o pid= --no-headers); do \
+                renice -n 0 -p $pid >/dev/null 2>&1; \
+                ionice -c 2 -n 4 -p $pid >/dev/null 2>&1; \
+            done"
+        ).status();
+    }
+    format!(r#"{{"ok":true,"governor":"{}","cpus_changed":{}}}"#, gov, gov_changed)
 }
 #[tauri::command] async fn set_charge_limit(limit: u32) -> String {
     // Standard Linux ACPI charge threshold — supported on many laptops
@@ -493,7 +622,8 @@ fn parse_upower(info: &str) -> String {
             }
         }
     }
-    let start = if rows.len() > 288 { rows.len() - 288 } else { 0 };
+    // Keep ~24h of samples at 30-second cadence (2880 rows).
+    let start = if rows.len() > 2880 { rows.len() - 2880 } else { 0 };
     format!(r#"{{"ok":true,"rows":[{}]}}"#, rows[start..].join(","))
 }
 
@@ -544,25 +674,25 @@ fn parse_upower(info: &str) -> String {
     let ac_online  = read_u64("/sys/class/power_supply/ADP1/online") == 1 ||
                      read_u64("/sys/class/power_supply/AC/online") == 1;
 
-    // Scan typec ports
-    let mut pd_rev    = String::new();
-    let mut op_mode   = String::new();
-    let mut usb_type  = String::new();
+    // Scan typec ports — kernel pd revision is often hardcoded (e.g. 1.1)
+    // by Samsung firmware, so we trust usb_type from ucsi-source-psy more.
+    let mut kernel_pd_rev = String::new();
+    let mut op_mode_raw   = String::new();
     if let Ok(rd) = std::fs::read_dir("/sys/class/typec") {
         for e in rd.flatten() {
             let p = e.path();
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if !name.starts_with("port") { continue; }
+            if !name.starts_with("port") || name.contains("partner") { continue; }
             let role = read_str(&format!("{}/power_role", p.display()));
-            // Solo el puerto que está recibiendo energía (sink)
             if role.contains("[sink]") {
-                pd_rev   = read_str(&format!("{}/usb_power_delivery_revision", p.display()));
-                op_mode  = read_str(&format!("{}/power_operation_mode", p.display()));
+                kernel_pd_rev = read_str(&format!("{}/usb_power_delivery_revision", p.display()));
+                op_mode_raw   = read_str(&format!("{}/power_operation_mode", p.display()));
                 break;
             }
         }
     }
-    // Fallback: mirar ucsi-source-psy para voltaje/corriente max negociada
+    // ucsi-source-psy: usb_type tells real capability (PD, PD_PPS, BC1.2, ...)
+    let mut usb_type_raw = String::new();
     let (mut v_max, mut c_max) = (0u64, 0u64);
     if let Ok(rd) = std::fs::read_dir("/sys/class/power_supply") {
         for e in rd.flatten() {
@@ -571,15 +701,51 @@ fn parse_upower(info: &str) -> String {
             if read_u64(&format!("/sys/class/power_supply/{n}/online")) != 1 { continue; }
             v_max = read_u64(&format!("/sys/class/power_supply/{n}/voltage_max"));
             c_max = read_u64(&format!("/sys/class/power_supply/{n}/current_max"));
-            if read_str(&format!("/sys/class/power_supply/{n}/usb_type")).contains("[PD") {
-                if op_mode.is_empty() { op_mode = "USB Power Delivery".into(); }
-            }
+            usb_type_raw = read_str(&format!("/sys/class/power_supply/{n}/usb_type"));
+            break;
         }
     }
-    let adapter_w = v_max.saturating_mul(c_max) / 1_000_000_000_000; // µV*µA → W
+    // Pick selected usb_type (the one in [brackets]), fall back to whole string
+    let selected_type = {
+        let s = &usb_type_raw;
+        if let (Some(a), Some(b)) = (s.find('['), s.find(']')) {
+            if b > a { s[a+1..b].to_string() } else { s.clone() }
+        } else { s.clone() }
+    };
+    // Derive a reasonable protocol label
+    let protocol = if selected_type.contains("PD_PPS") || usb_type_raw.contains("PD_PPS") {
+        "USB-PD 3.0 (PPS)".to_string()
+    } else if selected_type.contains("PD") || usb_type_raw.contains("[PD") {
+        // Trust kernel revision only when it looks plausible (>=2.0)
+        let rev_ok = kernel_pd_rev.starts_with('2') || kernel_pd_rev.starts_with('3');
+        if rev_ok { format!("USB-PD {}", kernel_pd_rev) } else { "USB-PD".to_string() }
+    } else if selected_type.contains("C") {
+        "USB-C".to_string()
+    } else if !selected_type.is_empty() {
+        selected_type.clone()
+    } else if ac_online {
+        "Conectado".to_string()
+    } else {
+        String::new()
+    };
 
-    format!(r#"{{"ok":true,"charging":{},"ac_online":{},"current_ua":{},"voltage_uv":{},"power_uw":{},"status":"{}","pd_rev":"{}","op_mode":"{}","adapter_w":{},"usb_type":"{}"}}"#,
-        charging, ac_online, current_ua, voltage_uv, power_uw, esc(&status), esc(&pd_rev), esc(&op_mode), adapter_w, esc(&usb_type))
+    // Adapter rated wattage from negotiated PDO. Many ucsi drivers leave this
+    // at 0 — caller will fall back to live max measurement.
+    let adapter_w = v_max.saturating_mul(c_max) / 1_000_000_000_000;
+
+    // Persistent peak power this session: track the highest power_uw seen
+    // while charging since the app started; useful when adapter_w is 0.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static PEAK_UW: AtomicU64 = AtomicU64::new(0);
+    if charging && power_uw > PEAK_UW.load(Ordering::Relaxed) {
+        PEAK_UW.store(power_uw, Ordering::Relaxed);
+    }
+    if !ac_online { PEAK_UW.store(0, Ordering::Relaxed); }
+    let peak_uw = PEAK_UW.load(Ordering::Relaxed);
+
+    format!(r#"{{"ok":true,"charging":{},"ac_online":{},"current_ua":{},"voltage_uv":{},"power_uw":{},"peak_uw":{},"status":"{}","pd_rev":"{}","op_mode":"{}","protocol":"{}","adapter_w":{},"usb_type":"{}"}}"#,
+        charging, ac_online, current_ua, voltage_uv, power_uw, peak_uw,
+        esc(&status), esc(&kernel_pd_rev), esc(&op_mode_raw), esc(&protocol), adapter_w, esc(&selected_type))
 }
 
 /// Camera privacy toggle — enable/disable kernel module or device access.
@@ -682,18 +848,44 @@ fn parse_upower(info: &str) -> String {
 }
 
 /// Enables or disables the adaptive charging systemd timer.
-#[tauri::command] async fn set_adaptive_charging(enabled: bool) -> String {
-    // Try system-level timer first, then user-level
+/// Toggle the adaptive-charging system timer.
+///
+/// We never call plain `systemctl` first because that triggers Polkit's
+/// own auth popup. Instead, the first call always returns `needs_auth:true`
+/// so the frontend can show its own promptAuth dialog and re-invoke with
+/// the password — which we then forward to `sudo -S`.
+#[tauri::command] async fn set_adaptive_charging(enabled: bool, password: Option<String>) -> String {
+    use tokio::io::AsyncWriteExt;
     let timer = "bookos-battery-adaptive.timer";
-    let args: &[&str] = if enabled { &["enable", "--now", timer] } else { &["disable", "--now", timer] };
-    let sys = run("systemctl", args).await;
-    if sys.is_empty() || sys.contains("error") || sys.contains("not found") {
-        // try user-level
-        let mut user_args = vec!["--user"];
-        user_args.extend_from_slice(args);
-        let _ = run("systemctl", &user_args).await;
+    let action = if enabled { "enable" } else { "disable" };
+
+    // No password yet → tell the frontend to prompt. Skip Polkit entirely.
+    let pw = match password {
+        Some(p) if !p.is_empty() => p,
+        _ => return format!(r#"{{"ok":false,"needs_auth":true,"enabled":{}}}"#, enabled),
+    };
+
+    // Use sudo -S so PAM authenticates from our supplied password and
+    // Polkit's session agent stays out of the picture.
+    let mut child = match tokio::process::Command::new("sudo")
+        .args(["-S", "-p", "", "systemctl", action, "--now", timer])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    };
+    if let Some(mut sin) = child.stdin.take() {
+        let _ = sin.write_all(format!("{}\n", pw).as_bytes()).await;
+        drop(sin);
     }
-    format!(r#"{{"ok":true,"enabled":{}}}"#, enabled)
+    match child.wait_with_output().await {
+        Ok(o) if o.status.success() => format!(r#"{{"ok":true,"enabled":{}}}"#, enabled),
+        Ok(o) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&String::from_utf8_lossy(&o.stderr))),
+        Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    }
 }
 
 // ── Display / Resolution ─────────────────────────────────────────────────
@@ -998,6 +1190,73 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
     run("kwriteconfig6",&["--file","kscreenlockerrc","--group","Daemon","--key","Timeout",&minutes.to_string()]).await;
     r#"{"ok":true}"#.into()
 }
+/// Validate the user's password without running anything privileged.
+/// Returns `{"ok":true}` if accepted, `{"ok":false}` otherwise.
+/// Uses `sudo -k` then `sudo -S -v` so PAM is the source of truth.
+#[tauri::command] async fn verify_password(password: String) -> String {
+    use tokio::io::AsyncWriteExt;
+    // Drop the cached sudo timestamp so the test reflects the password actually entered.
+    let _ = tokio::process::Command::new("sudo").arg("-k").status().await;
+
+    let mut child = match tokio::process::Command::new("sudo")
+        .args(["-S", "-p", "", "-v"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    };
+    if let Some(mut sin) = child.stdin.take() {
+        let _ = sin.write_all(format!("{}\n", password).as_bytes()).await;
+        drop(sin);
+    }
+    let ok = matches!(child.wait().await, Ok(s) if s.success());
+    format!(r#"{{"ok":{}}}"#, ok)
+}
+
+/// Listen for a fingerprint match. Resolves with `{"ok":true}` on a match,
+/// `{"ok":false,"error":"..."}` on failure or timeout. Pairs with the auth dialog.
+#[tauri::command] async fn verify_fingerprint() -> String {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let user = run("whoami", &[]).await;
+    let mut child = match tokio::process::Command::new("fprintd-verify")
+        .arg(&user)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    };
+
+    let stdout = match child.stdout.take() { Some(s) => s, None => return r#"{"ok":false,"error":"no stdout"}"#.into() };
+    let mut reader = BufReader::new(stdout).lines();
+    let mut matched = false;
+    let mut output = String::new();
+    while let Ok(Some(line)) = reader.next_line().await {
+        output.push_str(&line);
+        output.push('\n');
+        if line.contains("verify-match") || line.contains("Verify result: verify-match") {
+            matched = true;
+        }
+        if line.contains("verify-no-match") || line.contains("verify-disconnected")
+            || line.contains("verify-unknown-error") || line.contains("verify-retry-scan") {
+            // Don't break on retry — let fprintd handle multi-attempt cycle
+            if !line.contains("verify-retry-scan") {
+                break;
+            }
+        }
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    if matched { r#"{"ok":true}"#.into() } else {
+        format!(r#"{{"ok":false,"output":"{}"}}"#, esc(output.trim()))
+    }
+}
+
 #[tauri::command] async fn check_fingerprint() -> String {
     let user = run("whoami",&[]).await;
     let r = run("fprintd-list",&[&user]).await;
@@ -1201,9 +1460,16 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
     let icon_dirs = [
         "/usr/share/pixmaps",
         "/usr/share/icons/hicolor/48x48/apps",
-        "/usr/share/icons/hicolor/32x32/apps",
+        "/usr/share/icons/hicolor/64x64/apps",
+        "/usr/share/icons/hicolor/128x128/apps",
         "/usr/share/icons/hicolor/scalable/apps",
+        "/usr/share/icons/hicolor/32x32/apps",
         "/usr/share/icons/breeze/apps/48",
+        "/usr/share/icons/breeze/apps/64",
+        "/usr/share/icons/breeze/apps/22",
+        "/usr/share/icons/breeze-dark/apps/48",
+        "/usr/share/icons/Papirus/64x64/apps",
+        "/usr/share/icons/Papirus/48x48/apps",
     ];
     let icon_exts = ["png", "svg", "xpm"];
 
@@ -1227,12 +1493,58 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
             let is_sys = name.starts_with('(') || name.starts_with('[') ||
                 system_procs.iter().any(|s| nl == *s || nl.starts_with(s));
 
-            // Find icon in common directories
+            // Process names truncated by the kernel often differ from the
+            // .desktop "Icon=" field. Map well-known cases first.
+            let aliases: &[(&str, &[&str])] = &[
+                ("firefox",        &["firefox", "firefox-default"]),
+                ("firefox-bin",    &["firefox"]),
+                ("code",           &["visual-studio-code", "code", "code-oss", "vscode"]),
+                ("code-oss",       &["code-oss", "code"]),
+                ("electron",       &["electron"]),
+                ("konsole",        &["utilities-terminal", "konsole", "org.kde.konsole"]),
+                ("kitty",          &["kitty"]),
+                ("alacritty",      &["alacritty"]),
+                ("dolphin",        &["system-file-manager", "dolphin", "org.kde.dolphin"]),
+                ("kate",           &["kate", "org.kde.kate"]),
+                ("gwenview",       &["gwenview", "org.kde.gwenview"]),
+                ("spectacle",      &["spectacle", "org.kde.spectacle"]),
+                ("plasmashell",    &["plasma", "plasmashell"]),
+                ("kwin_wayland",   &["kwin"]),
+                ("krunner",        &["krunner"]),
+                ("vlc",            &["vlc"]),
+                ("mpv",            &["mpv"]),
+                ("steam",          &["steam"]),
+                ("discord",        &["discord"]),
+                ("telegram-deskto",&["telegram", "telegram-desktop"]),
+                ("thunderbird",    &["thunderbird"]),
+                ("chrome",         &["google-chrome"]),
+                ("chromium",       &["chromium"]),
+                ("brave",          &["brave-browser", "brave"]),
+                ("obsidian",       &["obsidian"]),
+                ("blender",        &["blender"]),
+                ("gimp",           &["gimp"]),
+                ("inkscape",       &["inkscape"]),
+                ("claude",         &["claude"]),
+                ("python",         &["python", "applications-development"]),
+                ("python3",        &["python", "applications-development"]),
+                ("node",           &["nodejs", "applications-development"]),
+                ("cargo",          &["applications-development"]),
+                ("rustc",          &["applications-development"]),
+            ];
+
+            let mut candidates: Vec<String> = vec![name.clone(), nl.clone()];
+            for (key, aliases) in aliases {
+                if nl == *key || nl.starts_with(key) {
+                    candidates.extend(aliases.iter().map(|s| s.to_string()));
+                    break;
+                }
+            }
+
             let mut icon = String::new();
-            'outer: for dir in &icon_dirs {
-                for ext in &icon_exts {
-                    for candidate in [name.as_str(), &nl] {
-                        let path = format!("{}/{}.{}", dir, candidate, ext);
+            'outer: for cand in &candidates {
+                for dir in &icon_dirs {
+                    for ext in &icon_exts {
+                        let path = format!("{}/{}.{}", dir, cand, ext);
                         if std::path::Path::new(&path).exists() {
                             icon = path;
                             break 'outer;
@@ -1690,6 +2002,193 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
     match fs::copy(&source_path, &dest) {
         Ok(_) => r#"{"ok":true}"#.into(),
         Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string()))
+    }
+}
+
+/// Create a new local user account. Optional avatar_path is copied into the
+/// new user's home and into AccountsService.
+#[tauri::command] async fn create_user(
+    username: String, full_name: String, password: String,
+    is_admin: bool, avatar_path: Option<String>,
+    sudo_password: String,
+) -> String {
+    use tokio::io::AsyncWriteExt;
+    if username.is_empty() || password.is_empty() || sudo_password.is_empty() {
+        return r#"{"ok":false,"error":"missing_fields"}"#.into();
+    }
+    // Validate username (POSIX): lowercase letters, digits, underscores, hyphens
+    if !username.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+        return r#"{"ok":false,"error":"invalid_username"}"#.into();
+    }
+
+    // Step 1: useradd -m -s /bin/bash -c "<full name>" <user>
+    let comment = full_name.replace(',', " ").replace(':', " ");
+    let mut child = match tokio::process::Command::new("sudo")
+        .args(["-S", "-p", "", "useradd", "-m", "-s", "/bin/bash", "-c", &comment, &username])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    };
+    if let Some(mut sin) = child.stdin.take() {
+        let _ = sin.write_all(format!("{}\n", sudo_password).as_bytes()).await;
+        drop(sin);
+    }
+    let out = child.wait_with_output().await.ok();
+    if !matches!(&out, Some(o) if o.status.success()) {
+        let err = out.map(|o| String::from_utf8_lossy(&o.stderr).to_string()).unwrap_or_default();
+        return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&err));
+    }
+
+    // Step 2: set password via chpasswd
+    let mut child = match tokio::process::Command::new("sudo")
+        .args(["-S", "-p", "", "chpasswd"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    };
+    if let Some(mut sin) = child.stdin.take() {
+        let _ = sin.write_all(format!("{}\n{}:{}\n", sudo_password, username, password).as_bytes()).await;
+        drop(sin);
+    }
+    let _ = child.wait_with_output().await;
+
+    // Step 3: add to wheel group if admin
+    if is_admin {
+        let mut child = tokio::process::Command::new("sudo")
+            .args(["-S", "-p", "", "usermod", "-aG", "wheel", &username])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn().ok();
+        if let Some(c) = child.as_mut() {
+            if let Some(mut sin) = c.stdin.take() {
+                let _ = sin.write_all(format!("{}\n", sudo_password).as_bytes()).await;
+                drop(sin);
+            }
+            let _ = c.wait().await;
+        }
+    }
+
+    // Step 4: avatar copy (best-effort)
+    if let Some(src) = avatar_path {
+        if !src.is_empty() && std::path::Path::new(&src).exists() {
+            let mut child = tokio::process::Command::new("sudo")
+                .args(["-S", "-p", "", "cp", "--no-preserve=ownership", &src,
+                       &format!("/var/lib/AccountsService/icons/{}", username)])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn().ok();
+            if let Some(c) = child.as_mut() {
+                if let Some(mut sin) = c.stdin.take() {
+                    let _ = sin.write_all(format!("{}\n", sudo_password).as_bytes()).await;
+                    drop(sin);
+                }
+                let _ = c.wait().await;
+            }
+        }
+    }
+    format!(r#"{{"ok":true,"username":"{}"}}"#, esc(&username))
+}
+
+/// Delete a local user account. By default removes their home (`-r`).
+#[tauri::command] async fn delete_user(username: String, sudo_password: String, remove_home: bool) -> String {
+    use tokio::io::AsyncWriteExt;
+    let current = run("whoami", &[]).await;
+    if username == current {
+        return r#"{"ok":false,"error":"cannot_delete_self"}"#.into();
+    }
+    let args: &[&str] = if remove_home {
+        &["-S", "-p", "", "userdel", "-r", "--", &username]
+    } else {
+        &["-S", "-p", "", "userdel", "--", &username]
+    };
+    let mut child = match tokio::process::Command::new("sudo")
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    };
+    if let Some(mut sin) = child.stdin.take() {
+        let _ = sin.write_all(format!("{}\n", sudo_password).as_bytes()).await;
+        drop(sin);
+    }
+    match child.wait_with_output().await {
+        Ok(o) if o.status.success() => r#"{"ok":true}"#.into(),
+        Ok(o) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&String::from_utf8_lossy(&o.stderr))),
+        Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    }
+}
+
+/// Read SDDM autologin status. Returns the configured user (or empty) + session.
+#[tauri::command] fn get_autologin_status() -> String {
+    let paths = [
+        "/etc/sddm.conf.d/autologin.conf",
+        "/etc/sddm.conf.d/kde_settings.conf",
+        "/etc/sddm.conf",
+    ];
+    let mut user = String::new();
+    let mut session = String::new();
+    let mut in_section = false;
+    for p in &paths {
+        let content = match fs::read_to_string(p) { Ok(c) => c, Err(_) => continue };
+        for line in content.lines() {
+            let l = line.trim();
+            if l.starts_with('[') && l.ends_with(']') {
+                in_section = l.eq_ignore_ascii_case("[Autologin]");
+                continue;
+            }
+            if !in_section { continue; }
+            if let Some(rest) = l.strip_prefix("User=") { if !rest.trim().is_empty() { user = rest.trim().to_string(); } }
+            if let Some(rest) = l.strip_prefix("Session=") { if !rest.trim().is_empty() { session = rest.trim().to_string(); } }
+        }
+        if !user.is_empty() { break; }
+    }
+    let enabled = !user.is_empty();
+    format!(r#"{{"enabled":{},"user":"{}","session":"{}"}}"#, enabled, esc(&user), esc(&session))
+}
+
+/// Enable / disable SDDM autologin. Writes /etc/sddm.conf.d/bookos-autologin.conf.
+#[tauri::command] async fn set_autologin(enabled: bool, username: String, sudo_password: String) -> String {
+    use tokio::io::AsyncWriteExt;
+    let body = if enabled {
+        format!("[Autologin]\nUser={}\nSession=plasma\nRelogin=false\n", username)
+    } else {
+        // Empty file disables it (overrides previous configs since drop-ins are sorted)
+        "[Autologin]\nUser=\nSession=\n".to_string()
+    };
+    let target = "/etc/sddm.conf.d/bookos-autologin.conf";
+    // Use sudo tee
+    let mut child = match tokio::process::Command::new("sudo")
+        .args(["-S", "-p", "", "tee", target])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    };
+    if let Some(mut sin) = child.stdin.take() {
+        let _ = sin.write_all(format!("{}\n{}", sudo_password, body).as_bytes()).await;
+        drop(sin);
+    }
+    match child.wait_with_output().await {
+        Ok(o) if o.status.success() => format!(r#"{{"ok":true,"enabled":{}}}"#, enabled),
+        Ok(o) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&String::from_utf8_lossy(&o.stderr))),
+        Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
     }
 }
 
@@ -2255,10 +2754,10 @@ fn save_bookos_settings(v: &serde_json::Value) {
                 let un = p[0];
                 let display = p[4].split(',').next().unwrap_or("");
                 let home = p[5];
-                let avatar = format!("{}/.face", home);
-                let has_av = std::path::Path::new(&avatar).exists();
-                users.push(format!(r#"{{"username":"{}","display_name":"{}","has_avatar":{},"avatar_path":"{}"}}"#,
-                    esc(un), esc(display), has_av, esc(&avatar)));
+                let (avatar, avatar_data) = find_avatar(home, un);
+                let has_av = !avatar.is_empty();
+                users.push(format!(r#"{{"username":"{}","display_name":"{}","has_avatar":{},"avatar_path":"{}","avatar_data":"{}"}}"#,
+                    esc(un), esc(display), has_av, esc(&avatar), avatar_data));
             }
         }
     }
@@ -2309,14 +2808,22 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
 
+    let args: Vec<String> = std::env::args().collect();
+
     // ── Single-instance guard ─────────────────────────────────────────────
     if !acquire_instance_lock() {
-        // A live instance is already running; it will pick up /tmp/bookos-start-page
-        // via its check_navigation_request polling interval.
+        // A live instance is already running. If the user passed --toggle,
+        // forward the request via /tmp/bookos-toggle so the running instance
+        // shows / hides itself. Otherwise, fall back to the legacy navigation
+        // hand-off (a second non-flag launch raises the existing window).
+        if args.iter().any(|a| a == "--toggle") {
+            let _ = std::fs::write("/tmp/bookos-toggle", "1");
+        }
         std::process::exit(0);
     }
 
-    let is_hidden = std::env::args().any(|arg| arg == "--hidden");
+    let is_hidden = args.iter().any(|a| a == "--hidden");
+    let toggle_only = args.iter().any(|a| a == "--toggle");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -2327,13 +2834,33 @@ fn main() {
         .setup(move |app| {
             use tauri::Manager;
             if let Some(window) = app.get_webview_window("main") {
-                if is_hidden {
+                if is_hidden || toggle_only {
                     let _ = window.set_skip_taskbar(true);
                     // Stay hidden — launched as background service
                 } else {
                     let _ = window.show();
                     let _ = window.set_focus();
                 }
+                // Watch for /tmp/bookos-toggle requests (from `bookos-settings --toggle`)
+                let win = window.clone();
+                std::thread::spawn(move || {
+                    let path = "/tmp/bookos-toggle";
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                        if std::fs::metadata(path).is_ok() {
+                            let _ = std::fs::remove_file(path);
+                            let visible = win.is_visible().unwrap_or(false);
+                            let minimized = win.is_minimized().unwrap_or(false);
+                            if visible && !minimized {
+                                let _ = win.hide();
+                            } else {
+                                let _ = win.unminimize();
+                                let _ = win.show();
+                                let _ = win.set_focus();
+                            }
+                        }
+                    }
+                });
             }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_icon(tauri::include_image!("icons/icon.png"));
@@ -2510,7 +3037,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_user_info,set_display_name,set_hostname,get_system_info,
-            check_hw_features,set_performance_mode,set_charge_limit,
+            check_hw_features,set_performance_mode,set_charge_limit,set_background_throttle,predict_battery_runtime,
             get_wifi_status,toggle_wifi,get_wifi_list,connect_wifi,wifi_rescan,
             get_bluetooth_status,toggle_bluetooth,get_bluetooth_devices,connect_bluetooth,disconnect_bluetooth,bluetooth_scan,
             get_airplane_mode,toggle_airplane_mode,
@@ -2522,7 +3049,7 @@ fn main() {
             get_current_theme,get_available_themes,set_color_scheme,get_theme_schedule,set_theme_schedule,
             get_kde_light_dark_themes,apply_kde_theme,
             get_dnd_status,toggle_dnd,
-            get_lock_timeout,set_lock_timeout,check_fingerprint,enroll_fingerprint,
+            get_lock_timeout,set_lock_timeout,check_fingerprint,enroll_fingerprint,verify_password,verify_fingerprint,
             get_locale_info,get_available_locales,set_locale,get_available_keymaps,set_keymap,
             check_system_updates,check_aur_updates,check_flatpak_updates,run_system_update,run_pacman_update_silent,get_update_progress,cancel_update,run_flatpak_update,
             get_app_power_usage,get_sddm_themes,set_sddm_theme,get_sddm_config,set_sddm_config,preview_sddm,get_app_usage,
@@ -2530,7 +3057,7 @@ fn main() {
             get_firewall_status,run_sudo_command,get_system_users,
             get_autostart_bookos,toggle_autostart_bookos,get_autostart_apps,toggle_autostart_app,setup_polkit_rules,export_settings,import_settings,
             get_accessibility_settings,set_font_scale,set_display_scale,toggle_invert_colors,set_cursor_size,
-            change_password,set_avatar,get_labs_settings,set_lab_setting,
+            change_password,set_avatar,create_user,delete_user,get_autologin_status,set_autologin,get_labs_settings,set_lab_setting,
             forget_wifi,get_wifi_details,get_wifi_password,log_app_usage,track_active_app,
             get_wallpapers,get_current_wallpaper,set_wallpaper,
             get_default_apps,open_mime_settings,

@@ -1,0 +1,14 @@
+[Unit]
+Description=BookOS Semantic Search KRunner plugin
+
+[Service]
+Type=simple
+Environment=SENTENCE_TRANSFORMERS_HOME=/opt/bookos-search/models
+Environment=TRANSFORMERS_OFFLINE=1
+ExecStart=/opt/bookos-search/venv/bin/python /opt/bookos-search/bookos-krunner.py
+Restart=on-failure
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,11 @@
+#!/bin/sh
+# Debian/Ubuntu prerm — runs before files are removed.
+set -e
+
+for u in bookos-battery-adaptive.timer bookos-battery-logger.timer \
+         bookos-battery-train.timer bookos-hw-perms.service \
+         bookos-thermal-logger.service; do
+    systemctl disable --now "$u" >/dev/null 2>&1 || true
+done
+
+exit 0

@@ -1,0 +1,11 @@
+[Unit]
+Description=BookOS battery runtime model — weekly retrain
+ConditionPathExists=/var/log/bookos/battery.csv
+
+[Service]
+Type=oneshot
+Nice=15
+IOSchedulingClass=idle
+ExecStart=/opt/bookos-ai/venv/bin/python /opt/bookos-ai/train.py
+StandardOutput=journal
+StandardError=journal

@@ -137,7 +137,11 @@ const it=(page,icon,key)=>`<div class="item" data-page="${page}" tabindex="0">${
 export function renderHome(u){
     const name=u?.display_name||'Usuario';
     const ini=name.charAt(0).toUpperCase();
-    const av=u?.has_avatar?`<img src="file://${u.avatar_path}" class="profile-avatar">`:`<div class="profile-avatar-placeholder">${ini}</div>`;
+    // Backend inlines the avatar as a data URL — no protocol headaches.
+    const avSrc=u?.avatar_data||(u?.has_avatar?`asset://localhost${u.avatar_path}`:'');
+    const av=avSrc
+        ?`<img src="${avSrc}" class="profile-avatar" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'profile-avatar-placeholder',textContent:'${ini}'}))">`
+        :`<div class="profile-avatar-placeholder">${ini}</div>`;
     return `
 <div class="card card-profile"><div class="item" data-page="cuentas" tabindex="0">
     <div class="profile-left"><span class="title">${name}</span><span class="subtitle">${t('bookos_account')}</span></div>${av}

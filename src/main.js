@@ -99,10 +99,17 @@ document.addEventListener('DOMContentLoaded',async()=>{
     // Navigate to --page startup arg if provided (e.g. launched from battery applet)
     try{const sp=await tauriInvoke('get_startup_page');if(sp&&pages[sp])openPage(sp);}catch(e){}
 
-    // Single-instance: poll for navigation requests from other instances (every 1s)
-    setInterval(async()=>{
-        try{const p=await tauriInvoke('check_navigation_request');if(p&&pages[p])openPage(p);}catch(e){}
-    },1000);
+    // Single-instance: poll for navigation requests from other instances.
+    // Every 2s while focused, 5s when minimized/blurred (saves CPU when idle).
+    {
+        let nextDelay=2000;
+        const tick=async()=>{
+            try{const p=await tauriInvoke('check_navigation_request');if(p&&pages[p])openPage(p);}catch(e){}
+            nextDelay=document.hidden?5000:2000;
+            setTimeout(tick,nextDelay);
+        };
+        setTimeout(tick,nextDelay);
+    }
 
     sb?.addEventListener('click',e=>{
         const item=e.target.closest('[data-page]');
@@ -155,6 +162,24 @@ document.addEventListener('DOMContentLoaded',async()=>{
             subCard.style.display='none';subCard.innerHTML='';
         }
         noR.style.display=any?'none':'block';
+    }
+
+    // ── Sidebar collapse toggle ──
+    {
+        const stored=localStorage.getItem('bookos_sidebar_collapsed')==='1';
+        if(stored)mc?.classList.add('sidebar-collapsed');
+        document.getElementById('sidebar-toggle')?.addEventListener('click',()=>{
+            const collapsed=mc?.classList.toggle('sidebar-collapsed');
+            localStorage.setItem('bookos_sidebar_collapsed',collapsed?'1':'0');
+        });
+        // Keyboard shortcut: Ctrl+B
+        document.addEventListener('keydown',e=>{
+            if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='b'&&!e.target?.matches?.('input,textarea')){
+                e.preventDefault();
+                const collapsed=mc?.classList.toggle('sidebar-collapsed');
+                localStorage.setItem('bookos_sidebar_collapsed',collapsed?'1':'0');
+            }
+        });
     }
 
     // ── Window controls ──

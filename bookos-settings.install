@@ -1,0 +1,56 @@
+# Pacman hooks for bookos-settings.
+# pacman runs these as root.
+
+post_install() {
+    echo ":: Setting up BookOS AI venv (xgboost, scikit-learn, ...)"
+    /opt/bookos-ai/setup.sh || echo "WARN: AI venv setup failed — battery prediction disabled"
+
+    echo ":: Reloading systemd"
+    systemctl daemon-reload
+
+    cat <<EOF
+
+BookOS Settings installed.
+
+Enable optional services if you want them running:
+    sudo systemctl enable --now bookos-battery-adaptive.timer
+    sudo systemctl enable --now bookos-battery-logger.timer
+    sudo systemctl enable --now bookos-battery-train.timer
+    sudo systemctl enable --now bookos-hw-perms.service
+
+Or, as a regular user, the per-user services:
+    systemctl --user enable --now bookos-search-watcher.service
+
+EOF
+}
+
+post_upgrade() {
+    post_install
+}
+
+pre_remove() {
+    echo ":: Stopping BookOS services"
+    for u in bookos-battery-adaptive.timer bookos-battery-logger.timer \
+             bookos-battery-train.timer bookos-hw-perms.service \
+             bookos-thermal-logger.service; do
+        systemctl disable --now "$u" 2>/dev/null || true
+    done
+}
+
+post_remove() {
+    # Reload after services are gone
+    systemctl daemon-reload || true
+
+    # `pacman -Rns` sets PURGE; otherwise keep user data.
+    if [ "${PACMAN_PURGE:-0}" = "1" ] || [ -e "/etc/bookos/.purge_on_remove" ]; then
+        echo ":: Purging BookOS data (logs, ML model, snapshots)"
+        rm -rf /var/log/bookos /var/lib/bookos-ai /var/lib/bookos /etc/bookos /opt/bookos-ai
+    else
+        cat <<EOF
+
+User data was kept (logs, battery model). To remove everything later:
+    sudo rm -rf /var/log/bookos /var/lib/bookos-ai /var/lib/bookos /etc/bookos /opt/bookos-ai
+
+EOF
+    fi
+}

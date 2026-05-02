@@ -66,10 +66,12 @@ function esc(s){
     return d.innerHTML;
 }
 
-// ── Auto-refresh helper — registers interval in _pageIntervals, cleaned up on navigation ──
+// ── Auto-refresh helper — registers interval in _pageIntervals, cleaned up on navigation.
+// Skips firing while the document is hidden (window minimized / sidebar collapsed away),
+// which keeps CPU near 0 when the user isn't watching.
 function addInterval(fn, ms){
     if(!window._pageIntervals)window._pageIntervals=[];
-    const id=setInterval(fn,ms);
+    const id=setInterval(()=>{ if(!document.hidden) fn(); },ms);
     window._pageIntervals.push(id);
     return id;
 }
@@ -89,7 +91,12 @@ function toast(msg, icon='✓'){
     setTimeout(()=>t.remove(),3000);
 }
 // Expose globally so other modules / event listeners can show toasts
-if(typeof window!=='undefined')window.toast=toast;
+if(typeof window!=='undefined'){
+    window.toast=toast;
+    // Lazy export — promptAuth is defined later in this file. Use a getter
+    // so the global picks up the live binding once the module finishes loading.
+    Object.defineProperty(window,'promptAuth',{configurable:true,get(){return promptAuth;}});
+}
 
 // ── Dialog (replaces browser confirm()) ──
 function showDialog(title,msg,{confirmText='Confirmar',confirmClass='confirm',cancelText='Cancelar',onConfirm,onCancel}={}){
@@ -110,51 +117,61 @@ function showDialog(title,msg,{confirmText='Confirmar',confirmClass='confirm',ca
     ov.addEventListener('click',e=>{if(e.target===ov){close();onCancel?.();}});
 }
 
-// ── Root password prompt — returns Promise<string|null> ──
+// ── Root password prompt — thin wrapper over promptAuth() (defined later).
+// Returns Promise<string|null>. Fingerprint matches resolve with empty string
+// (callers that need the literal password should switch to promptAuth directly).
 function showRootAuth(title,desc=''){
-    return new Promise(resolve=>{
-        const ov=document.createElement('div');
-        ov.className='sudo-modal-overlay';
-        ov.innerHTML=`<div class="sudo-modal">
-            <div class="sudo-icon">🔐</div>
-            <div class="sudo-title">${title}</div>
-            ${desc?`<div class="sudo-desc">${desc}</div>`:''}
-            <div class="sudo-pw-wrap">
-                <input type="password" class="sudo-input" id="sudo-pw" placeholder="Contraseña de administrador" autocomplete="current-password">
-                <button class="sudo-eye" id="sudo-eye" tabindex="-1">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                </button>
-            </div>
-            <div class="sudo-btns">
-                <button class="bk-dbtn cancel" id="sudo-cancel">Cancelar</button>
-                <button class="bk-dbtn confirm" id="sudo-ok">Autorizar</button>
-            </div>
-        </div>`;
-        document.body.appendChild(ov);
-        const pw=ov.querySelector('#sudo-pw');
-        const close=val=>{ov.remove();resolve(val);};
-        requestAnimationFrame(()=>pw.focus());
-        ov.querySelector('#sudo-cancel').onclick=()=>close(null);
-        ov.querySelector('#sudo-ok').onclick=()=>close(pw.value||null);
-        const eye=ov.querySelector('#sudo-eye');
-        eye.addEventListener('mousedown',e=>{e.preventDefault();pw.type='text';});
-        eye.addEventListener('mouseup',()=>pw.type='password');
-        eye.addEventListener('mouseleave',()=>pw.type='password');
-        pw.addEventListener('keydown',e=>{
-            if(e.key==='Enter')close(pw.value||null);
-            if(e.key==='Escape')close(null);
-        });
+    return promptAuth({
+        title,
+        description:desc,
+        confirmLabel:'Autorizar',
+        verifyPassword:false,
+        allowFingerprint:true,
+    }).then(r=>{
+        if(!r)return null;
+        if(r.method==='fingerprint')return '';   // signal: use cached sudo / skip pw arg
+        return r.password||null;
     });
 }
 
 // ── Generic Sudo action: shows prompt, runs command ──
 async function promptSudo(actionName, cmd, args) {
     const pwd=await showRootAuth('Permisos requeridos',`Para ${actionName}, introduce la contraseña del equipo.`);
-    if(!pwd)return false;
+    if(pwd===null)return false;
     const res=JSON.parse(await tauriInvoke('run_sudo_command',{cmd,args,password:pwd}));
     if(res.ok)return true;
     toast('Contraseña incorrecta o error','❌');
     return false;
+}
+
+/**
+ * Invoke a backend command that may return `{ok:false, needs_auth:true}`.
+ * If so, opens promptAuth() and re-invokes with the password injected as `password`.
+ *
+ * @param {string} cmd        Tauri command name
+ * @param {object} args       Args dict
+ * @param {object} authOpts   Forwarded to promptAuth
+ * @returns parsed JSON response or null if user cancelled
+ */
+async function invokeWithAuth(cmd, args={}, authOpts={}){
+    let r=JSON.parse(await tauriInvoke(cmd, args));
+    if(r.ok)return r;
+    if(!r.needs_auth)return r;
+    const auth=await promptAuth({
+        title:'Se requiere autorización',
+        description:'Esta acción modifica configuración del sistema. Confirma tu identidad para continuar.',
+        ...authOpts,
+    });
+    if(!auth)return null;
+    if(auth.method==='fingerprint'){
+        // No password to forward; backend will retry. Most backends still need a real
+        // sudo token though, so fingerprint alone won't satisfy them — fall through.
+        toast('Huella verificada — pero esta acción aún requiere contraseña','ℹ');
+        return null;
+    }
+    r=JSON.parse(await tauriInvoke(cmd, {...args, password:auth.password}));
+    if(!r.ok && r.error)toast('Error: '+r.error,'❌');
+    return r;
 }
 
 // ── Skeleton Loaders ──
@@ -891,11 +908,18 @@ function _pantallaSubFluidez(c,savedRR,displays){
                 const disp=displays[0];
                 const curRes=(disp.current||'').split('@')[0].trim();
                 const targetHz=parseInt(mode);
-                const targetMode=(disp.modes||[]).find(m=>m.startsWith(curRes)&&Math.abs(parseInt(m.split('@')[1]||'0')-targetHz)<=2);
+                // Pick the highest available rate near the target — useful when
+                // the panel only exposes 119.93 / 120.00 etc.
+                const matches=(disp.modes||[]).filter(m=>m.startsWith(curRes)&&Math.abs(parseInt(m.split('@')[1]||'0')-targetHz)<=2);
+                const targetMode=matches.sort((a,b)=>parseFloat(b.split('@')[1])-parseFloat(a.split('@')[1]))[0];
                 if(targetMode)await tauriInvoke('set_resolution',{output:disp.name,resolution:targetMode});
-                await tauriInvoke('set_vrr_policy',{output:disp.name,policy:mode==='60'?'1':'2'}).catch(()=>{});
+                // VRR (Adaptive Sync): KDE 6 expects Never / Automatic / Always.
+                // 120Hz mode → Automatic (kicks in for fullscreen apps that benefit).
+                // 60Hz mode → Never (panel can't go below 60 anyway, no benefit).
+                const vrrPolicy=mode==='120'?'Automatic':'Never';
+                await tauriInvoke('set_vrr_policy',{output:disp.name,policy:vrrPolicy}).catch(()=>{});
             }
-            toast(mode==='120'?'Modo fluido activado (120 Hz)':'Modo estándar activado (60 Hz)');
+            toast(mode==='120'?'Modo fluido activado (120 Hz · VRR)':'Modo estándar activado (60 Hz)');
         }catch(e){}
         _pantallaSubFluidez(c,mode,displays);
     }));
@@ -1268,7 +1292,7 @@ async function _renderBateriaContent(c){
     let thermalData={ok:false,rows:[]};
     let chargingInfo={ok:false};
     try{
-        const [settingsBatch, batRaw, gbRaw, histRaw, appRaw, csvRaw, predsRaw, thermRaw, chgRaw] = await Promise.all([
+        const [settingsBatch, batRaw, gbRaw, histRaw, appRaw, csvRaw, predsRaw, thermRaw, chgRaw, mlPredRaw] = await Promise.all([
             tauriInvoke('get_settings_batch',{keys:['BatteryProtection','DimLowBattery','ShowBatteryPercent','PowerSaver','ChargeLimit','AdaptiveCharging']}).then(JSON.parse).catch(()=>({})),
             tauriInvoke('get_battery_status').then(JSON.parse).catch(()=>({percentage:'0',state:'unknown',time:'',energy_rate:'',energy_full:'',energy_full_design:''})),
             ci('check_hw_features').then(JSON.parse).catch(()=>({perf_supported:false,charge_limit_supported:false,performance_mode:'balanced',charge_limit:''})),
@@ -1278,8 +1302,11 @@ async function _renderBateriaContent(c){
             tauriInvoke('get_adaptive_predictions').then(JSON.parse).catch(()=>({ok:false,predictions:[]})),
             tauriInvoke('get_thermal_csv_data').then(JSON.parse).catch(()=>({ok:false,rows:[]})),
             tauriInvoke('get_charging_info').then(JSON.parse).catch(()=>({ok:false})),
+            tauriInvoke('predict_battery_runtime').then(JSON.parse).catch(()=>({ok:false})),
         ]);
         thermalData=thermRaw; chargingInfo=chgRaw;
+        // Stash ML prediction for hero/below-chart consumers
+        c.dataset.mlPred=JSON.stringify(mlPredRaw||{ok:false});
         bat=batRaw; gb=gbRaw; hist=histRaw; appUsage=appRaw; csvData=csvRaw; adaptivePreds=predsRaw;
         const s=settingsBatch;
         bprot=(s.BatteryProtection??'false')==='true';
@@ -1333,14 +1360,30 @@ async function _renderBateriaContent(c){
     h+=`</div>`;
     let erate=parseFloat((bat.energy_rate||'0').split(' ')[0].replace(',','.'))||0;
     const chargingLabel=bprot&&chargeLimit<100?`Cargando hasta el ${chargeLimit}%`:(isCharging?'Cargando':'');
-    h+=`<div class="bat-full-info" style="color:var(--tx2)">${chargingLabel?chargingLabel+' · ':''}${erate>0?`Consumo: ${erate.toFixed(1)} W`:''}</div>`;
+    // ML prediction line (when available and discharging)
+    let mlLine='';
+    try{
+        const ml=JSON.parse(c.dataset.mlPred||'{"ok":false}');
+        if(ml.ok && !isCharging && ml.minutes>0 && pct>(ml.target_level||20)){
+            const mins=Math.round(ml.minutes);
+            const mh=Math.floor(mins/60),mm=mins%60;
+            const text=mh>0?`${mh}h${mm>0?` ${mm}m`:''}`:`${mm}m`;
+            mlLine=`<span style="color:var(--blue)">IA: ${text} hasta ${ml.target_level}%</span>`;
+        }
+    }catch(e){}
+    const lineParts=[
+        chargingLabel,
+        erate>0?`Consumo: ${erate.toFixed(1)} W`:'',
+        mlLine,
+    ].filter(Boolean);
+    h+=`<div class="bat-full-info" style="color:var(--tx2)">${lineParts.join(' · ')}</div>`;
 
     // Ajustes ANTES del gráfico
     {
         const bprotLabel=bprot?(chargeLimit>=100?'Máxima':`Hasta el ${chargeLimit}%`):'';
         const bprotDisabled=adaptiveEnabled;
         h+=renderCard([
-            renderRowItem('Ahorro de energía','Limita actividad en segundo plano',renderToggle('ps',psMode==='power-saver')),
+            renderRowItem('Ahorro de energía','Limita CPU y procesos en segundo plano',renderToggle('ps',psMode==='power-saver')),
             renderRowItem('Carga adaptativa',`<span style="color:var(--${adaptiveEnabled?'blue':'tx2'})">${adaptiveEnabled?(chargeLimit<100?`Activa — límite ${chargeLimit}%`:'Activa — carga completa'):'Inactiva'}</span>`,renderToggle('adaptive-charging',adaptiveEnabled)),
             renderRowItem('Protección de la batería',bprotDisabled?`<span style="color:var(--tx2);opacity:0.45">No disponible con carga adaptativa</span>`:(bprotLabel?`<span style="color:var(--blue)">${bprotLabel}</span>`:'Limita carga para alargar vida útil'),`<span style="opacity:${bprotDisabled?0.35:1};pointer-events:${bprotDisabled?'none':'auto'}">${renderToggle('bprot',bprot&&!bprotDisabled)}</span>`),
             `<div id="bprot-limit-section"${(bprot&&!bprotDisabled)?'':' style="display:none"'} style="padding:2px 20px 12px">${renderSlider('cl',savedChargeLimit,50,100)}</div>`,
@@ -1358,10 +1401,13 @@ async function _renderBateriaContent(c){
             const levels=todayRows2.map(r=>r.level);
             const todayMin=Math.min(...levels),todayMax=Math.max(...levels);
             chips+=`<div class="bat-stat-chip"><span class="bat-stat-label">Hoy</span><span class="bat-stat-val">${todayMin}%–${todayMax}%</span></div>`;
-            const dischMin=todayRows2.filter(r=>r.state==='discharging').length*2;
+            // Time on battery: count discharge samples (case-insensitive) × 0.5 min (logger runs every 30s)
+            const dischCount=todayRows2.filter(r=>(r.state||'').toLowerCase()==='discharging').length;
+            const dischMin=Math.round(dischCount*0.5);
             if(dischMin>0){
                 const dh=Math.floor(dischMin/60),dm=dischMin%60;
-                chips+=`<div class="bat-stat-chip"><span class="bat-stat-label">En uso</span><span class="bat-stat-val">${dh>0?dh+'h ':''} ${dm>0?dm+'m':''}</span></div>`;
+                const parts=[dh>0?`${dh}h`:'',dm>0?`${dm}m`:''].filter(Boolean).join(' ')||'0m';
+                chips+=`<div class="bat-stat-chip"><span class="bat-stat-label">En uso</span><span class="bat-stat-val">${parts}</span></div>`;
             }
         }
         if(ef>0&&efd>0) chips+=`<div class="bat-stat-chip"><span class="bat-stat-label">Capacidad</span><span class="bat-stat-val">${Math.min(ef,efd).toFixed(0)} Wh</span></div>`;
@@ -1586,18 +1632,23 @@ async function _renderBateriaContent(c){
         const pW=(chargingInfo.power_uw/1e6).toFixed(1);
         const vV=(chargingInfo.voltage_uv/1e6).toFixed(1);
         const iA=(chargingInfo.current_ua/1e6).toFixed(2);
-        const adapter=chargingInfo.adapter_w>0?`${chargingInfo.adapter_w}W`:'';
-        const pd=chargingInfo.pd_rev?`USB-PD ${chargingInfo.pd_rev}`:(chargingInfo.op_mode||'');
-        const speedLabel=chargingInfo.charging?
-            `${pW} W · ${vV}V @ ${iA}A`:
-            (chargingInfo.ac_online?'Conectado':'Desconectado');
+        // Adapter rating: prefer negotiated PDO (adapter_w), else session peak rounded up to nearest 5W.
+        const peakW=(chargingInfo.peak_uw||0)/1e6;
+        const adapterW=chargingInfo.adapter_w>0
+            ? chargingInfo.adapter_w
+            : (peakW>0 ? Math.ceil(peakW/5)*5 : 0);
+        const protocol=chargingInfo.protocol||'';
+        const speedLabel=chargingInfo.charging
+            ? `${pW} W · ${vV}V @ ${iA}A`
+            : (chargingInfo.ac_online ? 'Conectado · sin carga' : 'Desconectado');
         const speedColor=chargingInfo.power_uw>30e6?'var(--green)':
                          chargingInfo.power_uw>15e6?'var(--blue)':
                          chargingInfo.power_uw>0?'var(--orange)':'var(--tx2)';
         h+=renderSection(t('sec_usbc'));
+        const protoLine=[protocol,adapterW>0?`Cargador ${adapterW} W`:''].filter(Boolean).join(' · ');
         h+=renderCard([
             `<div class="detail-item"><div class="detail-texts"><span class="dt">Potencia actual</span><span class="ds" style="color:${speedColor};font-weight:600">${speedLabel}</span></div></div>`,
-            pd?`<div class="detail-item"><span class="dt">Protocolo</span><span class="ds">${esc(pd)}${adapter?' · '+adapter:''}</span></div>`:'',
+            protoLine?`<div class="detail-item"><div class="detail-texts"><span class="dt">Protocolo</span><span class="ds">${esc(protoLine)}</span></div></div>`:'',
         ].filter(Boolean));
     }
 
@@ -1681,7 +1732,9 @@ async function _renderBateriaContent(c){
         let ok=false;
         try{await tauriInvoke('set_performance_mode',{mode:m});_icInvalidate('check_hw_features');ok=true;}catch(e){}
         try{await tauriInvoke('aplicar_perfil_termico',{modo:modoTermico});}catch(e){}
-        toast(a?'Ahorro de energía activado':'Rendimiento normal', ok?'✓':'⚠');
+        // Real background throttling: powersave governor + renice + ionice idle on bg tasks
+        try{await tauriInvoke('set_background_throttle',{enable:a});}catch(e){}
+        toast(a?'Ahorro activado · procesos en segundo plano limitados':'Rendimiento normal', ok?'✓':'⚠');
     });
     setupToggle('bprot',async a=>{
         if(a){
@@ -1691,7 +1744,7 @@ async function _renderBateriaContent(c){
                 adaptiveToggle.classList.remove('on');
                 adaptiveToggle.setAttribute('aria-checked','false');
                 setSetting('AdaptiveCharging','false');
-                try{await tauriInvoke('set_adaptive_charging',{enabled:false});}catch(e){}
+                await invokeWithAuth('set_adaptive_charging',{enabled:false});
             }
         }
         const section=document.getElementById('bprot-limit-section');
@@ -1759,39 +1812,52 @@ async function _renderBateriaContent(c){
     }
 
     setupToggle('adaptive-charging',async a=>{
+        const toggle=document.querySelector('[data-toggle="adaptive-charging"]');
+        const restoreOff=()=>{
+            toggle?.classList.remove('active');
+            toggle?.setAttribute('aria-checked','false');
+            setSetting('AdaptiveCharging','false');
+        };
         if(a){
             // Disable battery protection if active (mutually exclusive)
             const bprotToggle=document.querySelector('[data-toggle="bprot"]');
-            if(bprotToggle?.classList.contains('on')){
-                bprotToggle.classList.remove('on');
+            if(bprotToggle?.classList.contains('active')){
+                bprotToggle.classList.remove('active');
                 bprotToggle.setAttribute('aria-checked','false');
                 const section=document.getElementById('bprot-limit-section');
                 if(section)section.style.display='none';
                 setSetting('BatteryProtection','false');
                 try{await tauriInvoke('set_charge_limit',{limit:100});}catch(e){}
             }
-            // Show info popup before enabling
-            const toggle=document.querySelector('[data-toggle="adaptive-charging"]');
-            toggle?.classList.remove('on');
+            // Pre-emptively turn off until user confirms — setupToggle already
+            // flipped it on optimistically.
+            toggle?.classList.remove('active');
             showDialog(
                 'Activar carga adaptativa',
                 `<p style="margin:0 0 10px">La carga adaptativa aprende cuándo usas el equipo y detiene la carga antes de que llegue al 100%, completándola justo a tiempo.</p><p style="margin:0;font-size:12px;opacity:0.6">Para obtener mejores predicciones, deja el equipo enchufado durante la noche.</p>`,
                 {
                     confirmText:t('activate'),
                     onConfirm:async()=>{
-                        toggle?.classList.add('on');
+                        toggle?.classList.add('active');
                         toggle?.setAttribute('aria-checked','true');
                         setSetting('AdaptiveCharging','true');
-                        try{await tauriInvoke('set_adaptive_charging',{enabled:true});}catch(e){}
+                        const r=await invokeWithAuth('set_adaptive_charging',{enabled:true});
+                        if(!r||!r.ok){restoreOff();return;}
                         toast('Carga adaptativa activada','🔋');
                     },
-                    onCancel:()=>{}
+                    onCancel:()=>{restoreOff();}
                 }
             );
         } else {
             setSetting('AdaptiveCharging','false');
-            try{await tauriInvoke('set_adaptive_charging',{enabled:false});}catch(e){}
-            toast('Carga adaptativa desactivada');
+            const r=await invokeWithAuth('set_adaptive_charging',{enabled:false});
+            if(r&&r.ok)toast('Carga adaptativa desactivada');
+            else if(r===null){
+                // user cancelled auth — restore on
+                toggle?.classList.add('active');
+                toggle?.setAttribute('aria-checked','true');
+                setSetting('AdaptiveCharging','true');
+            }
         }
     });
     // ── Chart bar tooltip ────────────────────────────────────────────────
@@ -2345,8 +2411,10 @@ export async function renderBloqueo(c){
         showBattery:sddmCfg.showBattery,
         showBookBar:sddmCfg.showBookBar
     };
-    const _avatarUrl=userInfo.has_avatar&&userInfo.avatar_path
-        ?(window.__TAURI__?.core?.convertFileSrc?window.__TAURI__.core.convertFileSrc(userInfo.avatar_path):`file://${userInfo.avatar_path}`):'';
+    const _avatarUrl=userInfo.avatar_data
+        ||(userInfo.has_avatar&&userInfo.avatar_path
+            ?(window.__TAURI__?.core?.convertFileSrc?window.__TAURI__.core.convertFileSrc(userInfo.avatar_path):'')
+            :'');
     const _displayName=userInfo.display_name||'Usuario';
 
     function _renderSddmPreview(){
@@ -2698,11 +2766,58 @@ async function renderUpdateDetail(c, pkg, src, sysInfo, onBack){
 }
 
 // macOS-style password prompt for updates
-async function promptUpdatePassword(distro){
+/**
+ * Generalized authentication prompt.
+ *
+ * Resolves with:
+ *   - {ok:true, method:'password', password:'...'}   — user entered their password
+ *   - {ok:true, method:'fingerprint'}                  — fprintd matched a finger
+ *   - null                                             — user cancelled
+ *
+ * @param {Object} opts
+ * @param {string} opts.title          Big heading. Defaults to "Se requiere autenticación"
+ * @param {string} opts.description    Body text shown above the field
+ * @param {string} [opts.confirmLabel] Defaults to "OK"
+ * @param {boolean} [opts.allowFingerprint=true]  If false, hides the fingerprint hint
+ * @param {boolean} [opts.verifyPassword=true]    Pre-validates the password via verify_password
+ *                                                  and re-prompts on failure inside the dialog
+ */
+async function promptAuth(opts={}){
+    const {
+        title='Se requiere autenticación',
+        description='Confirma tu identidad para autorizar esta acción.',
+        confirmLabel='OK',
+        allowFingerprint=true,
+        verifyPassword=true,
+    }=opts;
+
+    // Probe fingerprint availability once
+    let fpAvail=false;
+    if(allowFingerprint){
+        try{
+            const fp=JSON.parse(await tauriInvoke('check_fingerprint'));
+            fpAvail=fp.available&&fp.enrolled;
+        }catch(e){}
+    }
+
     return new Promise(resolve=>{
         if(window._sudoModal)window._sudoModal.remove();
         const d=document.createElement('div');
         d.className='sudo-modal-overlay';
+        const fpHint=fpAvail
+            ? `<div class="upd-auth-fp" id="upd-auth-fp">
+                <div class="upd-auth-fp-icon" id="upd-auth-fp-icon">
+                    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M2 12C2 6.5 6.5 2 12 2s10 4.5 10 10"/>
+                        <path d="M5 19.5C3.7 17.7 3 15.4 3 13"/>
+                        <path d="M21 13c0 4-1 6-2 8"/>
+                        <path d="M8 19c-1-1-2-3-2-6 0-3.3 2.7-6 6-6s6 2.7 6 6c0 4-1 6-2 8"/>
+                        <path d="M11 21c-1-2-1-4-1-7 0-1.1.9-2 2-2s2 .9 2 2c0 3 0 5-1 7"/>
+                    </svg>
+                </div>
+                <span class="upd-auth-fp-text" id="upd-auth-fp-text">O toca el sensor de huella</span>
+              </div>`
+            : '';
         d.innerHTML=`
         <div class="upd-auth-modal">
             <div class="upd-auth-lock">
@@ -2715,28 +2830,98 @@ async function promptUpdatePassword(distro){
                 </svg>
             </div>
             <div class="upd-auth-content">
-                <h3 class="upd-auth-title">Se requiere contraseña</h3>
-                <p class="upd-auth-desc"><strong>${esc(distro||'BookOS')}</strong> quiere realizar cambios en el sistema. Introduce tu contraseña para autorizar la acción.</p>
+                <h3 class="upd-auth-title">${esc(title)}</h3>
+                <p class="upd-auth-desc">${description}</p>
                 <div class="upd-auth-field">
                     <label class="upd-auth-label">Contraseña</label>
                     <input type="password" class="upd-auth-input" id="upd-pwd" autocomplete="current-password" placeholder="••••••••">
                 </div>
+                ${fpHint}
                 <p class="upd-auth-error" id="upd-auth-err" style="display:none">Contraseña incorrecta. Inténtalo de nuevo.</p>
             </div>
             <div class="upd-auth-btns">
                 <button class="upd-auth-btn cancel" id="upd-cancel">Cancelar</button>
-                <button class="upd-auth-btn ok" id="upd-ok">OK</button>
+                <button class="upd-auth-btn ok" id="upd-ok">${esc(confirmLabel)}</button>
             </div>
         </div>`;
         document.body.appendChild(d);
         window._sudoModal=d;
-        const cleanup=()=>{d.remove();window._sudoModal=null;};
-        document.getElementById('upd-cancel').onclick=()=>{cleanup();resolve(null);};
-        const submit=()=>{const v=document.getElementById('upd-pwd').value;cleanup();resolve(v||null);};
-        document.getElementById('upd-ok').onclick=submit;
+
+        let fpAbort=null;        // controller for in-flight verify_fingerprint
+        let resolved=false;
+        const errBox=()=>document.getElementById('upd-auth-err');
+        const finish=(v)=>{
+            if(resolved)return;
+            resolved=true;
+            if(fpAbort)fpAbort.abort();
+            d.remove();window._sudoModal=null;
+            resolve(v);
+        };
+        const showErr=(msg)=>{
+            const e=errBox();if(!e)return;
+            e.textContent=msg;e.style.display='';
+            const inp=document.getElementById('upd-pwd');
+            if(inp){inp.value='';inp.focus();}
+        };
+
+        document.getElementById('upd-cancel').onclick=()=>finish(null);
+        const okBtn=document.getElementById('upd-ok');
+        const submit=async()=>{
+            const v=document.getElementById('upd-pwd').value;
+            if(!v)return;
+            if(!verifyPassword){finish({ok:true,method:'password',password:v});return;}
+            okBtn.disabled=true;okBtn.textContent='Verificando…';
+            try{
+                const r=JSON.parse(await tauriInvoke('verify_password',{password:v}));
+                if(r.ok){finish({ok:true,method:'password',password:v});}
+                else{showErr('Contraseña incorrecta. Inténtalo de nuevo.');okBtn.disabled=false;okBtn.textContent=confirmLabel;}
+            }catch(e){showErr('Error al verificar.');okBtn.disabled=false;okBtn.textContent=confirmLabel;}
+        };
+        okBtn.onclick=submit;
         document.getElementById('upd-pwd').addEventListener('keydown',e=>{if(e.key==='Enter')submit();});
         requestAnimationFrame(()=>document.getElementById('upd-pwd')?.focus());
+
+        // Listen for fingerprint in parallel
+        if(fpAvail){
+            const fpIcon=document.getElementById('upd-auth-fp-icon');
+            const fpText=document.getElementById('upd-auth-fp-text');
+            const setFpState=(state,msg)=>{
+                if(!fpIcon)return;
+                fpIcon.classList.remove('scanning','success','error');
+                if(state)fpIcon.classList.add(state);
+                if(fpText&&msg)fpText.textContent=msg;
+            };
+            const startListen=async()=>{
+                if(resolved)return;
+                setFpState('scanning','Toca el sensor…');
+                try{
+                    const r=JSON.parse(await tauriInvoke('verify_fingerprint'));
+                    if(resolved)return;
+                    if(r.ok){
+                        setFpState('success','Huella reconocida');
+                        setTimeout(()=>finish({ok:true,method:'fingerprint'}),400);
+                    } else {
+                        setFpState('error','Huella no reconocida — reintentando');
+                        setTimeout(startListen,1200);
+                    }
+                }catch(e){
+                    if(resolved)return;
+                    setFpState('error','Sensor no disponible');
+                }
+            };
+            startListen();
+        }
     });
+}
+
+// Backwards-compat shim: existing call-sites that just want a password string.
+async function promptUpdatePassword(distro){
+    const r=await promptAuth({
+        title:'Se requiere contraseña',
+        description:`<strong>${esc(distro||'BookOS')}</strong> quiere realizar cambios en el sistema. Introduce tu contraseña para autorizar la acción.`,
+        verifyPassword:false,  // legacy callers verify themselves via sudo -S
+    });
+    return r&&r.method==='password'?r.password:null;
 }
 
 async function _doCheckUpdates(c){
@@ -3075,21 +3260,35 @@ export async function renderGeneral(c){
 // ════════════════════════════════════════════════════════════════════════
 export async function renderCuentas(c){
     c.innerHTML=renderHeader(t('hdr_accounts'))+renderSkeleton(3);
-    let u={username:'',display_name:'',hostname:''}, users=[];
-    try{[u, users]=await Promise.all([
+    let u={username:'',display_name:'',hostname:''}, users=[], autoLogin={enabled:false,user:''};
+    try{[u, users, autoLogin]=await Promise.all([
         tauriInvoke('get_user_info').then(JSON.parse).catch(()=>({username:'',display_name:'',hostname:''})),
-        tauriInvoke('get_system_users').then(JSON.parse).catch(()=>[])
+        tauriInvoke('get_system_users').then(JSON.parse).catch(()=>[]),
+        tauriInvoke('get_autologin_status').then(JSON.parse).catch(()=>({enabled:false,user:''}))
     ]);}catch(e){}
 
-    const currentUser = users.find(x => x.username === u.username) || {display_name: u.display_name, has_avatar: false};
+    const currentUser = users.find(x => x.username === u.username) || {display_name: u.display_name, has_avatar: false, avatar_data: u.avatar_data};
     const ini = (currentUser.display_name || u.username || 'U').charAt(0).toUpperCase();
-    const av = currentUser.has_avatar ? `<img src="${getAssetUrl(currentUser.avatar_path)}" class="acc-avatar-big">` : `<div class="acc-avatar-big-ph">${ini}</div>`;
+    const avSrc = currentUser.avatar_data || (currentUser.has_avatar ? getAssetUrl(currentUser.avatar_path) : '');
+    const av = avSrc ? `<img src="${avSrc}" class="acc-avatar-big">` : `<div class="acc-avatar-big-ph">${ini}</div>`;
 
-    let userListHtml = users.map(us => {
+    const otherUsers = users.filter(us => us.username !== u.username);
+    let userListHtml = otherUsers.map(us => {
         const sIni = (us.display_name || us.username).charAt(0).toUpperCase();
-        const sAv = us.has_avatar ? `<img src="${getAssetUrl(us.avatar_path)}" class="sys-user-av">` : `<div class="sys-user-av-ph">${sIni}</div>`;
-        return `<div class="sys-user-item">${sAv}<div class="sys-user-info"><span class="sys-user-name">${esc(us.display_name||us.username)}</span><span class="sys-user-id">@${esc(us.username)}</span></div></div>`;
+        const sSrc = us.avatar_data || (us.has_avatar ? getAssetUrl(us.avatar_path) : '');
+        const sAv = sSrc ? `<img src="${sSrc}" class="sys-user-av">` : `<div class="sys-user-av-ph">${sIni}</div>`;
+        return `<div class="sys-user-item" data-username="${esc(us.username)}">
+            ${sAv}
+            <div class="sys-user-info">
+                <span class="sys-user-name">${esc(us.display_name||us.username)}</span>
+                <span class="sys-user-id">@${esc(us.username)}</span>
+            </div>
+            <button class="btn btn-danger btn-sm sys-user-del" data-del="${esc(us.username)}" title="Eliminar cuenta">Eliminar</button>
+        </div>`;
     }).join('');
+    if(otherUsers.length===0){
+        userListHtml=`<div class="detail-item"><span class="ds" style="color:var(--tx2)">No hay otros usuarios en este equipo.</span></div>`;
+    }
 
     c.innerHTML=renderHeader(t('hdr_accounts')) + `
         <div class="acc-hero">
@@ -3104,7 +3303,17 @@ export async function renderCuentas(c){
         `<div class="detail-item"><span class="dt">Nombre del equipo</span><div style="display:flex;gap:8px;margin-top:8px"><input type="text" id="hn" value="${esc(u.hostname)}" class="sel" style="flex:1"><button class="btn btn-primary btn-sm" id="sh">Guardar</button></div></div>`
     ]) + renderSection(t('sec_security')) + renderCard([
         renderRowItem('Contraseña','Cambia la contraseña de tu cuenta',`<button class="btn btn-secondary btn-sm" id="acc-change-pw">Cambiar</button>`),
-    ]) + renderSection(t('sec_other_users')) + `<div class="detail-card"><div class="sys-users-list">${userListHtml}</div></div>`;
+        renderRowItem(
+            'Inicio de sesión automático',
+            autoLogin.enabled
+                ? `<span style="color:var(--blue)">Activo para <strong>${esc(autoLogin.user)}</strong></span>`
+                : 'Omite la pantalla de inicio de sesión al encender',
+            renderToggle('autologin', autoLogin.enabled)
+        ),
+    ]) + renderSection(t('sec_other_users')) + `<div class="detail-card"><div class="sys-users-list">${userListHtml}</div></div>`
+      + `<div style="display:flex;justify-content:flex-end;margin:12px 4px 0">
+            <button class="btn btn-primary btn-sm" id="acc-create-user">+ Crear cuenta nueva</button>
+         </div>`;
 
     document.getElementById('sn')?.addEventListener('click',async()=>{try{
         const ok = await promptSudo('cambiar el nombre visible', 'chfn', ['-f', document.getElementById('dn').value, u.username]);
@@ -3115,6 +3324,147 @@ export async function renderCuentas(c){
         const ok = await promptSudo('cambiar el nombre del equipo', 'hostnamectl', ['set-hostname', document.getElementById('hn').value]);
         if(ok){ tauriInvoke('set_hostname',{name:document.getElementById('hn').value}).catch(()=>{}); toast('Hostname guardado'); }
     }catch(e){}});
+
+    // ── Autologin toggle ──
+    setupToggle('autologin', async enable=>{
+        const auth=await promptAuth({
+            title: enable?'Activar inicio automático':'Desactivar inicio automático',
+            description: enable
+                ? `Cualquier persona con acceso al equipo iniciará sesión como <strong>${esc(u.username)}</strong> sin contraseña. Confirma para continuar.`
+                : 'Volverás a necesitar contraseña al encender el equipo.',
+            confirmLabel: enable?'Activar':'Desactivar',
+            allowFingerprint: true,
+        });
+        if(!auth || auth.method==='fingerprint' || !auth.password){
+            // Roll back UI
+            const tg=document.querySelector('[data-toggle="autologin"]');
+            if(enable){tg?.classList.remove('active');tg?.setAttribute('aria-checked','false');}
+            else{tg?.classList.add('active');tg?.setAttribute('aria-checked','true');}
+            if(auth?.method==='fingerprint')toast('Esta acción requiere contraseña','ℹ');
+            return;
+        }
+        const r=JSON.parse(await tauriInvoke('set_autologin',{
+            enabled:enable, username:u.username, sudoPassword:auth.password
+        }));
+        if(r.ok)toast(enable?'Inicio automático activado':'Inicio automático desactivado','✓');
+        else toast('Error: '+(r.error||'no se pudo aplicar'),'❌');
+    });
+
+    // ── Delete user ──
+    document.querySelectorAll('[data-del]').forEach(btn=>btn.addEventListener('click',async()=>{
+        const target=btn.dataset.del;
+        showDialog(
+            `Eliminar cuenta "${esc(target)}"`,
+            `<p>Se borrarán los archivos personales del usuario <strong>${esc(target)}</strong> y no se podrá recuperar.</p><p style="color:var(--red);font-size:13px">Esta acción es permanente.</p>`,
+            {
+                confirmText:'Eliminar', confirmClass:'danger',
+                onConfirm: async()=>{
+                    const auth=await promptAuth({
+                        title:'Confirmar eliminación',
+                        description:`Introduce tu contraseña para borrar la cuenta <strong>${esc(target)}</strong>.`,
+                        confirmLabel:'Eliminar',
+                    });
+                    if(!auth || !auth.password){
+                        if(auth?.method==='fingerprint')toast('Esta acción requiere contraseña','ℹ');
+                        return;
+                    }
+                    const r=JSON.parse(await tauriInvoke('delete_user',{
+                        username:target, sudoPassword:auth.password, removeHome:true
+                    }));
+                    if(r.ok){toast('Cuenta eliminada','🗑');renderCuentas(c);}
+                    else toast('Error: '+(r.error||'no se pudo borrar'),'❌');
+                }
+            }
+        );
+    }));
+
+    // ── Create user dialog ──
+    document.getElementById('acc-create-user')?.addEventListener('click',()=>{
+        const ov=document.createElement('div');
+        ov.className='bk-overlay';
+        ov.innerHTML=`<div class="bk-dialog" style="min-width:380px;max-width:420px">
+            <div class="bk-dialog-title">Crear cuenta nueva</div>
+            <div style="padding:0 4px 12px;display:flex;flex-direction:column;gap:12px">
+                <div style="display:flex;flex-direction:column;gap:10px;align-items:center;padding:8px 0">
+                    <div id="new-av-preview" class="acc-avatar-big-ph" style="width:72px;height:72px;font-size:28px">?</div>
+                    <button class="btn btn-secondary btn-sm" id="new-av-pick">Elegir foto</button>
+                </div>
+                <div><label class="ds" style="display:block;margin-bottom:4px">Nombre completo</label>
+                    <input type="text" id="new-fullname" class="sel" placeholder="p. ej. María García"></div>
+                <div><label class="ds" style="display:block;margin-bottom:4px">Nombre de usuario</label>
+                    <input type="text" id="new-username" class="sel" placeholder="maria" autocomplete="off" pattern="[a-z0-9_-]+"></div>
+                <div><label class="ds" style="display:block;margin-bottom:4px">Contraseña</label>
+                    <input type="password" id="new-pwd" class="sel" placeholder="Mínimo 8 caracteres" autocomplete="new-password"></div>
+                <div><label class="ds" style="display:block;margin-bottom:4px">Confirmar contraseña</label>
+                    <input type="password" id="new-pwd2" class="sel" placeholder="Repite la contraseña" autocomplete="new-password"></div>
+                <label style="display:flex;align-items:center;gap:8px;font-size:14px"><input type="checkbox" id="new-admin"> Permitir privilegios de administrador (sudo)</label>
+                <div id="new-err" style="font-size:12px;color:var(--red,#e53935);display:none"></div>
+            </div>
+            <div class="bk-dialog-btns">
+                <button class="bk-dbtn cancel" id="new-cancel">Cancelar</button>
+                <button class="bk-dbtn confirm" id="new-ok">Crear</button>
+            </div>
+        </div>`;
+        document.body.appendChild(ov);
+        const close=()=>ov.remove();
+        let avatarPath='';
+        ov.querySelector('#new-cancel').onclick=close;
+        ov.addEventListener('click',e=>{if(e.target===ov)close();});
+
+        // Auto-fill username from full name
+        ov.querySelector('#new-fullname').addEventListener('input',e=>{
+            const unEl=ov.querySelector('#new-username');
+            if(unEl.dataset.touched)return;
+            unEl.value=e.target.value.toLowerCase().normalize('NFD').replace(/[^a-z0-9]/g,'').slice(0,16);
+        });
+        ov.querySelector('#new-username').addEventListener('input',e=>{e.target.dataset.touched='1';});
+
+        ov.querySelector('#new-av-pick').onclick=async()=>{
+            try{
+                const result=await window.__TAURI__.dialog.open({
+                    multiple:false,
+                    filters:[{name:'Imágenes',extensions:['png','jpg','jpeg','webp']}]
+                });
+                if(result){
+                    avatarPath=result;
+                    const prev=ov.querySelector('#new-av-preview');
+                    prev.outerHTML=`<img id="new-av-preview" src="${getAssetUrl(result)}" style="width:72px;height:72px;border-radius:50%;object-fit:cover">`;
+                }
+            }catch(e){}
+        };
+
+        ov.querySelector('#new-ok').onclick=async()=>{
+            const fullname=ov.querySelector('#new-fullname').value.trim();
+            const username=ov.querySelector('#new-username').value.trim();
+            const pwd=ov.querySelector('#new-pwd').value;
+            const pwd2=ov.querySelector('#new-pwd2').value;
+            const admin=ov.querySelector('#new-admin').checked;
+            const err=ov.querySelector('#new-err');
+            const showErr=(m)=>{err.textContent=m;err.style.display='block';};
+            if(!username)return showErr('El nombre de usuario es obligatorio');
+            if(!/^[a-z][a-z0-9_-]{0,31}$/.test(username))return showErr('Usuario inválido (solo minúsculas, números, _ y -, debe empezar por letra)');
+            if(pwd.length<8)return showErr('La contraseña debe tener al menos 8 caracteres');
+            if(pwd!==pwd2)return showErr('Las contraseñas no coinciden');
+            // Need sudo password
+            close();
+            const auth=await promptAuth({
+                title:'Confirmar creación de cuenta',
+                description:`Introduce tu contraseña de administrador para crear la cuenta <strong>${esc(username)}</strong>.`,
+                confirmLabel:'Crear',
+            });
+            if(!auth || !auth.password){
+                if(auth?.method==='fingerprint')toast('Esta acción requiere contraseña','ℹ');
+                return;
+            }
+            const r=JSON.parse(await tauriInvoke('create_user',{
+                username, fullName:fullname, password:pwd, isAdmin:admin,
+                avatarPath:avatarPath||null, sudoPassword:auth.password
+            }));
+            if(r.ok){toast(`Cuenta "${username}" creada`,'✓');renderCuentas(c);}
+            else toast('Error: '+(r.error||'no se pudo crear'),'❌');
+        };
+        ov.querySelector('#new-fullname').focus();
+    });
 
     document.getElementById('acc-change-pw')?.addEventListener('click',()=>{
         const ov=document.createElement('div');
@@ -4149,6 +4499,7 @@ export async function renderAvanzadas(c){
 
     let h=renderHeader(t('hdr_advanced'));
 
+    // ── Stable features ─────────────────────────────────────────────
     h+=renderSection(t('sec_compositor_fx'));
     h+=renderCard([
         renderRowItem('Desenfoque de fondo','Fondo desenfocado bajo ventanas translúcidas',renderToggle('fx-blur',fx.blur)),
@@ -4162,17 +4513,21 @@ export async function renderAvanzadas(c){
         renderRowItem('Reiniciar compositor','Útil si hay artefactos gráficos',`<button class="btn btn-secondary btn-sm" id="fx-restart-kwin">Reiniciar</button>`),
     ]);
 
-    h+=`<div class="labs-hero">
-        <div class="labs-hero-icon">⚗️</div>
-        <div class="labs-hero-text">
-            <span class="labs-hero-title">Laboratorio <span class="labs-badge">Beta</span></span>
-            <span class="labs-hero-sub">Funciones experimentales. Pueden cambiar o desaparecer.</span>
-        </div>
-    </div>`;
-
-    // Load lab settings from localStorage
+    // ── Laboratorio (experimental) ─────────────────────────────────
+    // Compact divider hero — sits flush with the experimental sections
+    // so the visual hierarchy reads: stable settings → divider → labs.
     const labGet=(k,def='false')=>{try{return localStorage.getItem('bookos_lab_'+k)||def;}catch{return def;}};
     const labSet=(k,v)=>{try{localStorage.setItem('bookos_lab_'+k,v);}catch{}};
+
+    h+=`<div class="labs-divider">
+        <div class="labs-divider-icon">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6v4l5 9a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4l5-9V3z"/><path d="M9 7h6"/></svg>
+        </div>
+        <div class="labs-divider-text">
+            <span class="labs-divider-title">Laboratorio <span class="labs-badge">Beta</span></span>
+            <span class="labs-divider-sub">Funciones experimentales. Pueden cambiar o desaparecer en futuras versiones.</span>
+        </div>
+    </div>`;
 
     h+=renderSection(t('sec_active'));
     h+=renderCard([
@@ -4181,48 +4536,28 @@ export async function renderAvanzadas(c){
     ]);
 
     h+=renderSection(t('sec_in_dev'));
-    h+=`<div class="labs-grid">
-        <div class="lab-card">
-            <div class="lab-card-icon" style="background:#0a84ff20;color:#0a84ff">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18M9 21V9"/></svg>
+    const upcomingItems=[
+        {color:'#0a84ff', title:'Panel de productividad', desc:'Vista rápida de tareas y notas',
+         svg:`<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18M9 21V9"/>`},
+        {color:'#ff9500', title:'Gestos avanzados', desc:'Gestos táctiles personalizados',
+         svg:`<path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>`},
+        {color:'#30d158', title:'Sync de ajustes', desc:'Copia de seguridad en la nube',
+         svg:`<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>`},
+        {color:'#af52de', title:'IA contextual', desc:'Sugerencias según tu uso',
+         svg:`<circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>`},
+    ];
+    h+=`<div class="detail-card lab-list">${upcomingItems.map(it=>`
+        <div class="lab-row">
+            <div class="lab-row-icon" style="background:${it.color}1f;color:${it.color}">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${it.svg}</svg>
             </div>
-            <div class="lab-card-info">
-                <span class="lab-card-title">Panel de productividad</span>
-                <span class="lab-card-desc">Vista rápida de tareas y notas</span>
-            </div>
-            <span class="lab-status-chip">Próximamente</span>
-        </div>
-        <div class="lab-card">
-            <div class="lab-card-icon" style="background:#ff950020;color:#ff9500">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-            </div>
-            <div class="lab-card-info">
-                <span class="lab-card-title">Gestos avanzados</span>
-                <span class="lab-card-desc">Gestos táctiles personalizados</span>
-            </div>
-            <span class="lab-status-chip">Próximamente</span>
-        </div>
-        <div class="lab-card">
-            <div class="lab-card-icon" style="background:#30d15820;color:#30d158">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            </div>
-            <div class="lab-card-info">
-                <span class="lab-card-title">Sync de ajustes</span>
-                <span class="lab-card-desc">Copia de seguridad en la nube</span>
+            <div class="lab-row-info">
+                <span class="lab-row-title">${it.title}</span>
+                <span class="lab-row-desc">${it.desc}</span>
             </div>
             <span class="lab-status-chip">Próximamente</span>
         </div>
-        <div class="lab-card">
-            <div class="lab-card-icon" style="background:#af52de20;color:#af52de">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
-            </div>
-            <div class="lab-card-info">
-                <span class="lab-card-title">IA contextual</span>
-                <span class="lab-card-desc">Sugerencias según tu uso</span>
-            </div>
-            <span class="lab-status-chip">Próximamente</span>
-        </div>
-    </div>`;
+    `).join('')}</div>`;
 
     c.innerHTML=h;
 

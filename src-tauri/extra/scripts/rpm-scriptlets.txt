@@ -1,0 +1,22 @@
+RPM scriptlets — paste into the .spec file or post-process the rpm
+with `rpmrebuild --edit-spec` if Tauri bundler doesn't support them.
+
+%post
+if [ -x /opt/bookos-ai/setup.sh ]; then
+    /opt/bookos-ai/setup.sh || true
+fi
+systemctl daemon-reload >/dev/null 2>&1 || true
+
+%preun
+if [ "$1" = 0 ]; then
+    for u in bookos-battery-adaptive.timer bookos-battery-logger.timer \
+             bookos-battery-train.timer bookos-hw-perms.service \
+             bookos-thermal-logger.service; do
+        systemctl disable --now "$u" >/dev/null 2>&1 || true
+    done
+fi
+
+%postun
+systemctl daemon-reload >/dev/null 2>&1 || true
+# RPM doesn't have purge semantics. Leave user data alone.
+# Users can run:  sudo rm -rf /var/log/bookos /var/lib/bookos-ai /var/lib/bookos /opt/bookos-ai

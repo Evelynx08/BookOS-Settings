@@ -3,7 +3,7 @@
   "identifier": "com.bookos.settings",
   "productName": "Bookos Settings",
   "mainBinaryName": "bookos-settings",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "build": {
     "beforeDevCommand": "",
     "beforeBuildCommand": "",
@@ -37,6 +37,35 @@
       "../src/assets/settings.png",
       "../src/assets/settings.svg"
     ],
-    "targets": ["deb", "rpm"]
+    "targets": ["deb", "rpm"],
+    "publisher": "BookOS",
+    "homepage": "https://github.com/Evelynx08/BookOS-Settings",
+    "category": "Utility",
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "python3", "python3-venv"],
+        "files": {
+          "/opt/bookos-ai/train.py":   "extra/ai/train.py",
+          "/opt/bookos-ai/predict.py": "extra/ai/predict.py",
+          "/opt/bookos-ai/setup.sh":   "extra/ai/setup.sh",
+          "/usr/lib/systemd/system/bookos-battery-train.service": "extra/ai/bookos-battery-train.service",
+          "/usr/lib/systemd/system/bookos-battery-train.timer":   "extra/ai/bookos-battery-train.timer"
+        },
+        "preInstallScript":  "extra/scripts/deb-postinst",
+        "postInstallScript": "extra/scripts/deb-postinst",
+        "preRemoveScript":   "extra/scripts/deb-prerm",
+        "postRemoveScript":  "extra/scripts/deb-postrm"
+      },
+      "rpm": {
+        "depends": ["webkit2gtk4.1", "gtk3", "python3"],
+        "files": {
+          "/opt/bookos-ai/train.py":   "extra/ai/train.py",
+          "/opt/bookos-ai/predict.py": "extra/ai/predict.py",
+          "/opt/bookos-ai/setup.sh":   "extra/ai/setup.sh",
+          "/usr/lib/systemd/system/bookos-battery-train.service": "extra/ai/bookos-battery-train.service",
+          "/usr/lib/systemd/system/bookos-battery-train.timer":   "extra/ai/bookos-battery-train.timer"
+        }
+      }
+    }
   }
 }

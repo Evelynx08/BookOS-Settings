@@ -1,0 +1,21 @@
+#!/bin/sh
+# Debian/Ubuntu postinst — runs after dpkg installs files.
+set -e
+
+if [ -x /opt/bookos-ai/setup.sh ]; then
+    echo "Setting up BookOS AI venv..."
+    /opt/bookos-ai/setup.sh || echo "WARN: AI venv setup failed"
+fi
+
+systemctl daemon-reload >/dev/null 2>&1 || true
+
+cat <<EOF
+BookOS Settings installed.
+Enable optional services if you want them running:
+    sudo systemctl enable --now bookos-battery-adaptive.timer
+    sudo systemctl enable --now bookos-battery-logger.timer
+    sudo systemctl enable --now bookos-battery-train.timer
+    sudo systemctl enable --now bookos-hw-perms.service
+EOF
+
+exit 0

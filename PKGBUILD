@@ -1,22 +1,21 @@
-# Maintainer: Jose <tu_email@ejemplo.com>
+# Maintainer: Jose <josrebe333@gmail.com>
 pkgname=bookos-settings
-pkgver=0.4.0
+pkgver=0.4.1
 pkgrel=1
-pkgdesc="BookOS Settings — aplicación de ajustes para KDE Plasma con BookOS (o otros sistemas)"
+pkgdesc="BookOS Settings — settings application for KDE Plasma (Samsung Galaxy Book / BookOS)"
 arch=('x86_64')
 url="https://github.com/Evelynx08/BookOS-Settings"
 license=('GPL3')
-depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3')
+install=bookos-settings.install
+depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3' 'python')
 optdepends=(
-    'colord: soporte de perfiles ICC'
-    'kscreen: control de pantalla (kscreen-doctor)'
-    'qdbus6: control de brillo vía KDE D-Bus'
-    'python: búsqueda semántica local'
-    'inotify-tools: watcher de búsqueda semántica'
-    'python-dbus: plugin KRunner búsqueda semántica'
-    'python-gobject: plugin KRunner búsqueda semántica'
+    'colord: ICC profile support'
+    'kscreen: display control via kscreen-doctor'
+    'qdbus6: brightness control via KDE D-Bus'
+    'inotify-tools: watcher for semantic search'
+    'python-dbus: KRunner semantic search plugin'
+    'python-gobject: KRunner semantic search plugin'
 )
-# Añadimos nodejs y npm porque Tauri los necesita para el frontend
 makedepends=('rust' 'cargo' 'protobuf' 'nodejs' 'npm')
 
 # Ahora el código se baja de GitHub automáticamente
@@ -102,6 +101,8 @@ EOF
         "$pkgdir/usr/lib/bookos/bookos-battery-logger.sh"
     install -Dm755 "$_extra/bookos-thermal-logger.sh" \
         "$pkgdir/usr/lib/bookos/bookos-thermal-logger.sh"
+    install -Dm755 "$_extra/bookos-register-shortcut.sh" \
+        "$pkgdir/usr/lib/bookos/bookos-register-shortcut.sh"
 
     # D-Bus service
     install -Dm644 "$_search/org.bookos.SemanticSearch.service" \
@@ -117,4 +118,18 @@ EOF
     install -Dm755 "$_search/indexador.py"        "$pkgdir/opt/bookos-search/indexador.py"
     install -Dm755 "$_search/setup.sh"            "$pkgdir/opt/bookos-search/setup.sh"
     install -Dm755 "$_search/watcher.sh"          "$pkgdir/opt/bookos-search/watcher.sh"
+
+    # AI battery prediction (Python venv installed by .install hook)
+    local _ai="${_extra}/ai"
+    install -Dm755 "$_ai/train.py"   "$pkgdir/opt/bookos-ai/train.py"
+    install -Dm755 "$_ai/predict.py" "$pkgdir/opt/bookos-ai/predict.py"
+    install -Dm755 "$_ai/setup.sh"   "$pkgdir/opt/bookos-ai/setup.sh"
+    install -Dm644 "$_ai/bookos-battery-train.service" \
+        "$pkgdir/usr/lib/systemd/system/bookos-battery-train.service"
+    install -Dm644 "$_ai/bookos-battery-train.timer" \
+        "$pkgdir/usr/lib/systemd/system/bookos-battery-train.timer"
+
+    # Pacman hooks
+    install -Dm644 "${_extra}/scripts/bookos-settings.install" \
+        "$pkgdir/.INSTALL"
 }
