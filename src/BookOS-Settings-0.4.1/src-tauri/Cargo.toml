@@ -1,0 +1,25 @@
+[package]
+name = "bookos-settings"
+version = "0.4.0"
+description = "BookOS Settings for KDE Plasma 6.6"
+authors = ["BookOS"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+futures = { version = "0.3.32", default-features = false, features = ["alloc"] }
+libc = "0.2"
+rqs_lib = { path = "rqs_lib" }
+zbus = { version = "4", default-features = false, features = ["tokio"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

@@ -1,0 +1,36 @@
+# 99-bookos-power.rules — BookOS hardware permission rules
+#
+# Instalación:
+#   sudo cp src-tauri/extra/99-bookos-power.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+#
+# Después añade tu usuario al grupo power (para RAPL/batería) y video (para brillo):
+#   sudo usermod -aG power,video $USER
+# Cierra sesión y vuelve a entrar para que los grupos surtan efecto.
+
+# Perfil de plataforma ACPI (quiet/balanced/performance)
+SUBSYSTEM=="platform", DRIVERS=="*", ACTION=="add", \
+  RUN+="/bin/sh -c '[ -f /sys/firmware/acpi/platform_profile ] && chgrp power /sys/firmware/acpi/platform_profile && chmod g+w /sys/firmware/acpi/platform_profile'"
+
+# RAPL — permite al grupo power escribir límites térmicos (PL1/PL2)
+SUBSYSTEM=="powercap", KERNEL=="intel-rapl:0", ACTION=="add", \
+  RUN+="/bin/chgrp power /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw", \
+  RUN+="/bin/chmod g+w /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw", \
+  RUN+="/bin/chgrp power /sys/class/powercap/intel-rapl:0/constraint_1_power_limit_uw", \
+  RUN+="/bin/chmod g+w /sys/class/powercap/intel-rapl:0/constraint_1_power_limit_uw"
+
+# Backlight — permite al grupo video escribir el brillo de pantalla
+SUBSYSTEM=="backlight", KERNEL=="intel_backlight", ACTION=="add", \
+  RUN+="/bin/chgrp video /sys/class/backlight/intel_backlight/brightness", \
+  RUN+="/bin/chmod g+w /sys/class/backlight/intel_backlight/brightness"
+
+# GPU Intel Arc Xe (Lunar Lake 0000:00:02.0) — runtime power management
+SUBSYSTEM=="pci", DRIVER=="xe", ACTION=="add", \
+  RUN+="/bin/sh -c 'chgrp power %S%p/power/control && chmod g+w %S%p/power/control'"
+
+# Batería — límite de carga (BAT0 y BAT1)
+SUBSYSTEM=="power_supply", KERNEL=="BAT0", ACTION=="add", \
+  RUN+="/bin/sh -c 'f=%S%p/charge_control_end_threshold; [ -f $f ] && chgrp power $f && chmod g+w $f'"
+SUBSYSTEM=="power_supply", KERNEL=="BAT1", ACTION=="add", \
+  RUN+="/bin/sh -c 'f=%S%p/charge_control_end_threshold; [ -f $f ] && chgrp power $f && chmod g+w $f'"
