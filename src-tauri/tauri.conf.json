@@ -3,7 +3,7 @@
   "identifier": "com.bookos.settings",
   "productName": "Bookos Settings",
   "mainBinaryName": "bookos-settings",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "build": {
     "beforeDevCommand": "",
     "beforeBuildCommand": "",

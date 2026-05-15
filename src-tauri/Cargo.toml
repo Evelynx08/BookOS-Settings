@@ -1,6 +1,6 @@
 [package]
 name = "bookos-settings"
-version = "0.4.1"
+version = "0.4.2"
 description = "BookOS Settings for KDE Plasma 6.6"
 authors = ["BookOS"]
 edition = "2021"
