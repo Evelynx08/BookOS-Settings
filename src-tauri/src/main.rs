@@ -1325,29 +1325,58 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
 }
 
 // ── Updates (separated: system, flatpak) ─────────────────────────────────
-#[tauri::command] async fn check_system_updates() -> Result<String, String> {
+// 5-minute in-process cache for update checks. Re-running checkupdates / paru -Qua /
+// flatpak remote-ls every page open is slow (network + DB sync). Force=true bypasses.
+use std::sync::Mutex as StdMutex;
+struct UpdCache { sys: Option<(std::time::Instant, String)>, aur: Option<(std::time::Instant, String)>, flat: Option<(std::time::Instant, String)> }
+static UPD_CACHE: StdMutex<UpdCache> = StdMutex::new(UpdCache { sys: None, aur: None, flat: None });
+const UPD_CACHE_TTL: u64 = 300; // 5 min
+
+fn cache_get(which: &str) -> Option<String> {
+    let g = UPD_CACHE.lock().ok()?;
+    let entry = match which { "sys" => &g.sys, "aur" => &g.aur, "flat" => &g.flat, _ => return None };
+    let (t, v) = entry.as_ref()?;
+    if t.elapsed().as_secs() < UPD_CACHE_TTL { Some(v.clone()) } else { None }
+}
+fn cache_set(which: &str, v: String) {
+    if let Ok(mut g) = UPD_CACHE.lock() {
+        let now = std::time::Instant::now();
+        match which { "sys" => g.sys = Some((now, v)), "aur" => g.aur = Some((now, v)), "flat" => g.flat = Some((now, v)), _ => {} }
+    }
+}
+
+#[tauri::command] async fn check_system_updates(force: Option<bool>) -> Result<String, String> {
+    if !force.unwrap_or(false) { if let Some(c) = cache_get("sys") { return Ok(c); } }
     let u = run("checkupdates",&[]).await;
     let pkgs: Vec<String> = u.lines().filter(|l| !l.is_empty()).take(100).map(|l| {
         let p: Vec<&str> = l.split_whitespace().collect();
         format!(r#"{{"name":"{}","old":"{}","new":"{}"}}"#,esc(p.first().unwrap_or(&"")),esc(p.get(1).unwrap_or(&"")),esc(p.last().unwrap_or(&"")))
     }).collect();
-    Ok(format!(r#"{{"count":{},"packages":[{}]}}"#,pkgs.len(),pkgs.join(",")))
+    let result = format!(r#"{{"count":{},"packages":[{}]}}"#,pkgs.len(),pkgs.join(","));
+    cache_set("sys", result.clone());
+    Ok(result)
 }
-#[tauri::command] async fn check_aur_updates() -> Result<String, String> {
+#[tauri::command] async fn check_aur_updates(force: Option<bool>) -> Result<String, String> {
+    if !force.unwrap_or(false) { if let Some(c) = cache_get("aur") { return Ok(c); } }
     let u = run("paru",&["-Qua"]).await;
     let pkgs: Vec<String> = u.lines().filter(|l| !l.is_empty()).take(100).map(|l| {
         let p: Vec<&str> = l.split_whitespace().collect();
         format!(r#"{{"name":"{}","old":"{}","new":"{}"}}"#,esc(p.first().unwrap_or(&"")),esc(p.get(1).unwrap_or(&"")),esc(p.last().unwrap_or(&"")))
     }).collect();
-    Ok(format!(r#"{{"count":{},"packages":[{}]}}"#,pkgs.len(),pkgs.join(",")))
+    let result = format!(r#"{{"count":{},"packages":[{}]}}"#,pkgs.len(),pkgs.join(","));
+    cache_set("aur", result.clone());
+    Ok(result)
 }
-#[tauri::command] async fn check_flatpak_updates() -> Result<String, String> {
+#[tauri::command] async fn check_flatpak_updates(force: Option<bool>) -> Result<String, String> {
+    if !force.unwrap_or(false) { if let Some(c) = cache_get("flat") { return Ok(c); } }
     let u = run("flatpak",&["remote-ls","--updates","--columns=application,version"]).await;
     let pkgs: Vec<String> = u.lines().filter(|l| !l.is_empty()).map(|l| {
         let p: Vec<&str> = l.split('\t').collect();
         format!(r#"{{"name":"{}","version":"{}"}}"#,esc(p.first().unwrap_or(&"")),esc(p.get(1).unwrap_or(&"")))
     }).collect();
-    Ok(format!(r#"{{"count":{},"packages":[{}]}}"#,pkgs.len(),pkgs.join(",")))
+    let result = format!(r#"{{"count":{},"packages":[{}]}}"#,pkgs.len(),pkgs.join(","));
+    cache_set("flat", result.clone());
+    Ok(result)
 }
 
 #[tauri::command] async fn run_system_update(packages: Vec<String>) -> Result<String, String> {
@@ -1683,6 +1712,149 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
     format!(r#"{{"ok":{}}}"#, output.status.success())
 }
 
+// ── BookOS lockscreen theme install/uninstall ───────────────────────────
+// The lockscreen QML lives in `/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/`
+// Plasma 6 doesn't honor look-and-feel for lockscreen, so we patch the shell directly.
+// Source files come from /usr/share/bookos-settings/lockscreen/ (installed by package)
+// or fall back to ~/.local/share/plasma/look-and-feel/BookOS Light/contents/lockscreen/.
+const LOCKSCREEN_FILES: &[&str] = &[
+    "MainBlock.qml",
+    "LockScreenUi.qml",
+    "BookBar.qml",
+    "MediaControls.qml",
+];
+const LOCKSCREEN_DEST: &str = "/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen";
+const LOCKSCREEN_BACKUP: &str = "/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/.backup";
+
+fn lockscreen_source() -> Option<String> {
+    let pkg = "/usr/share/bookos-settings/lockscreen";
+    if std::path::Path::new(pkg).is_dir() { return Some(pkg.into()); }
+    let home = std::env::var("HOME").ok()?;
+    let local = format!("{}/.local/share/plasma/look-and-feel/BookOS Light/contents/lockscreen", home);
+    if std::path::Path::new(&local).is_dir() { return Some(local); }
+    None
+}
+
+#[tauri::command] fn is_lockscreen_theme_installed() -> String {
+    // Marker file written when our theme is active.
+    let marker = format!("{}/.bookos-installed", LOCKSCREEN_DEST);
+    let installed = std::path::Path::new(&marker).exists();
+    format!(r#"{{"installed":{}}}"#, installed)
+}
+
+#[tauri::command] async fn install_lockscreen_theme(password: String) -> String {
+    use std::io::Write;
+    let src = match lockscreen_source() {
+        Some(s) => s,
+        None => return r#"{"ok":false,"error":"source files not found"}"#.into(),
+    };
+    let mut script = String::new();
+    script.push_str(&format!("mkdir -p \"{}\" && ", LOCKSCREEN_BACKUP));
+    for f in LOCKSCREEN_FILES {
+        // Backup original if not yet backed up
+        script.push_str(&format!(
+            "[ -f \"{dest}/{file}\" ] && [ ! -f \"{bk}/{file}\" ] && cp \"{dest}/{file}\" \"{bk}/{file}\"; ",
+            dest=LOCKSCREEN_DEST, bk=LOCKSCREEN_BACKUP, file=f
+        ));
+        // Copy ours over
+        script.push_str(&format!(
+            "[ -f \"{src}/{file}\" ] && cp \"{src}/{file}\" \"{dest}/{file}\"; ",
+            src=src, dest=LOCKSCREEN_DEST, file=f
+        ));
+    }
+    script.push_str(&format!("touch \"{}/.bookos-installed\"", LOCKSCREEN_DEST));
+
+    let mut child = match StdCommand::new("sudo")
+        .args(["-k", "-S", "--", "sh", "-c", &script])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn() { Ok(c) => c, Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())) };
+    if let Some(mut sin) = child.stdin.take() {
+        let _ = sin.write_all(format!("{}\n", password).as_bytes());
+    }
+    match child.wait_with_output() {
+        Ok(o) if o.status.success() => r#"{"ok":true}"#.into(),
+        Ok(o) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&String::from_utf8_lossy(&o.stderr))),
+        Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    }
+}
+
+#[tauri::command] async fn uninstall_lockscreen_theme(password: String) -> String {
+    use std::io::Write;
+    let mut script = String::new();
+    for f in LOCKSCREEN_FILES {
+        script.push_str(&format!(
+            "[ -f \"{bk}/{file}\" ] && cp \"{bk}/{file}\" \"{dest}/{file}\"; ",
+            bk=LOCKSCREEN_BACKUP, dest=LOCKSCREEN_DEST, file=f
+        ));
+    }
+    script.push_str(&format!("rm -f \"{}/.bookos-installed\"", LOCKSCREEN_DEST));
+
+    let mut child = match StdCommand::new("sudo")
+        .args(["-k", "-S", "--", "sh", "-c", &script])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn() { Ok(c) => c, Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())) };
+    if let Some(mut sin) = child.stdin.take() {
+        let _ = sin.write_all(format!("{}\n", password).as_bytes());
+    }
+    match child.wait_with_output() {
+        Ok(o) if o.status.success() => r#"{"ok":true}"#.into(),
+        Ok(o) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&String::from_utf8_lossy(&o.stderr))),
+        Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    }
+}
+
+// ── BookOS SDDM theme toggle ────────────────────────────────────────────
+#[tauri::command] fn is_sddm_theme_installed() -> String {
+    let conf = std::fs::read_to_string("/etc/sddm.conf.d/bookos-theme.conf").unwrap_or_default();
+    let installed = conf.contains("Current=bookos");
+    format!(r#"{{"installed":{}}}"#, installed)
+}
+
+#[tauri::command] async fn install_sddm_theme(password: String) -> String {
+    use std::io::Write;
+    if !std::path::Path::new("/usr/share/sddm/themes/bookos").is_dir() {
+        return r#"{"ok":false,"error":"theme files missing at /usr/share/sddm/themes/bookos"}"#.into();
+    }
+    let cfg = "[Theme]\nCurrent=bookos\nCursorTheme=Apple-cursors\n";
+    let mut child = match StdCommand::new("sudo")
+        .args(["-k", "-S", "--", "tee", "/etc/sddm.conf.d/bookos-theme.conf"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn() { Ok(c) => c, Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())) };
+    if let Some(mut sin) = child.stdin.take() {
+        // First feed sudo password, then content (sudo -S only consumes 1 line for pwd, rest goes to tee)
+        let _ = sin.write_all(format!("{}\n{}", password, cfg).as_bytes());
+    }
+    match child.wait_with_output() {
+        Ok(o) if o.status.success() => r#"{"ok":true}"#.into(),
+        Ok(o) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&String::from_utf8_lossy(&o.stderr))),
+        Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    }
+}
+
+#[tauri::command] async fn uninstall_sddm_theme(password: String) -> String {
+    use std::io::Write;
+    let mut child = match StdCommand::new("sudo")
+        .args(["-k", "-S", "--", "rm", "-f", "/etc/sddm.conf.d/bookos-theme.conf"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn() { Ok(c) => c, Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())) };
+    if let Some(mut sin) = child.stdin.take() {
+        let _ = sin.write_all(format!("{}\n", password).as_bytes());
+    }
+    match child.wait_with_output() {
+        Ok(o) if o.status.success() => r#"{"ok":true}"#.into(),
+        Ok(o) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&String::from_utf8_lossy(&o.stderr))),
+        Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    }
+}
+
 // Launch sddm-greeter in test mode (preview)
 #[tauri::command] fn preview_sddm() -> String {
     use std::process::Stdio;
@@ -1720,6 +1892,19 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
 
 #[tauri::command] async fn run_flatpak_update() -> Result<String, String> {
     let output = run("flatpak", &["update", "-y"]).await;
+    Ok(format!(r#"{{"ok":true,"output":"{}"}}"#, esc(&output)))
+}
+
+/// AUR update via yay or paru (whichever exists).
+#[tauri::command] async fn run_aur_update() -> Result<String, String> {
+    let helper = if Command::new("which").arg("yay").output().await.map(|o| o.status.success()).unwrap_or(false) {
+        "yay"
+    } else if Command::new("which").arg("paru").output().await.map(|o| o.status.success()).unwrap_or(false) {
+        "paru"
+    } else {
+        return Ok(r#"{"ok":false,"error":"no AUR helper (yay/paru) found"}"#.into());
+    };
+    let output = run(helper, &["-Sua", "--noconfirm"]).await;
     Ok(format!(r#"{{"ok":true,"output":"{}"}}"#, esc(&output)))
 }
 
@@ -3120,8 +3305,11 @@ fn main() {
             get_dnd_status,toggle_dnd,
             get_lock_timeout,set_lock_timeout,set_lock_grace,get_lock_grace,check_fingerprint,enroll_fingerprint,verify_password,verify_fingerprint,
             get_locale_info,get_available_locales,set_locale,get_available_keymaps,set_keymap,
-            check_system_updates,check_aur_updates,check_flatpak_updates,run_system_update,run_pacman_update_silent,get_update_progress,cancel_update,run_flatpak_update,
-            get_app_power_usage,get_sddm_themes,set_sddm_theme,get_sddm_config,set_sddm_config,preview_sddm,get_app_usage,
+            check_system_updates,check_aur_updates,check_flatpak_updates,run_system_update,run_pacman_update_silent,get_update_progress,cancel_update,run_flatpak_update,run_aur_update,
+            get_app_power_usage,get_sddm_themes,set_sddm_theme,get_sddm_config,set_sddm_config,preview_sddm,
+            is_lockscreen_theme_installed,install_lockscreen_theme,uninstall_lockscreen_theme,
+            is_sddm_theme_installed,install_sddm_theme,uninstall_sddm_theme,
+            get_app_usage,
             run_maintenance,get_kwin_effects,toggle_kwin_effect,fix_cursor_hz,get_cursor_fix_status,get_input_devices,set_input_setting,
             get_firewall_status,run_sudo_command,get_system_users,
             get_autostart_bookos,toggle_autostart_bookos,get_autostart_apps,toggle_autostart_app,setup_polkit_rules,export_settings,import_settings,
@@ -3143,6 +3331,8 @@ fn main() {
             hardware_control::set_brillo,
             hardware_control::obtener_estado_pantalla,
             buds::buds_connect,buds::buds_disconnect,buds::buds_get_status,
+            buds::buds_set_auto_reconnect,buds::buds_get_prefs,buds::buds_try_auto_reconnect,buds::buds_audio_switch_check,
+            buds::buds_fit_test_start,buds::buds_fit_test_stop,buds::buds_set_easy_pairing,buds::buds_request_info,buds::buds_notify_battery,
             buds::buds_set_anc,buds::buds_set_eq,buds::buds_set_touch_lock,
             buds::gbc_is_available,buds::gbc_get_device,
             buds::gbc_execute_action,buds::gbc_activate,

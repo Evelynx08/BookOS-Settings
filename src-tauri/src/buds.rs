@@ -56,6 +56,14 @@ const MSG_NOISE_CONTROLS: u8 = 120;      // NOISE_CONTROLS — set ANC mode
 const MSG_EQUALIZER: u8 = 134;           // EQUALIZER — set EQ
 const MSG_LOCK_TOUCHPAD: u8 = 144;       // LOCK_TOUCHPAD — lock/unlock touch
 const MSG_NOISE_REDUCTION_LEVEL: u8 = 131; // NOISE_REDUCTION_LEVEL — ANC Normal/High
+const MSG_FIT_TEST_START: u8 = 112;        // FIT_TEST — start in-ear seal check
+const MSG_FIT_TEST_RESULT: u8 = 113;       // FIT_TEST result (L=byte0, R=byte1: 0=good,1=loose,2=poor)
+const MSG_FIT_TEST_STOP: u8 = 114;         // FIT_TEST stop
+const MSG_SET_EASY_PAIRING: u8 = 108;      // EASY_PAIRING — multipoint switch
+const MSG_DEBUG_BUILD_INFO_REQ: u8 = 40;   // request build info (firmware, serial)
+const MSG_DEBUG_BUILD_INFO_RES: u8 = 40;   // response (same id, payload differs)
+const MSG_DEBUG_SERIAL_REQ: u8 = 42;       // request SN
+const MSG_DEBUG_SERIAL_RES: u8 = 42;
 
 // ── Packet framing constants ──────────────────────────────────────────────────
 
@@ -177,7 +185,7 @@ fn parse_packets(buf: &mut Vec<u8>) -> Vec<SppPacket> {
 
 // ── Status types (serializable to JSON for JS frontend) ──────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BudsStatus {
     pub connected: bool,
     pub battery_l: u8,
@@ -193,6 +201,31 @@ pub struct BudsStatus {
     pub touchpad_locked: bool,
     pub model: String,
     pub error: Option<String>,
+    /// Fit test results: 0=good, 1=loose, 2=poor, 255=not tested
+    #[serde(default = "fit_default")]
+    pub fit_l: u8,
+    #[serde(default = "fit_default")]
+    pub fit_r: u8,
+    /// Firmware / serial info (populated by buds_request_info)
+    #[serde(default)]
+    pub fw_left: String,
+    #[serde(default)]
+    pub fw_right: String,
+    #[serde(default)]
+    pub serial: String,
+}
+fn fit_default() -> u8 { 255 }
+impl Default for BudsStatus {
+    fn default() -> Self {
+        Self {
+            connected: false, battery_l: 0, battery_r: 0, battery_case: 0,
+            anc_mode: 0, eq_preset: 2, eq_enabled: false,
+            wearing_l: false, wearing_r: false, touchpad_locked: false,
+            model: String::new(), error: None,
+            fit_l: 255, fit_r: 255,
+            fw_left: String::new(), fw_right: String::new(), serial: String::new(),
+        }
+    }
 }
 
 // ── Status decoding from EXTENDED_STATUS_UPDATED payload ─────────────────────
@@ -361,6 +394,45 @@ fn reader_loop(
         let pkts = parse_packets(&mut buf);
         for p in pkts {
             eprintln!("[buds/rx] msg_id={} payload_len={}", p.msg_id, p.payload.len());
+            if p.msg_id == MSG_DEBUG_BUILD_INFO_RES && p.payload.len() > 4 {
+                // payload usually: [unk..] then ASCII firmware strings, comma or null separated.
+                // Heuristic: extract runs of printable ASCII >= 6 chars.
+                let mut strings: Vec<String> = Vec::new();
+                let mut cur = String::new();
+                for &b in &p.payload {
+                    if (0x20..=0x7e).contains(&b) {
+                        cur.push(b as char);
+                    } else {
+                        if cur.len() >= 6 { strings.push(cur.clone()); }
+                        cur.clear();
+                    }
+                }
+                if cur.len() >= 6 { strings.push(cur); }
+                eprintln!("[buds/rx] BUILD_INFO strings={:?}", strings);
+                if let Ok(mut g) = status.lock() {
+                    if let Some(s) = strings.first() { g.fw_left = s.clone(); }
+                    if let Some(s) = strings.get(1)  { g.fw_right = s.clone(); }
+                }
+                continue;
+            }
+            if p.msg_id == MSG_DEBUG_SERIAL_RES && p.payload.len() > 4 {
+                let mut s = String::new();
+                for &b in &p.payload {
+                    if (0x20..=0x7e).contains(&b) { s.push(b as char); }
+                }
+                if s.len() >= 6 {
+                    eprintln!("[buds/rx] SERIAL = {}", s);
+                    if let Ok(mut g) = status.lock() { g.serial = s; }
+                }
+                continue;
+            }
+            if p.msg_id == MSG_FIT_TEST_RESULT {
+                let l = p.payload.first().copied().unwrap_or(255);
+                let r = p.payload.get(1).copied().unwrap_or(255);
+                eprintln!("[buds/rx] FIT_TEST L={} R={}", l, r);
+                if let Ok(mut g) = status.lock() { g.fit_l = l; g.fit_r = r; }
+                continue;
+            }
             if p.msg_id == MSG_EXTENDED_STATUS || p.msg_id == MSG_STATUS_UPDATED {
                 let decoded = decode_extended_status(&p.payload, &model);
                 if let Ok(mut g) = status.lock() {
@@ -381,11 +453,53 @@ fn reader_loop(
             }
         }
     }
+    // Mark status as disconnected so frontend + auto-reconnect daemon can react.
+    if let Ok(mut g) = status.lock() { g.connected = false; }
     eprintln!("[buds/rx] reader exit");
 }
 
 #[derive(Default)]
 pub struct BudsState(pub Mutex<Option<BudsConn>>);
+
+// ── Persistent per-MAC preferences (EQ, ANC, touchpad, auto-reconnect) ──
+#[derive(Default, Clone, Serialize, Deserialize)]
+pub struct BudsPrefs {
+    pub eq_enabled: bool,
+    pub eq_preset:  u8,
+    pub anc_mode:   u8,
+    pub touchpad_locked: bool,
+    pub auto_reconnect:  bool,
+}
+
+fn prefs_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::PathBuf::from(format!("{}/.config/bookos-buds.json", home)))
+}
+
+fn load_all_prefs() -> std::collections::HashMap<String, BudsPrefs> {
+    let p = match prefs_path() { Some(p) => p, None => return Default::default() };
+    let txt = std::fs::read_to_string(&p).unwrap_or_default();
+    serde_json::from_str(&txt).unwrap_or_default()
+}
+
+fn save_all_prefs(map: &std::collections::HashMap<String, BudsPrefs>) {
+    if let Some(p) = prefs_path() {
+        if let Ok(s) = serde_json::to_string_pretty(map) {
+            let _ = std::fs::write(&p, s);
+        }
+    }
+}
+
+pub fn get_prefs(mac: &str) -> BudsPrefs {
+    load_all_prefs().get(mac).cloned().unwrap_or_default()
+}
+
+pub fn update_prefs<F: FnOnce(&mut BudsPrefs)>(mac: &str, f: F) {
+    let mut all = load_all_prefs();
+    let entry = all.entry(mac.to_string()).or_default();
+    f(entry);
+    save_all_prefs(&all);
+}
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
@@ -455,11 +569,25 @@ pub async fn buds_connect(
         // MANAGER_INFO handshake — required by the firmware
         // payload: [1, 2 (ClientDeviceTypes::Other), 34 (Android SDK)]
         let mgr_pkt = encode(MSG_MANAGER_INFO, &[1, 2, 34], legacy);
-        unsafe { libc::send(fd, mgr_pkt.as_ptr() as *const _, mgr_pkt.len(), 0); }
+        unsafe { libc::send(fd, mgr_pkt.as_ptr() as *const _, mgr_pkt.len(), libc::MSG_NOSIGNAL); }
 
         // Request extended status (reply arrives async via reader thread)
         let status_pkt = encode(MSG_EXTENDED_STATUS, &[], legacy);
-        unsafe { libc::send(fd, status_pkt.as_ptr() as *const _, status_pkt.len(), 0); }
+        unsafe { libc::send(fd, status_pkt.as_ptr() as *const _, status_pkt.len(), libc::MSG_NOSIGNAL); }
+
+        // Re-apply saved prefs (EQ / ANC / touchpad). Buds don't persist these across power cycles.
+        let prefs = get_prefs(&mac_clone);
+        let eq_payload = if legacy {
+            vec![prefs.eq_enabled as u8, prefs.eq_preset.saturating_add(5)]
+        } else {
+            vec![if prefs.eq_enabled { prefs.eq_preset.saturating_add(1) } else { 0 }]
+        };
+        let eq_pkt = encode(MSG_EQUALIZER, &eq_payload, legacy);
+        unsafe { libc::send(fd, eq_pkt.as_ptr() as *const _, eq_pkt.len(), libc::MSG_NOSIGNAL); }
+        let anc_pkt = encode(MSG_NOISE_CONTROLS, &[prefs.anc_mode], legacy);
+        unsafe { libc::send(fd, anc_pkt.as_ptr() as *const _, anc_pkt.len(), libc::MSG_NOSIGNAL); }
+        let tp_pkt = encode(MSG_LOCK_TOUCHPAD, &[prefs.touchpad_locked as u8], legacy);
+        unsafe { libc::send(fd, tp_pkt.as_ptr() as *const _, tp_pkt.len(), libc::MSG_NOSIGNAL); }
 
         Ok((fd, legacy, model, mac_clone))
     }).await.map_err(|e| e.to_string())??;
@@ -478,6 +606,25 @@ pub async fn buds_connect(
     let reader_model  = model.clone();
     let reader = std::thread::spawn(move || {
         reader_loop(fd, reader_model, reader_status, reader_stop);
+    });
+
+    // Keepalive: re-send MANAGER_INFO + EXTENDED_STATUS every 5s so buds
+    // firmware doesn't drop the RFCOMM channel for inactivity.
+    let ka_stop  = Arc::clone(&stop);
+    let ka_legacy = legacy;
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            if ka_stop.load(Ordering::SeqCst) { break; }
+            let mgr = encode(MSG_MANAGER_INFO, &[1, 2, 34], ka_legacy);
+            let st  = encode(MSG_EXTENDED_STATUS, &[], ka_legacy);
+            unsafe {
+                let r1 = libc::send(fd, mgr.as_ptr() as *const _, mgr.len(), libc::MSG_NOSIGNAL);
+                let r2 = libc::send(fd, st.as_ptr() as *const _, st.len(), libc::MSG_NOSIGNAL);
+                if r1 < 0 || r2 < 0 { eprintln!("[buds/ka] send failed, exiting keepalive"); break; }
+            }
+        }
+        eprintln!("[buds/ka] keepalive exit");
     });
 
     let initial = status_arc.lock().map(|g| g.clone()).unwrap_or_default();
@@ -547,6 +694,9 @@ pub async fn buds_set_anc(
         unsafe { libc::send(conn.fd, lvl.as_ptr() as *const _, lvl.len(), 0); }
     }
     if let Ok(mut g) = conn.status.lock() { g.anc_mode = mode; }
+    let mac = conn.mac.clone();
+    drop(guard);
+    update_prefs(&mac, |p| { p.anc_mode = mode; });
 
     Ok(r#"{"ok":true}"#.into())
 }
@@ -579,6 +729,9 @@ pub async fn buds_set_eq(
         g.eq_preset = preset;
         g.eq_enabled = enabled;
     }
+    let mac = conn.mac.clone();
+    drop(guard);
+    update_prefs(&mac, |p| { p.eq_preset = preset; p.eq_enabled = enabled; });
 
     Ok(r#"{"ok":true}"#.into())
 }
@@ -595,8 +748,157 @@ pub async fn buds_set_touch_lock(
     let pkt = encode(MSG_LOCK_TOUCHPAD, &[locked as u8], conn.legacy);
     unsafe { libc::send(conn.fd, pkt.as_ptr() as *const _, pkt.len(), 0); }
     if let Ok(mut g) = conn.status.lock() { g.touchpad_locked = locked; }
+    let mac = conn.mac.clone();
+    drop(guard);
+    update_prefs(&mac, |p| { p.touchpad_locked = locked; });
 
     Ok(r#"{"ok":true}"#.into())
+}
+
+// ── Auto-reconnect toggle + apply prefs on connect ──────────────────────
+/// Start fit test. Plays seal-detection tone via buds. Result arrives async via reader_loop
+/// and populates BudsStatus.fit_l / fit_r. Caller polls buds_get_status until fit_l != 255.
+#[tauri::command]
+pub async fn buds_fit_test_start(state: tauri::State<'_, BudsState>) -> Result<String, String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No hay conexión activa con los Buds")?;
+    if let Ok(mut g) = conn.status.lock() { g.fit_l = 255; g.fit_r = 255; }
+    let pkt = encode(MSG_FIT_TEST_START, &[], conn.legacy);
+    unsafe { libc::send(conn.fd, pkt.as_ptr() as *const _, pkt.len(), libc::MSG_NOSIGNAL); }
+    Ok(r#"{"ok":true}"#.into())
+}
+
+/// Send a desktop notification with current buds battery levels.
+/// Frontend calls this on a timer + on low-battery threshold.
+#[tauri::command]
+pub fn buds_notify_battery(left: u8, right: u8, case: u8, low: bool) -> String {
+    let title = if low { "Batería baja — Buds" } else { "Galaxy Buds" };
+    let urgency = if low { "critical" } else { "normal" };
+    let body = format!("Izda: {}%  ·  Dcha: {}%  ·  Estuche: {}%", left, right, case);
+    let _ = std::process::Command::new("notify-send")
+        .args(["-u", urgency, "-i", "audio-headphones", "-a", "BookOS Settings", title, &body])
+        .spawn();
+    r#"{"ok":true}"#.into()
+}
+
+/// Request firmware + serial info from buds. Reader populates BudsStatus.fw_* / serial async.
+#[tauri::command]
+pub async fn buds_request_info(state: tauri::State<'_, BudsState>) -> Result<String, String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No hay conexión activa con los Buds")?;
+    let p1 = encode(MSG_DEBUG_BUILD_INFO_REQ, &[], conn.legacy);
+    unsafe { libc::send(conn.fd, p1.as_ptr() as *const _, p1.len(), libc::MSG_NOSIGNAL); }
+    let p2 = encode(MSG_DEBUG_SERIAL_REQ, &[], conn.legacy);
+    unsafe { libc::send(conn.fd, p2.as_ptr() as *const _, p2.len(), libc::MSG_NOSIGNAL); }
+    Ok(r#"{"ok":true}"#.into())
+}
+
+/// Easy Pairing (multipoint quick-switch) — when ON, buds let another paired device
+/// take them without re-pairing. Native firmware toggle, persistent.
+#[tauri::command]
+pub async fn buds_set_easy_pairing(enable: bool, state: tauri::State<'_, BudsState>) -> Result<String, String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No hay conexión activa con los Buds")?;
+    let pkt = encode(MSG_SET_EASY_PAIRING, &[enable as u8], conn.legacy);
+    eprintln!("[buds/tx] EASY_PAIRING enable={} pkt={:02x?}", enable, pkt);
+    let sent = unsafe { libc::send(conn.fd, pkt.as_ptr() as *const _, pkt.len(), libc::MSG_NOSIGNAL) };
+    eprintln!("[buds/tx] EASY_PAIRING sent {}", sent);
+    Ok(r#"{"ok":true}"#.into())
+}
+
+#[tauri::command]
+pub async fn buds_fit_test_stop(state: tauri::State<'_, BudsState>) -> Result<String, String> {
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = guard.as_ref().ok_or("No hay conexión activa con los Buds")?;
+    let pkt = encode(MSG_FIT_TEST_STOP, &[], conn.legacy);
+    unsafe { libc::send(conn.fd, pkt.as_ptr() as *const _, pkt.len(), libc::MSG_NOSIGNAL); }
+    Ok(r#"{"ok":true}"#.into())
+}
+
+#[tauri::command]
+pub fn buds_set_auto_reconnect(mac: String, enable: bool) -> String {
+    update_prefs(&mac, |p| { p.auto_reconnect = enable; });
+    r#"{"ok":true}"#.into()
+}
+
+// Audio-aware auto-switch: when PC plays audio, grab buds. When PC silent N seconds,
+// release them so phone can take over. Returns one of:
+//   {"action":"connect"}    — caller should connect
+//   {"action":"disconnect"} — caller should disconnect
+//   {"action":"none"}
+#[tauri::command]
+pub fn buds_audio_switch_check(mac: String) -> String {
+    let prefs = get_prefs(&mac);
+    if !prefs.auto_reconnect { return r#"{"action":"none"}"#.into(); }
+
+    // PipeWire/PulseAudio: any active sink-input means something is playing.
+    let playing = std::process::Command::new("pactl")
+        .args(["list", "sink-inputs", "short"])
+        .output()
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false);
+
+    // BlueZ Connected state for our buds.
+    let connected = std::process::Command::new("bluetoothctl")
+        .args(["info", &mac])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("Connected: yes"))
+        .unwrap_or(false);
+
+    // State tracked across calls (idle counter).
+    use std::sync::Mutex as StdMutex;
+    static IDLE_COUNT: StdMutex<u32> = StdMutex::new(0);
+    let mut idle = IDLE_COUNT.lock().unwrap();
+
+    if playing {
+        *idle = 0;
+        if !connected { return r#"{"action":"connect"}"#.into(); }
+    } else {
+        *idle += 1;
+        // 6 ticks = ~30s with 5s polling
+        if *idle >= 6 && connected {
+            *idle = 0;
+            return r#"{"action":"disconnect"}"#.into();
+        }
+    }
+    r#"{"action":"none"}"#.into()
+}
+
+/// Command (callable from frontend) — performs one reconnect cycle.
+/// Frontend or a Tauri Timer can call this periodically. Returns JSON status.
+#[tauri::command]
+pub async fn buds_try_auto_reconnect(state: tauri::State<'_, BudsState>) -> Result<String, String> {
+    // If existing conn is alive (status.connected=true), skip. If dead (reader exited
+    // after peer drop / device-switch), wipe it so we can reconnect cleanly.
+    {
+        let mut g = state.0.lock().map_err(|e| e.to_string())?;
+        if let Some(conn) = g.as_ref() {
+            let alive = conn.status.lock().map(|s| s.connected).unwrap_or(false);
+            if alive { return Ok(r#"{"reconnected":false,"reason":"already_connected"}"#.into()); }
+            // Dead SPP — drop it so the upcoming buds_connect can take its place.
+            g.take();
+        }
+    }
+    let prefs = load_all_prefs();
+    for (mac, p) in prefs.iter() {
+        if !p.auto_reconnect { continue; }
+        let ok = std::process::Command::new("bluetoothctl")
+            .args(["info", mac])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("Connected: yes"))
+            .unwrap_or(false);
+        if !ok { continue; }
+        // Delegate to buds_connect via direct call
+        let res = buds_connect(mac.clone(), state.clone()).await;
+        return Ok(format!(r#"{{"reconnected":true,"mac":"{}","result":{}}}"#,
+            mac, res.unwrap_or_else(|e| format!("\"err:{e}\""))));
+    }
+    Ok(r#"{"reconnected":false}"#.into())
+}
+
+#[tauri::command]
+pub fn buds_get_prefs(mac: String) -> String {
+    serde_json::to_string(&get_prefs(&mac)).unwrap_or_default()
 }
 
 // ── GalaxyBudsClient DBus proxy (fallback when SPP fails) ────────────────────

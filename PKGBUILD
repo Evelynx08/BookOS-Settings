@@ -111,6 +111,12 @@ EOF
     install -Dm755 "$_extra/bookos-toggle-as-user.sh" \
         "$pkgdir/usr/lib/bookos/bookos-toggle-as-user.sh"
 
+    # BookOS lockscreen QML — installed by the app (toggle in Settings)
+    for f in MainBlock.qml LockScreenUi.qml BookBar.qml MediaControls.qml; do
+        install -Dm644 "$_extra/lockscreen/$f" \
+            "$pkgdir/usr/share/bookos-settings/lockscreen/$f"
+    done
+
     # D-Bus service
     install -Dm644 "$_search/org.bookos.SemanticSearch.service" \
         "$pkgdir/usr/share/dbus-1/services/org.bookos.SemanticSearch.service"

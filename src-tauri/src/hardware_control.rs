@@ -129,7 +129,7 @@ async fn set_ppd_profile(profile: &str) -> Result<(), String> {
 pub async fn aplicar_perfil_termico(modo: String) -> Result<String, String> {
     // (pl1_uw, pl2_uw, platform_profile value, PPD value ("" = skip PPD))
     let (pl1, pl2, profile, ppd) = match modo.as_str() {
-        "ahorro"      => (4_000_000u64,   5_000_000u64,  "low-power",   ""),  // PL2 bajo = no boost = menos calor = fan no arranca
+        "ahorro"      => (4_000_000u64,   5_000_000u64,  "low-power",   "power-saver"),  // PPD power-saver + RAPL override
         "silencioso"  => (8_000_000u64,  12_000_000u64,  "quiet",       "power-saver"),
         "optimizado"  => (15_000_000u64, 25_000_000u64,  "balanced",    "balanced"),
         "rendimiento" => (28_000_000u64, 45_000_000u64,  "performance", "performance"),
@@ -138,13 +138,8 @@ pub async fn aplicar_perfil_termico(modo: String) -> Result<String, String> {
 
     let mut warns: Vec<String> = Vec::new();
 
-    if let Some(e) = write_sysfs_soft(RAPL_PL1, &pl1.to_string()) { warns.push(e); }
-    if let Some(e) = write_sysfs_soft(RAPL_PL2, &pl2.to_string()) { warns.push(e); }
-
-    // Platform profile write path:
-    // 1. PPD via DBus (preferred, no root, but only covers 3 stdprofiles)
-    // 2. Modern per-device API (/sys/class/platform-profile/*/profile)
-    // 3. Legacy firmware path (/sys/firmware/acpi/platform_profile)
+    // Platform profile FIRST — switching profile makes PPD/firmware reset RAPL.
+    // Writing RAPL before profile change = profile change clobbers our values.
     let mut profile_ok = false;
     if !ppd.is_empty() {
         profile_ok = set_ppd_profile(ppd).await.is_ok();
@@ -158,6 +153,14 @@ pub async fn aplicar_perfil_termico(modo: String) -> Result<String, String> {
     if !profile_ok {
         warns.push("perfil de plataforma sin permisos".to_string());
     }
+
+    // Wait for PPD/firmware to settle, then write RAPL (twice, races against background daemons).
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    if let Some(e) = write_sysfs_soft(RAPL_PL1, &pl1.to_string()) { warns.push(e); }
+    if let Some(e) = write_sysfs_soft(RAPL_PL2, &pl2.to_string()) { warns.push(e); }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let _ = write_sysfs_soft(RAPL_PL1, &pl1.to_string());
+    let _ = write_sysfs_soft(RAPL_PL2, &pl2.to_string());
 
     let note = if warns.is_empty() {
         String::new()

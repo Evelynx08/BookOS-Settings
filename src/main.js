@@ -305,6 +305,54 @@ document.addEventListener('DOMContentLoaded',async()=>{
         }
     }
 
+    // Buds battery watcher: notify when low (<20%) once per session, plus
+    // refresh tray-level info every 2 min while connected.
+    const _budsLowFired={l:false,r:false,c:false};
+    setInterval(async()=>{
+        if(document.hidden) return;
+        try{
+            const st=JSON.parse(await tauriInvoke('buds_get_status'));
+            if(!st||!st.connected) return;
+            const l=st.battery_l|0, r=st.battery_r|0, ca=st.battery_case|0;
+            const isLow=(l>0&&l<=20)||(r>0&&r<=20);
+            if(isLow){
+                const key=(l<=20?'l':'')+(r<=20?'r':'');
+                if(!_budsLowFired[key]){
+                    _budsLowFired[key]=true;
+                    await tauriInvoke('buds_notify_battery',{left:l,right:r,case:ca,low:true}).catch(()=>{});
+                }
+            } else {
+                // Reset trigger when batteries recover
+                _budsLowFired.l=false;_budsLowFired.r=false;
+            }
+        }catch(e){}
+    },120000);
+
+    // Buds auto-reconnect: every 15s ask backend to reconnect any saved buds
+    // marked with auto_reconnect=true if they're in range. Cheap no-op when already connected.
+    setInterval(async()=>{
+        if(document.hidden) return;
+        try{await tauriInvoke('buds_try_auto_reconnect');}catch(e){}
+    },15000);
+
+    // Buds audio-aware switch: every 5s check if PC is playing audio. If yes + buds
+    // not on PC → connect (steal from phone). If silent ~30s + buds on PC → disconnect
+    // (let phone take them).
+    setInterval(async()=>{
+        if(document.hidden) return;
+        const mac = localStorage.getItem('buds_last_mac');
+        if(!mac) return;
+        try{
+            const r = JSON.parse(await tauriInvoke('buds_audio_switch_check',{mac}));
+            if(r.action==='connect'){
+                await tauriInvoke('run_command',{cmd:'bluetoothctl',args:['connect',mac]}).catch(()=>{});
+            } else if(r.action==='disconnect'){
+                await tauriInvoke('buds_disconnect').catch(()=>{});
+                await tauriInvoke('run_command',{cmd:'bluetoothctl',args:['disconnect',mac]}).catch(()=>{});
+            }
+        }catch(e){}
+    },5000);
+
     // Watchdog: check time-based routines every 60 seconds
     const _firedTimeRoutines=new Set();
     setInterval(async()=>{

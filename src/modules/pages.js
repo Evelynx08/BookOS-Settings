@@ -2150,14 +2150,16 @@ function _startFpIdleAnim(){_startFpIdleAnimById('fp-svg-main');}
 export async function renderBloqueo(c){
     c.innerHTML=renderHeader(t('hdr_lockscreen'))+renderSkeleton(3);
     const _sddmDefaults={variant:'dark',background:'solid',bgImage:'',accentColor:'#007AFF',clockFormat:'24h',clockFont:'serif',blurRadius:'24',showDate:'true',showBattery:'true',showBookBar:'true'};
-    let timeout=5,fp={available:false,enrolled:false},aod=false,sddmCfg={..._sddmDefaults},userInfo={display_name:'',has_avatar:false,avatar_path:''},bookBarEnabled=true;
-    try{[timeout,fp,aod,sddmCfg,userInfo,bookBarEnabled]=await Promise.all([
+    let timeout=5,fp={available:false,enrolled:false},aod=false,sddmCfg={..._sddmDefaults},userInfo={display_name:'',has_avatar:false,avatar_path:''},bookBarEnabled=true,lockThemeOn=false,sddmThemeOn=false;
+    try{[timeout,fp,aod,sddmCfg,userInfo,bookBarEnabled,lockThemeOn,sddmThemeOn]=await Promise.all([
         tauriInvoke('get_lock_timeout').then(r=>JSON.parse(r).timeout).catch(()=>5),
         tauriInvoke('check_fingerprint').then(JSON.parse).catch(()=>({available:false,enrolled:false})),
         getSetting('AOD','false').then(v=>v==='true'),
         tauriInvoke('get_sddm_config').then(JSON.parse).catch(()=>({..._sddmDefaults})),
         tauriInvoke('get_user_info').then(JSON.parse).catch(()=>({display_name:'',has_avatar:false,avatar_path:''})),
-        getSetting('BookBarEnabled','true').then(v=>v!=='false')
+        getSetting('BookBarEnabled','true').then(v=>v!=='false'),
+        tauriInvoke('is_lockscreen_theme_installed').then(r=>JSON.parse(r).installed).catch(()=>false),
+        tauriInvoke('is_sddm_theme_installed').then(r=>JSON.parse(r).installed).catch(()=>false)
     ]);}catch(e){}
     // Defaults for missing keys (older config)
     for(const k in _sddmDefaults) if(!sddmCfg[k]) sddmCfg[k]=_sddmDefaults[k];
@@ -2265,6 +2267,11 @@ export async function renderBloqueo(c){
         renderCard([
             renderRowItem('AOD','Muestra información cuando la pantalla está apagada',renderToggle('aod',aod)),
             renderRowItem('Mostrar Book Bar','Pastilla dinámica con música, rutinas y batería',renderToggle('bookbar',bookBarEnabled))
+        ])+
+        renderSection('Tema BookOS')+
+        renderCard([
+            renderRowItem('Tema BookOS — Pantalla de bloqueo','Reemplaza el lockscreen de Plasma',renderToggle('lock-theme',lockThemeOn)),
+            renderRowItem('Tema BookOS — SDDM (login)','Activa el tema BookOS al iniciar sesión',renderToggle('sddm-theme',sddmThemeOn))
         ])+sddmHtml;
 
     setupSlider('lt',async v=>{try{await tauriInvoke('set_lock_timeout',{minutes:parseInt(v)})}catch(e){}const l=document.getElementById('lt-l');if(l)l.textContent=v+' min';toast('Tiempo de espera: '+v+' min');},false);
@@ -2354,6 +2361,26 @@ export async function renderBloqueo(c){
                         setTimeout(()=>requestAnimationFrame(scanPulse),16);
                     };
                     requestAnimationFrame(scanPulse);
+                    let unlisten = null;
+                    if (window.__TAURI__?.event?.listen) {
+                        unlisten = await window.__TAURI__.event.listen('fp-progress', ev => {
+                            const d = ev.payload;
+                            if (d.done) {
+                                status.textContent = 'Procesando registro...';
+                            } else if (d.stage) {
+                                status.textContent = `Escaneo ${d.stage} completado. Levanta el dedo y vuelve a colocarlo.`;
+                                if (wrapper) {
+                                    wrapper.classList.remove('fp-scanning');
+                                    wrapper.classList.add('fp-success');
+                                    setTimeout(() => {
+                                        wrapper.classList.remove('fp-success');
+                                        wrapper.classList.add('fp-scanning');
+                                    }, 400);
+                                }
+                            }
+                        });
+                    }
+
                     try{
                         const r=JSON.parse(await tauriInvoke('enroll_fingerprint'));
                         scanActive=false;
@@ -2369,6 +2396,7 @@ export async function renderBloqueo(c){
                         } else {
                             if(wrapper){wrapper.classList.remove('fp-error');void wrapper.offsetWidth;wrapper.classList.add('fp-error');setTimeout(()=>wrapper.classList.remove('fp-error'),450);}
                             status.textContent='No se pudo registrar. Inténtalo de nuevo.';
+                            console.error('[FP Enroll Error]', r.output);
                             btn.textContent='Reintentar';
                         }
                     }catch(e){
@@ -2378,6 +2406,8 @@ export async function renderBloqueo(c){
                         if(wrapper){wrapper.classList.remove('fp-error');void wrapper.offsetWidth;wrapper.classList.add('fp-error');setTimeout(()=>wrapper.classList.remove('fp-error'),450);}
                         status.textContent='Error: asegúrate de que el sensor está disponible';
                         btn.textContent='Reintentar';
+                    } finally {
+                        if (unlisten) unlisten();
                     }
                     btn.disabled=false;
                 });
@@ -2390,6 +2420,26 @@ export async function renderBloqueo(c){
         setSetting('BookBarEnabled',a?'true':'false');
         try{await tauriInvoke('run_command',{cmd:'sh',args:['-c',`mkdir -p "$HOME/.config" && echo '{"enabled":${a}}' > "$HOME/.config/bookos-bookbar.json"`]});}catch(e){}
         toast(a?'Book Bar activada':'Book Bar desactivada');
+    });
+    // ── Tema BookOS lockscreen ──
+    setupToggle('lock-theme',async a=>{
+        const action=a?'activar':'desactivar';
+        const ok=await promptAuth(`${action} tema BookOS lockscreen`,async pwd=>{
+            const cmd=a?'install_lockscreen_theme':'uninstall_lockscreen_theme';
+            return JSON.parse(await tauriInvoke(cmd,{password:pwd}));
+        });
+        if(ok) toast(a?'Tema lockscreen activado':'Tema lockscreen desactivado','🔒');
+        else { setTimeout(()=>renderBloqueo(c),200); }
+    });
+    // ── Tema BookOS SDDM ──
+    setupToggle('sddm-theme',async a=>{
+        const action=a?'activar':'desactivar';
+        const ok=await promptAuth(`${action} tema BookOS SDDM`,async pwd=>{
+            const cmd=a?'install_sddm_theme':'uninstall_sddm_theme';
+            return JSON.parse(await tauriInvoke(cmd,{password:pwd}));
+        });
+        if(ok) toast(a?'Tema SDDM activado':'Tema SDDM desactivado','🚪');
+        else { setTimeout(()=>renderBloqueo(c),200); }
     });
 
     // SDDM preview
@@ -2701,13 +2751,21 @@ async function renderUpdatesPackages(c, sys, flat, aur, sysInfo){
             renderUpdateDetail(c,srcMap[src][idx],src,sysInfo,()=>{renderUpdatesPackages(c,sys,flat,aur,sysInfo);});
         }));
         document.getElementById('upd-install-all')?.addEventListener('click',async()=>{
-            const pwd=await promptUpdatePassword(sysInfo.distro);
-            if(!pwd)return;
+            const needPwd=sys.count>0||aur.count>0;
+            const pwd=needPwd?await promptUpdatePassword(sysInfo.distro):'';
+            if(needPwd&&!pwd)return;
             try{
-                const started=JSON.parse(await tauriInvoke('run_pacman_update_silent',{password:pwd}));
-                if(!started.ok&&!started.started)throw new Error(started.error||'Contraseña incorrecta');
+                // Pacman (system) first if needed — silent runner shows progress
+                if(sys.count>0){
+                    const started=JSON.parse(await tauriInvoke('run_pacman_update_silent',{password:pwd}));
+                    if(!started.ok&&!started.started)throw new Error(started.error||'Contraseña incorrecta');
+                }
+                // Flatpak + AUR fire-and-forget in parallel
+                const tasks=[];
+                if(flat.count>0) tasks.push(tauriInvoke('run_flatpak_update').catch(()=>{}));
+                if(aur.count>0)  tasks.push(tauriInvoke('run_aur_update').catch(()=>{}));
+                if(tasks.length) Promise.all(tasks).then(()=>toast('Flatpak/AUR actualizados','✅'));
                 toast('Descargando e instalando actualizaciones...','⬇');
-                // Go back to main page and show progress
                 renderActualizacion(c);
             }catch(e){toast('Error: '+(e.message||'Fallo'),'✕');}
         });
@@ -2748,9 +2806,19 @@ async function renderUpdateDetail(c, pkg, src, sysInfo, onBack){
         toast('Programado para esta noche','🌙');
     });
     document.getElementById('upd-now')?.addEventListener('click',async()=>{
-        const pwd=await promptUpdatePassword(sysInfo.distro);
-        if(!pwd)return;
         try{
+            if(src==='flat'){
+                toast('Actualizando '+pkg.name+'...','⬇');
+                tauriInvoke('run_flatpak_update').catch(()=>{}).then(()=>toast('Flatpak actualizado','✅'));
+                onBack(); return;
+            }
+            if(src==='aur'){
+                toast('Actualizando '+pkg.name+' (AUR)...','⬇');
+                tauriInvoke('run_aur_update').catch(()=>{}).then(()=>toast('AUR actualizado','✅'));
+                onBack(); return;
+            }
+            const pwd=await promptUpdatePassword(sysInfo.distro);
+            if(!pwd)return;
             const started=JSON.parse(await tauriInvoke('run_pacman_update_silent',{password:pwd}));
             if(!started.ok&&!started.started)throw new Error(started.error||'Contraseña incorrecta');
             toast('Actualizando '+pkg.name+'...','⬇');
@@ -2928,10 +2996,12 @@ async function _doCheckUpdates(c){
 
     let sys={count:0,packages:[]},flat={count:0,packages:[]},aur={count:0,packages:[]},sysInfo={distro:'BookOS',kernel:''};
     let autoupd=false;
+    const force=window.__forceUpdCheck===true;
+    window.__forceUpdCheck=false;
     try{[sys,flat,aur,sysInfo,autoupd]=await Promise.all([
-        tauriInvoke('check_system_updates').then(JSON.parse).catch(()=>({count:0,packages:[]})),
-        tauriInvoke('check_flatpak_updates').then(JSON.parse).catch(()=>({count:0,packages:[]})),
-        tauriInvoke('check_aur_updates').then(JSON.parse).catch(()=>({count:0,packages:[]})),
+        tauriInvoke('check_system_updates',{force}).then(JSON.parse).catch(()=>({count:0,packages:[]})),
+        tauriInvoke('check_flatpak_updates',{force}).then(JSON.parse).catch(()=>({count:0,packages:[]})),
+        tauriInvoke('check_aur_updates',{force}).then(JSON.parse).catch(()=>({count:0,packages:[]})),
         tauriInvoke('get_system_info').then(JSON.parse).catch(()=>({distro:'BookOS',kernel:''})),
         getSetting('AutoUpdate','false').then(v=>v==='true')
     ]);}catch(e){}
@@ -2955,7 +3025,7 @@ async function _doCheckUpdates(c){
         renderCard([renderRowItem('Sistema',esc(sysInfo.distro||'BookOS'),''),renderRowItem('Kernel',esc(sysInfo.kernel||''),'')])+
         renderSection(t('sec_options'))+
         renderCard([renderRowItem('Actualizaciones automáticas','Descargar e instalar automáticamente',renderToggle('auto-upd',autoupd))]);
-        document.getElementById('re-check')?.addEventListener('click',()=>renderActualizacion(c));
+        document.getElementById('re-check')?.addEventListener('click',()=>{window.__forceUpdCheck=true;renderActualizacion(c);});
         setupToggle('auto-upd',async a=>{
             setSetting('AutoUpdate',a?'true':'false');
             try{await tauriInvoke('configure_auto_update',{enable:a});}catch(e){}
@@ -4522,6 +4592,7 @@ export async function renderAvanzadas(c){
         renderRowItem('Reiniciar compositor','Útil si hay artefactos gráficos',`<button class="btn btn-secondary btn-sm" id="fx-restart-kwin">Reiniciar</button>`),
     ]);
 
+
     // ── Laboratorio (experimental) ─────────────────────────────────
     // Compact divider hero — sits flush with the experimental sections
     // so the visual hierarchy reads: stable settings → divider → labs.
@@ -4673,6 +4744,118 @@ function _showBudsConnectModal(name, phase){
     if(phase==='ok'||phase==='fail'){setTimeout(()=>m.remove(),1200);}
 }
 
+// ── Buds: Administrar conexiones submenu ───────────────────────────────
+async function _renderBudsConn(c, device){
+    if(window.pushSubNav) window.pushSubNav(()=>_renderBudsDetail(c,device));
+    c.innerHTML=renderHeader('Administrar conexiones')+renderSkeleton(2);
+    let prefs={eq_enabled:false,eq_preset:2,anc_mode:0,touchpad_locked:false,auto_reconnect:false};
+    try{prefs=JSON.parse(await tauriInvoke('buds_get_prefs',{mac:device.mac}));}catch(e){}
+
+    let h=renderHeader('Administrar conexiones');
+    const ep=(await getSetting('buds_easypair_'+device.mac,'false'))==='true';
+    h+=renderCard([
+        renderRowItem('Reconexión automática','Conecta los buds cuando estén cerca y encendidos',renderToggle('buds-auto-rc',prefs.auto_reconnect)),
+        renderRowItem('Conexión fácil con auriculares','Cambia entre dispositivos cercanos sin desemparejar',renderToggle('buds-easypair',ep)),
+    ]);
+    h+=renderSection('Estado guardado');
+    h+=renderCard([
+        renderRowItem('Ecualizador',prefs.eq_enabled?(_BUDS_EQ_PRESETS.find(p=>p.idx===prefs.eq_preset)?.label||'Estándar'):'Plano',''),
+        renderRowItem('ANC',(_BUDS_ANC_MODES.find(m=>m.idx===prefs.anc_mode)?.label||'Desactivado'),''),
+        renderRowItem('Touchpad',prefs.touchpad_locked?'Bloqueado':'Activo',''),
+    ]);
+    c.innerHTML=h;
+    setupToggle('buds-auto-rc',async a=>{
+        try{await tauriInvoke('buds_set_auto_reconnect',{mac:device.mac,enable:a});}catch(e){}
+        toast(a?'Reconexión automática activada':'Reconexión automática desactivada','🔁');
+    });
+    setupToggle('buds-easypair',async a=>{
+        try{await tauriInvoke('buds_set_easy_pairing',{enable:a});}catch(e){toast('Error: ¿buds conectados?');return;}
+        setSetting('buds_easypair_'+device.mac,a?'true':'false');
+        toast(a?'Conexión fácil activada':'Conexión fácil desactivada','🔗');
+    });
+}
+
+// ── Buds: Acerca de los auriculares ────────────────────────────────────
+async function _renderBudsAbout(c, device, statusInit, modelTag, fwOld){
+    if(window.pushSubNav) window.pushSubNav(()=>_renderBudsDetail(c,device));
+    c.innerHTML=renderHeader('Acerca de los auriculares')+renderSkeleton(2);
+    // Request fresh info via SPP
+    try{await tauriInvoke('buds_request_info');}catch(e){}
+    // Poll status up to 2s for fw/serial
+    let st=statusInit||{};
+    for(let i=0;i<10;i++){
+        try{st=JSON.parse(await tauriInvoke('buds_get_status'));}catch(e){}
+        if(st.fw_left||st.serial)break;
+        await new Promise(r=>setTimeout(r,200));
+    }
+    const swVer=(window.__BOOKOS_APP_VER__||'BookOS Settings');
+    let h=renderHeader('Acerca de los auriculares');
+    h+=renderSection('Dispositivo');
+    h+=renderCard([
+        renderRowItem('Modelo',esc(st.model||modelTag||'Galaxy Buds'),''),
+        renderRowItem('Nombre Bluetooth',esc(device.name||'—'),''),
+        renderRowItem('Dirección MAC',esc(device.mac||'—'),''),
+    ]);
+    h+=renderSection('Firmware');
+    h+=renderCard([
+        renderRowItem('Auricular izquierdo',esc(st.fw_left||fwOld||'—'),''),
+        renderRowItem('Auricular derecho',esc(st.fw_right||fwOld||'—'),''),
+        renderRowItem('Número de serie',esc(st.serial||'—'),''),
+    ]);
+    h+=renderSection('Estado');
+    h+=renderCard([
+        renderRowItem('Batería Izquierda',(st.battery_l||0)+'%',''),
+        renderRowItem('Batería Derecha',(st.battery_r||0)+'%',''),
+        renderRowItem('Batería Estuche',(st.battery_case||0)+'%',''),
+    ]);
+    h+=renderSection('Software');
+    h+=renderCard([
+        renderRowItem('Cliente',esc(swVer),''),
+        renderRowItem('Protocolo SPP','Galaxy Buds nativo (BookOS)',''),
+    ]);
+    c.innerHTML=h;
+}
+
+// ── Buds: Fit test (Adaptar a tus oídos) ───────────────────────────────
+async function _renderBudsFitTest(c, device){
+    if(window.pushSubNav) window.pushSubNav(()=>_renderBudsDetail(c,device));
+    const fitLabel=v=>v===0?'Buen ajuste':v===1?'Ajuste flojo':v===2?'Mal ajuste':'—';
+    const fitColor=v=>v===0?'#34c759':v===1?'#ff9500':v===2?'#ff3b30':'var(--tx2)';
+    let h=renderHeader('Adaptar a tus oídos');
+    h+=`<div class="detail-card" style="padding:24px;text-align:center">
+        <p style="font-size:14px;color:var(--tx2);margin:0 0 18px;line-height:1.4">Coloca los auriculares en tus oídos. El test reproducirá un tono y medirá el sello.</p>
+        <div style="display:flex;justify-content:center;gap:40px;margin:24px 0">
+            <div><div style="font-size:11px;color:var(--tx2);margin-bottom:6px">Izquierdo</div><div id="fit-l" style="font-size:18px;font-weight:600;color:var(--tx2)">—</div></div>
+            <div><div style="font-size:11px;color:var(--tx2);margin-bottom:6px">Derecho</div><div id="fit-r" style="font-size:18px;font-weight:600;color:var(--tx2)">—</div></div>
+        </div>
+        <button id="fit-start" class="btn btn-primary" style="width:100%;max-width:240px">Iniciar prueba</button>
+    </div>`;
+    c.innerHTML=h;
+    let polling=null;
+    document.getElementById('fit-start')?.addEventListener('click',async()=>{
+        const btn=document.getElementById('fit-start');
+        btn.disabled=true;btn.textContent='Probando…';
+        try{await tauriInvoke('buds_fit_test_start');}catch(e){toast('Error iniciando prueba');btn.disabled=false;btn.textContent='Iniciar prueba';return;}
+        let elapsed=0;
+        polling=setInterval(async()=>{
+            elapsed+=500;
+            try{
+                const st=JSON.parse(await tauriInvoke('buds_get_status'));
+                if(st.fit_l!==255||st.fit_r!==255){
+                    document.getElementById('fit-l').textContent=fitLabel(st.fit_l);
+                    document.getElementById('fit-l').style.color=fitColor(st.fit_l);
+                    document.getElementById('fit-r').textContent=fitLabel(st.fit_r);
+                    document.getElementById('fit-r').style.color=fitColor(st.fit_r);
+                    clearInterval(polling);
+                    try{await tauriInvoke('buds_fit_test_stop');}catch(e){}
+                    btn.disabled=false;btn.textContent='Repetir prueba';
+                }
+            }catch(e){}
+            if(elapsed>=15000){clearInterval(polling);try{await tauriInvoke('buds_fit_test_stop');}catch(e){}btn.disabled=false;btn.textContent='Repetir prueba';}
+        },500);
+    });
+}
+
 async function _renderBudsDetail(c, device){
     if(!device){console.error('[Buds] device es undefined');return;}
     c.innerHTML=renderHeader(device.name||'Buds')+renderSkeleton(2);
@@ -4683,27 +4866,36 @@ async function _renderBudsDetail(c, device){
     let gbcAvail = false;
     let gbcDev = null;
     if(device.connected){
-        _showBudsConnectModal(device.name||'Buds','connecting');
+        // Fast path: SPP session already alive → use cached status, skip modal
+        let alreadyAlive=false;
         try{
-            const r = JSON.parse(await tauriInvoke('buds_connect',{mac:device.mac}));
-            if(r.connected){status=r;sppConnected=true;}
-        }catch(e){console.warn('[Buds] SPP connect failed:',e);}
+            const s=JSON.parse(await tauriInvoke('buds_get_status'));
+            if(s&&s.connected){status=s;sppConnected=true;alreadyAlive=true;}
+        }catch(e){}
 
-        if(!sppConnected){
-            try{gbcAvail=await tauriInvoke('gbc_is_available');}catch(e){}
-            if(gbcAvail){
-                try{gbcDev=JSON.parse(await tauriInvoke('gbc_get_device'));}catch(e){console.warn('[Buds] GBC read fail:',e);}
-                if(gbcDev&&gbcDev.BatteryLeft!=null){
-                    status.battery_l=gbcDev.BatteryLeft;
-                    status.battery_r=gbcDev.BatteryRight;
-                    status.battery_case=gbcDev.BatteryCase;
-                    status.wearing_l=gbcDev.WearStateLeft==='Wearing';
-                    status.wearing_r=gbcDev.WearStateRight==='Wearing';
-                    status.model=gbcDev.Model||'';
+        if(!alreadyAlive){
+            _showBudsConnectModal(device.name||'Buds','connecting');
+            try{
+                const r = JSON.parse(await tauriInvoke('buds_connect',{mac:device.mac}));
+                if(r.connected){status=r;sppConnected=true;localStorage.setItem('buds_last_mac',device.mac);}
+            }catch(e){console.warn('[Buds] SPP connect failed:',e);}
+
+            if(!sppConnected){
+                try{gbcAvail=await tauriInvoke('gbc_is_available');}catch(e){}
+                if(gbcAvail){
+                    try{gbcDev=JSON.parse(await tauriInvoke('gbc_get_device'));}catch(e){console.warn('[Buds] GBC read fail:',e);}
+                    if(gbcDev&&gbcDev.BatteryLeft!=null){
+                        status.battery_l=gbcDev.BatteryLeft;
+                        status.battery_r=gbcDev.BatteryRight;
+                        status.battery_case=gbcDev.BatteryCase;
+                        status.wearing_l=gbcDev.WearStateLeft==='Wearing';
+                        status.wearing_r=gbcDev.WearStateRight==='Wearing';
+                        status.model=gbcDev.Model||'';
+                    }
                 }
             }
+            _showBudsConnectModal(device.name||'Buds', (sppConnected||gbcAvail)?'ok':'fail');
         }
-        _showBudsConnectModal(device.name||'Buds', (sppConnected||gbcAvail)?'ok':'fail');
     }
 
     // Fallback: read UPower battery + saved settings
@@ -4894,6 +5086,7 @@ async function _renderBudsDetail(c, device){
     ]);
     h+=_sCard([_sRow('Accesibilidad','','buds-row-a11y',_ICO.a11y)]);
     h+=_sCard([
+        _sRow('Adaptar a tus oídos','','buds-row-fit',_ICO.eq),
         _sRow('Buscar mis auriculares','','buds-row-find',_ICO.find),
         _sRow('Diagnóstico','','buds-row-diag',_ICO.diag),
     ]);
@@ -5068,14 +5261,14 @@ async function _renderBudsDetail(c, device){
     });
 
     // Row: Acerca de
-    document.getElementById('buds-row-about')?.addEventListener('click',()=>{
-        toast(`${modelTag||'Galaxy Buds'}${fw?' · FW '+fw:''}`);
-    });
+    document.getElementById('buds-row-about')?.addEventListener('click',()=>_renderBudsAbout(c,device,status,modelTag,fw));
 
     // Stubs for non-implemented rows
-    ['buds-row-voice','buds-row-conn','buds-row-adv','buds-row-a11y','buds-row-diag'].forEach(id=>{
+    ['buds-row-voice','buds-row-adv','buds-row-a11y','buds-row-diag'].forEach(id=>{
         document.getElementById(id)?.addEventListener('click',()=>toast('Próximamente'));
     });
+    document.getElementById('buds-row-conn')?.addEventListener('click',()=>_renderBudsConn(c,device));
+    document.getElementById('buds-row-fit')?.addEventListener('click',()=>_renderBudsFitTest(c,device));
 
     // Live refresh: update battery rings
     function _renderRingsLive(bl,br,bc){
