@@ -2079,7 +2079,15 @@ export async function renderTemas(c){
         const name=a?(kcsT.dark||dark[0]?.name||'BookOS Dark'):(kcsT.light||light[0]?.name||'BookOS Light');
         try{await tauriInvoke('apply_kde_theme',{name,isGlobal:kcsT.is_global})}catch(e){}
         document.documentElement.className=a?'dark-mode':'light-mode';
-        toast(a?'Cambiando a modo oscuro':'Cambiando a modo claro');
+        toast(a?'Modo oscuro activado':'Modo claro activado');
+        // Offer logout for full coherence across legacy apps. Skip if user dismissed previously this session.
+        if(!window.__dmLogoutAsked){
+            window.__dmLogoutAsked=true;
+            showDialog('Cerrar sesión','Algunas apps ya abiertas pueden quedar con el tema anterior. Cerrar sesión las pondrá todas en el nuevo tema.',{
+                confirmText:'Cerrar sesión',cancelText:'Más tarde',
+                onConfirm:async()=>{try{await tauriInvoke('logout_session');}catch(e){}}
+            });
+        }
     });
     setupToggle('sched',async a=>{document.getElementById('sched-opts').style.display=a?'block':'none';saveSchedule(a);toast(a?'Programación activada':'Programación desactivada');});
     document.querySelectorAll('.theme-card-large').forEach(cd=>{cd.addEventListener('click',async()=>{try{await tauriInvoke('set_color_scheme',{scheme:cd.dataset.s})}catch(e){}document.documentElement.className=cd.dataset.s.toLowerCase().includes('dark')?'dark-mode':'light-mode';document.querySelectorAll('.theme-card-large').forEach(x=>{x.classList.remove('active');x.querySelector('.theme-check').textContent='';});cd.classList.add('active');cd.querySelector('.theme-check').textContent='✓';toast('Tema aplicado: '+cd.dataset.s);});});
@@ -2708,12 +2716,16 @@ export async function renderActualizacion(c){
 async function renderUpdatesPackages(c, sys, flat, aur, sysInfo){
     window.pushSubNav(()=>renderActualizacion(c));
     let activeTab='sys';
+    // Hide AUR tab on non-pacman distros + Flatpak tab if not installed.
+    let _isArch=true, _hasFlat=true;
+    try{_isArch=(JSON.parse(localStorage.getItem('__pkg_mgr__')||'{}').manager==='pacman');}catch{}
+    try{_hasFlat=(JSON.parse(localStorage.getItem('__has_flatpak__')||'{}').available!==false);}catch{}
     function renderTab(){
         const tabs=[
             {id:'sys',label:'Sistema',count:sys.count,pkgs:sys.packages,hasVer:true},
-            {id:'flat',label:'Flatpak',count:flat.count,pkgs:flat.packages,hasVer:false},
-            {id:'aur',label:'AUR',count:aur.count,pkgs:aur.packages,hasVer:true},
         ];
+        if(_hasFlat) tabs.push({id:'flat',label:'Flatpak',count:flat.count,pkgs:flat.packages,hasVer:false});
+        if(_isArch)  tabs.push({id:'aur',label:'AUR',count:aur.count,pkgs:aur.packages,hasVer:true});
         const active=tabs.find(t=>t.id===activeTab)||tabs[0];
         const pkgRows=active.pkgs.map((p,i)=>{
             const verText=active.hasVer?(p.old&&p.new?`${esc(p.old)} → ${esc(p.new)}`:(esc(p.old||p.version||''))):(esc(p.version||''));

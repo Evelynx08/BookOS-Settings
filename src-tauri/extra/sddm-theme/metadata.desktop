@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=BookOS
+Comment=BookOS SDDM Theme — iOS/Samsung style
+Type=X-SDDM-Theme
+X-SDDM-Theme-Api=2.0
+X-SDDM-Theme-QtVersion=6
+
+[SddmGreeterEnvironment]
+QML_XHR_ALLOW_FILE_READ=1

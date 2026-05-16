@@ -117,6 +117,20 @@ EOF
             "$pkgdir/usr/share/bookos-settings/lockscreen/$f"
     done
 
+    # BookOS SDDM theme — staged under /usr/share/bookos-settings/sddm-theme.
+    # install_sddm_theme() (Settings app) copies it to /usr/share/sddm/themes/bookos
+    # the first time the user enables the SDDM theme toggle.
+    install -Dm644 "$_extra/sddm-theme/Main.qml"          "$pkgdir/usr/share/bookos-settings/sddm-theme/Main.qml"
+    install -Dm644 "$_extra/sddm-theme/metadata.desktop"  "$pkgdir/usr/share/bookos-settings/sddm-theme/metadata.desktop"
+    install -Dm644 "$_extra/sddm-theme/theme.conf"        "$pkgdir/usr/share/bookos-settings/sddm-theme/theme.conf"
+    # Icons subdir
+    if [ -d "$_extra/sddm-theme/icons" ]; then
+        find "$_extra/sddm-theme/icons" -type f | while read -r f; do
+            rel="${f#$_extra/sddm-theme/}"
+            install -Dm644 "$f" "$pkgdir/usr/share/bookos-settings/sddm-theme/$rel"
+        done
+    fi
+
     # D-Bus service
     install -Dm644 "$_search/org.bookos.SemanticSearch.service" \
         "$pkgdir/usr/share/dbus-1/services/org.bookos.SemanticSearch.service"

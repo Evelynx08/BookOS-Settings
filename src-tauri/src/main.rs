@@ -983,6 +983,31 @@ fn theme_is_dark(name: &str) -> bool {
     format!(r#"{{"scheme":"{}","is_dark":{}}}"#,esc(&scheme),is_dark)
 }
 
+/// Logout current session. Faster than reboot, applies theme to all apps cleanly.
+#[tauri::command]
+pub async fn logout_session() -> String {
+    // Plasma session manager — clean logout, no confirm dialog.
+    let _ = run("qdbus6", &["org.kde.LogoutPrompt","/LogoutPrompt","logout"]).await;
+    let _ = run("qdbus6", &["org.kde.Shutdown","/Shutdown","logout"]).await;
+    let _ = run("loginctl", &["terminate-session", "self"]).await;
+    r#"{"ok":true}"#.into()
+}
+
+/// Tell running apps a theme change happened so they re-style without restart.
+/// Strictly non-invasive: only fires D-Bus signals + gsettings. Does NOT restart
+/// plasmashell, kwin, or any service.
+async fn notify_theme_change(is_dark: bool) {
+    // Tell KDE platform theme module to reload palette (Qt apps with KDE integration).
+    // Soft refresh — module re-reads config files, no process restart.
+    run("qdbus6", &["org.kde.kded6", "/modules/kdeplatformtheme", "refresh"]).await;
+    // Broadcast KGlobalSettings palette-changed signal so all Qt apps repaint.
+    run("dbus-send", &["--session","--type=signal","/KGlobalSettings",
+        "org.kde.KGlobalSettings.notifyChange","int32:0","int32:0"]).await;
+    // GTK3/4 apps watch this gsetting and re-style automatically.
+    let gtk_color = if is_dark { "prefer-dark" } else { "prefer-light" };
+    run("gsettings", &["set","org.gnome.desktop.interface","color-scheme",gtk_color]).await;
+}
+
 // ── Theme config helpers ─────────────────────────────────────────────────
 fn get_kv_pt(cfg: &serde_json::Value, is_dark: bool) -> (String, String) {
     let kv = if is_dark {
@@ -1108,24 +1133,36 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
     format!(r#"{{"light":"{}","dark":"{}","is_global":{}}}"#, esc(&light), esc(&dark), prefer_global)
 }
 #[tauri::command] async fn apply_kde_theme(name: String, is_global: bool) -> String {
-    if is_global {
-        run("plasma-apply-lookandfeel",&["--apply",&name]).await;
-    } else {
-        run("plasma-apply-colorscheme",&[&name]).await;
-    }
     let is_dark = theme_is_dark(&name);
-    run("gsettings",&["set","org.gnome.desktop.interface","color-scheme",if is_dark{"prefer-dark"}else{"prefer-light"}]).await;
-    // Guardar en JSON para que persista entre reinicios de la app
+    // Persist intent first so any failures still leave config consistent.
     let mut cfg = load_bookos_settings();
     cfg["ThemeIsDark"] = serde_json::Value::Bool(is_dark);
-    cfg["ThemeScheme"] = serde_json::Value::String(name);
+    cfg["ThemeScheme"] = serde_json::Value::String(name.clone());
     save_bookos_settings(&cfg);
-    // Switch Kvantum + Plasma Desktop Theme + GTK + Lockscreen
+
     let (kv, pt) = get_kv_pt(&cfg, is_dark);
-    run("kvantummanager",&["--set",&kv]).await;
-    run("plasma-apply-desktoptheme",&[&pt]).await;
-    apply_gtk_theme(&cfg, is_dark).await;
-    apply_lockscreen_theme(is_dark).await;
+    let gtk_color = if is_dark {"prefer-dark"} else {"prefer-light"};
+
+    // Fire all independent commands in parallel — each is a separate process,
+    // sequential = ~1.5s, parallel = ~300ms.
+    let base = if is_global {
+        run("plasma-apply-lookandfeel", &["--apply", &name])
+    } else {
+        run("plasma-apply-colorscheme", &[&name])
+    };
+    let (_a,_b,_c,_d) = tokio::join!(
+        base,
+        run("kvantummanager", &["--set", &kv]),
+        run("plasma-apply-desktoptheme", &[&pt]),
+        run("gsettings", &["set","org.gnome.desktop.interface","color-scheme",gtk_color]),
+    );
+    // GTK + lockscreen depend on cfg; run together after base.
+    let cfg_ref = &cfg;
+    tokio::join!(
+        apply_gtk_theme(cfg_ref, is_dark),
+        apply_lockscreen_theme(is_dark),
+    );
+    notify_theme_change(is_dark).await;
     r#"{"ok":true}"#.into()
 }
 #[tauri::command] async fn get_available_themes() -> String {
@@ -1147,19 +1184,26 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
     format!("[{}]",themes.join(","))
 }
 #[tauri::command] async fn set_color_scheme(scheme: String) -> String {
-    run("plasma-apply-colorscheme",&[&scheme]).await;
     let sl = scheme.to_lowercase();
     let is_dark = sl.contains("dark") || sl.contains("mocha") || sl.contains("frappe") || sl.contains("macchiato") || sl.contains("noir") || sl.contains("night") || sl.contains("midnight") || sl.contains("dracula") || sl.contains("gruvbox") || sl.contains("nord") || sl.contains("tokyo") || sl.contains("onedark") || sl.contains("heimdal") || sl.contains("emerald-smooth") || sl.contains("cachyos-dark");
     let mut cfg = load_bookos_settings();
     cfg["ThemeIsDark"] = serde_json::Value::Bool(is_dark);
     cfg["ThemeScheme"] = serde_json::Value::String(scheme.clone());
     save_bookos_settings(&cfg);
-    // Switch Kvantum + Plasma Desktop Theme + GTK + Lockscreen
+
     let (kv, pt) = get_kv_pt(&cfg, is_dark);
-    run("kvantummanager",&["--set",&kv]).await;
-    run("plasma-apply-desktoptheme",&[&pt]).await;
-    apply_gtk_theme(&cfg, is_dark).await;
-    apply_lockscreen_theme(is_dark).await;
+    let gtk_color = if is_dark {"prefer-dark"} else {"prefer-light"};
+    tokio::join!(
+        run("plasma-apply-colorscheme", &[&scheme]),
+        run("kvantummanager", &["--set", &kv]),
+        run("plasma-apply-desktoptheme", &[&pt]),
+        run("gsettings", &["set","org.gnome.desktop.interface","color-scheme",gtk_color]),
+    );
+    tokio::join!(
+        apply_gtk_theme(&cfg, is_dark),
+        apply_lockscreen_theme(is_dark),
+    );
+    notify_theme_change(is_dark).await;
     r#"{"ok":true}"#.into()
 }
 
@@ -1345,18 +1389,84 @@ fn cache_set(which: &str, v: String) {
     }
 }
 
+/// Detect the host distro's package manager. Result cached at first call.
+/// Returns one of: "pacman" (Arch), "dnf5"/"dnf" (Fedora), "apt" (Debian/Ubuntu),
+/// "zypper" (openSUSE), "unknown".
+fn detect_pkg_mgr() -> &'static str {
+    use std::sync::OnceLock;
+    static MGR: OnceLock<&'static str> = OnceLock::new();
+    MGR.get_or_init(|| {
+        let p = std::path::Path::new;
+        if p("/usr/bin/checkupdates").exists() || p("/usr/bin/pacman").exists() { "pacman" }
+        else if p("/usr/bin/dnf5").exists()   { "dnf5" }
+        else if p("/usr/bin/dnf").exists()    { "dnf" }
+        else if p("/usr/bin/apt").exists()    { "apt" }
+        else if p("/usr/bin/zypper").exists() { "zypper" }
+        else { "unknown" }
+    })
+}
+
+#[tauri::command] fn get_pkg_mgr() -> String {
+    format!(r#"{{"manager":"{}"}}"#, detect_pkg_mgr())
+}
+
 #[tauri::command] async fn check_system_updates(force: Option<bool>) -> Result<String, String> {
     if !force.unwrap_or(false) { if let Some(c) = cache_get("sys") { return Ok(c); } }
-    let u = run("checkupdates",&[]).await;
-    let pkgs: Vec<String> = u.lines().filter(|l| !l.is_empty()).take(100).map(|l| {
-        let p: Vec<&str> = l.split_whitespace().collect();
-        format!(r#"{{"name":"{}","old":"{}","new":"{}"}}"#,esc(p.first().unwrap_or(&"")),esc(p.get(1).unwrap_or(&"")),esc(p.last().unwrap_or(&"")))
-    }).collect();
-    let result = format!(r#"{{"count":{},"packages":[{}]}}"#,pkgs.len(),pkgs.join(","));
+    let mgr = detect_pkg_mgr();
+    // Output normalised to {name, old, new}
+    let pkgs: Vec<String> = match mgr {
+        "pacman" => {
+            let u = run("checkupdates", &[]).await;
+            u.lines().filter(|l| !l.is_empty()).take(100).map(|l| {
+                let p: Vec<&str> = l.split_whitespace().collect();
+                format!(r#"{{"name":"{}","old":"{}","new":"{}"}}"#,
+                    esc(p.first().unwrap_or(&"")), esc(p.get(1).unwrap_or(&"")), esc(p.last().unwrap_or(&"")))
+            }).collect()
+        }
+        "dnf5" | "dnf" => {
+            // dnf check-update prints "pkg.arch  newver  repo"
+            let u = run(mgr, &["check-update", "--quiet"]).await;
+            u.lines().filter(|l| !l.is_empty() && !l.starts_with("Last") && !l.starts_with("Obsoleting"))
+                .take(100).map(|l| {
+                    let p: Vec<&str> = l.split_whitespace().collect();
+                    let name = p.first().unwrap_or(&"").split('.').next().unwrap_or("");
+                    format!(r#"{{"name":"{}","old":"","new":"{}"}}"#,
+                        esc(name), esc(p.get(1).unwrap_or(&"")))
+                }).collect()
+        }
+        "apt" => {
+            // apt list --upgradable: "pkg/repo new [from: old]"
+            let u = run("apt", &["list", "--upgradable"]).await;
+            u.lines().filter(|l| l.contains('/')).take(100).map(|l| {
+                let name = l.split('/').next().unwrap_or("");
+                let parts: Vec<&str> = l.split_whitespace().collect();
+                let new = parts.get(1).unwrap_or(&"");
+                let old = if let Some(idx) = l.find("from: ") {
+                    l[idx+6..].trim_end_matches(']').to_string()
+                } else { String::new() };
+                format!(r#"{{"name":"{}","old":"{}","new":"{}"}}"#, esc(name), esc(&old), esc(new))
+            }).collect()
+        }
+        "zypper" => {
+            let u = run("zypper", &["--non-interactive", "list-updates"]).await;
+            u.lines().filter(|l| l.starts_with("v ") || l.starts_with("| ")).take(100).filter_map(|l| {
+                let parts: Vec<&str> = l.split('|').map(|s| s.trim()).collect();
+                if parts.len() < 5 { return None; }
+                Some(format!(r#"{{"name":"{}","old":"{}","new":"{}"}}"#,
+                    esc(parts[2]), esc(parts[3]), esc(parts[4])))
+            }).collect()
+        }
+        _ => Vec::new(),
+    };
+    let result = format!(r#"{{"count":{},"packages":[{}],"manager":"{}"}}"#, pkgs.len(), pkgs.join(","), mgr);
     cache_set("sys", result.clone());
     Ok(result)
 }
 #[tauri::command] async fn check_aur_updates(force: Option<bool>) -> Result<String, String> {
+    // AUR is Arch-only. Empty result on other distros.
+    if detect_pkg_mgr() != "pacman" {
+        return Ok(r#"{"count":0,"packages":[]}"#.into());
+    }
     if !force.unwrap_or(false) { if let Some(c) = cache_get("aur") { return Ok(c); } }
     let u = run("paru",&["-Qua"]).await;
     let pkgs: Vec<String> = u.lines().filter(|l| !l.is_empty()).take(100).map(|l| {
@@ -1367,7 +1477,17 @@ fn cache_set(which: &str, v: String) {
     cache_set("aur", result.clone());
     Ok(result)
 }
+/// True only if flatpak binary exists. Used by frontend to hide Flatpak tab.
+#[tauri::command] fn has_flatpak() -> String {
+    let ok = std::path::Path::new("/usr/bin/flatpak").exists()
+          || std::path::Path::new("/var/lib/flatpak").exists();
+    format!(r#"{{"available":{}}}"#, ok)
+}
+
 #[tauri::command] async fn check_flatpak_updates(force: Option<bool>) -> Result<String, String> {
+    if !std::path::Path::new("/usr/bin/flatpak").exists() {
+        return Ok(r#"{"count":0,"packages":[]}"#.into());
+    }
     if !force.unwrap_or(false) { if let Some(c) = cache_get("flat") { return Ok(c); } }
     let u = run("flatpak",&["remote-ls","--updates","--columns=application,version"]).await;
     let pkgs: Vec<String> = u.lines().filter(|l| !l.is_empty()).map(|l| {
@@ -1403,12 +1523,34 @@ fn cache_set(which: &str, v: String) {
     let state_clone = Arc::clone(&state);
     std::thread::spawn(move || {
         // Try paru first (handles both official + AUR). Fall back to sudo pacman if paru isn't installed.
-        let use_paru = StdCommand::new("which").arg("paru").output()
+        let mgr = detect_pkg_mgr();
+        let use_paru = mgr == "pacman" && StdCommand::new("which").arg("paru").output()
             .map(|o| o.status.success()).unwrap_or(false);
 
         let child = if use_paru {
             StdCommand::new("paru")
                 .args(["-Syu", "--noconfirm", "--sudoflags", "-S"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+        } else if mgr == "dnf5" || mgr == "dnf" {
+            StdCommand::new("sudo")
+                .args(["-k", "-S", mgr, "upgrade", "-y"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+        } else if mgr == "apt" {
+            StdCommand::new("sudo")
+                .args(["-k", "-S", "sh", "-c", "apt update && apt upgrade -y"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+        } else if mgr == "zypper" {
+            StdCommand::new("sudo")
+                .args(["-k", "-S", "zypper", "--non-interactive", "update"])
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -1816,19 +1958,28 @@ fn lockscreen_source() -> Option<String> {
 
 #[tauri::command] async fn install_sddm_theme(password: String) -> String {
     use std::io::Write;
-    if !std::path::Path::new("/usr/share/sddm/themes/bookos").is_dir() {
-        return r#"{"ok":false,"error":"theme files missing at /usr/share/sddm/themes/bookos"}"#.into();
+    let dest = "/usr/share/sddm/themes/bookos";
+    let staged = "/usr/share/bookos-settings/sddm-theme";
+
+    // One shell script: copy theme from staging if missing, then write SDDM config.
+    let mut script = String::new();
+    if !std::path::Path::new(dest).is_dir() {
+        if !std::path::Path::new(staged).is_dir() {
+            return r#"{"ok":false,"error":"theme staging missing at /usr/share/bookos-settings/sddm-theme — reinstall bookos-settings package"}"#.into();
+        }
+        script.push_str(&format!("mkdir -p '{}' && cp -r '{}/.' '{}/' && ", dest, staged, dest));
     }
-    let cfg = "[Theme]\nCurrent=bookos\nCursorTheme=Apple-cursors\n";
+    script.push_str("mkdir -p /etc/sddm.conf.d && cat > /etc/sddm.conf.d/bookos-theme.conf");
+
     let mut child = match StdCommand::new("sudo")
-        .args(["-k", "-S", "--", "tee", "/etc/sddm.conf.d/bookos-theme.conf"])
+        .args(["-k", "-S", "--", "sh", "-c", &script])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn() { Ok(c) => c, Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())) };
     if let Some(mut sin) = child.stdin.take() {
-        // First feed sudo password, then content (sudo -S only consumes 1 line for pwd, rest goes to tee)
-        let _ = sin.write_all(format!("{}\n{}", password, cfg).as_bytes());
+        // First sudo password (consumed by sudo -S), then SDDM conf piped into the final `cat >` of the script
+        let _ = sin.write_all(format!("{}\n[Theme]\nCurrent=bookos\nCursorTheme=Apple-cursors\n", password).as_bytes());
     }
     match child.wait_with_output() {
         Ok(o) if o.status.success() => r#"{"ok":true}"#.into(),
@@ -3305,7 +3456,7 @@ fn main() {
             get_dnd_status,toggle_dnd,
             get_lock_timeout,set_lock_timeout,set_lock_grace,get_lock_grace,check_fingerprint,enroll_fingerprint,verify_password,verify_fingerprint,
             get_locale_info,get_available_locales,set_locale,get_available_keymaps,set_keymap,
-            check_system_updates,check_aur_updates,check_flatpak_updates,run_system_update,run_pacman_update_silent,get_update_progress,cancel_update,run_flatpak_update,run_aur_update,
+            check_system_updates,check_aur_updates,check_flatpak_updates,run_system_update,run_pacman_update_silent,get_update_progress,cancel_update,run_flatpak_update,run_aur_update,get_pkg_mgr,has_flatpak,logout_session,
             get_app_power_usage,get_sddm_themes,set_sddm_theme,get_sddm_config,set_sddm_config,preview_sddm,
             is_lockscreen_theme_installed,install_lockscreen_theme,uninstall_lockscreen_theme,
             is_sddm_theme_installed,install_sddm_theme,uninstall_sddm_theme,

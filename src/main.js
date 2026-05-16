@@ -18,6 +18,9 @@ document.addEventListener('DOMContentLoaded',async()=>{
     try{const t=JSON.parse(_theme.value);document.documentElement.className=t.is_dark?'dark-mode':'light-mode';}catch(e){}
     // Re-apply hardware settings saved from previous session (battery limit, perf mode)
     tauriInvoke('restore_startup_settings').catch(()=>{});
+    // Detect distro package manager once and cache for UI
+    tauriInvoke('get_pkg_mgr').then(j=>{try{localStorage.setItem('__pkg_mgr__',j);}catch{}}).catch(()=>{});
+    tauriInvoke('has_flatpak').then(j=>{try{localStorage.setItem('__has_flatpak__',j);}catch{}}).catch(()=>{});
     if(sb)sb.innerHTML=renderHome(userInfo);
 
     const pages={
