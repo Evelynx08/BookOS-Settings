@@ -985,7 +985,7 @@ fn theme_is_dark(name: &str) -> bool {
 
 /// Logout current session. Faster than reboot, applies theme to all apps cleanly.
 #[tauri::command]
-pub async fn logout_session() -> String {
+async fn logout_session() -> String {
     // Plasma session manager — clean logout, no confirm dialog.
     let _ = run("qdbus6", &["org.kde.LogoutPrompt","/LogoutPrompt","logout"]).await;
     let _ = run("qdbus6", &["org.kde.Shutdown","/Shutdown","logout"]).await;
@@ -1142,24 +1142,28 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
 
     let (kv, pt) = get_kv_pt(&cfg, is_dark);
     let gtk_color = if is_dark {"prefer-dark"} else {"prefer-light"};
+    let name_ref = name.as_str();
+    let kv_ref = kv.as_str();
+    let pt_ref = pt.as_str();
 
-    // Fire all independent commands in parallel — each is a separate process,
-    // sequential = ~1.5s, parallel = ~300ms.
-    let base = if is_global {
-        run("plasma-apply-lookandfeel", &["--apply", &name])
-    } else {
-        run("plasma-apply-colorscheme", &[&name])
+    let base_args_look: [&str; 2] = ["--apply", name_ref];
+    let base_args_color: [&str; 1] = [name_ref];
+    let kv_args: [&str; 2] = ["--set", kv_ref];
+    let pt_args: [&str; 1] = [pt_ref];
+    let gtk_args: [&str; 4] = ["set","org.gnome.desktop.interface","color-scheme",gtk_color];
+
+    let base_fut = async {
+        if is_global { run("plasma-apply-lookandfeel", &base_args_look).await }
+        else         { run("plasma-apply-colorscheme",  &base_args_color).await }
     };
     let (_a,_b,_c,_d) = tokio::join!(
-        base,
-        run("kvantummanager", &["--set", &kv]),
-        run("plasma-apply-desktoptheme", &[&pt]),
-        run("gsettings", &["set","org.gnome.desktop.interface","color-scheme",gtk_color]),
+        base_fut,
+        run("kvantummanager", &kv_args),
+        run("plasma-apply-desktoptheme", &pt_args),
+        run("gsettings", &gtk_args),
     );
-    // GTK + lockscreen depend on cfg; run together after base.
-    let cfg_ref = &cfg;
-    tokio::join!(
-        apply_gtk_theme(cfg_ref, is_dark),
+    let _ = tokio::join!(
+        apply_gtk_theme(&cfg, is_dark),
         apply_lockscreen_theme(is_dark),
     );
     notify_theme_change(is_dark).await;
@@ -1193,13 +1197,20 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
 
     let (kv, pt) = get_kv_pt(&cfg, is_dark);
     let gtk_color = if is_dark {"prefer-dark"} else {"prefer-light"};
-    tokio::join!(
-        run("plasma-apply-colorscheme", &[&scheme]),
-        run("kvantummanager", &["--set", &kv]),
-        run("plasma-apply-desktoptheme", &[&pt]),
-        run("gsettings", &["set","org.gnome.desktop.interface","color-scheme",gtk_color]),
+    let scheme_ref = scheme.as_str();
+    let kv_ref = kv.as_str();
+    let pt_ref = pt.as_str();
+    let cs_args:  [&str; 1] = [scheme_ref];
+    let kv_args:  [&str; 2] = ["--set", kv_ref];
+    let pt_args:  [&str; 1] = [pt_ref];
+    let gtk_args: [&str; 4] = ["set","org.gnome.desktop.interface","color-scheme",gtk_color];
+    let _ = tokio::join!(
+        run("plasma-apply-colorscheme", &cs_args),
+        run("kvantummanager", &kv_args),
+        run("plasma-apply-desktoptheme", &pt_args),
+        run("gsettings", &gtk_args),
     );
-    tokio::join!(
+    let _ = tokio::join!(
         apply_gtk_theme(&cfg, is_dark),
         apply_lockscreen_theme(is_dark),
     );

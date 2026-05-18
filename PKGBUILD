@@ -16,20 +16,15 @@ optdepends=(
     'python-dbus: KRunner semantic search plugin'
     'python-gobject: KRunner semantic search plugin'
 )
-makedepends=('rust' 'cargo' 'protobuf' 'nodejs' 'npm')
+makedepends=('rust' 'cargo' 'protobuf' 'git')
 
-# Ahora el código se baja de GitHub automáticamente
-source=("${pkgname}::git+file:///home/evelyn/Descargas/BookOS-Settings")
+source=("${pkgname}::git+https://github.com/Evelynx08/BookOS-Settings.git#tag=v${pkgver}")
 sha256sums=('SKIP')
 
 build() {
-    cd "${pkgname}"
-    
-    # Instalamos dependencias de node si son necesarias
-    # npm install 
-    
-    # Construimos usando el directorio relativo
-    cargo tauri build --no-bundle
+    cd "${pkgname}/src-tauri"
+    # cargo build is enough — no tauri CLI needed, frontend ya está en src/
+    cargo build --release --locked
 }
 
 package() {
