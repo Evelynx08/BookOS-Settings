@@ -1039,15 +1039,16 @@ function _pantallaSubTimeout(c,lockTimeout){
 // ════════════════════════════════════════════════════════════════════════
 export async function renderSonido(c){
     c.innerHTML=renderHeader(t('hdr_sound'))+renderSkeleton(2);
-    let vol=50,muted=false,notifSnd=true,uiSnd=true,devices={sinks:[],sources:[],defaultSink:'',defaultSource:''},apps=[],descs=[];
-    try{[{volume:vol,muted},{value:notifSnd},{value:uiSnd},devices,apps,descs]=await Promise.all([
+    let vol=50,muted=false,notifSnd=true,uiSnd=true,devices={sinks:[],sources:[],defaultSink:'',defaultSource:''},apps=[],descs=[],balance=0;
+    try{[{volume:vol,muted},{value:notifSnd},{value:uiSnd},devices,apps,descs,{balance}]=await Promise.all([
         tauriInvoke('get_volume').then(JSON.parse).catch(()=>({volume:50,muted:false})),
         tauriInvoke('run_command',{cmd:'kreadconfig6',args:['--file','plasmanotifyrc','--group','Notifications','--key','Sound','--default','true']}).then(r=>{const v=typeof r==='string'?r:(r.output||'');return{value:v.trim()!=='false'};}).catch(()=>({value:true})),
         tauriInvoke('run_command',{cmd:'kreadconfig6',args:['--file','kdeglobals','--group','Sounds','--key','Enable','--default','true']}).then(r=>{const v=typeof r==='string'?r:(r.output||'');return{value:v.trim()!=='false'};}).catch(()=>({value:true})),
         tauriInvoke('get_audio_devices').then(JSON.parse).catch(()=>({sinks:[],sources:[],defaultSink:'',defaultSource:''})),
         tauriInvoke('get_app_audio').then(JSON.parse).catch(()=>[]),
         tauriInvoke('get_sink_descriptions').then(JSON.parse).catch(()=>[]),
-    ]);}catch(e){vol=50;muted=false;notifSnd=true;uiSnd=true;}
+        tauriInvoke('get_balance').then(JSON.parse).catch(()=>({balance:0})),
+    ]);}catch(e){vol=50;muted=false;notifSnd=true;uiSnd=true;balance=0;}
 
     const descMap=Object.fromEntries(descs.map(d=>[d.name,d.desc]));
     const sinkLabel=(name)=>descMap[name]||name.split('.').slice(-2).join(' ')||name;
@@ -1058,6 +1059,23 @@ export async function renderSonido(c){
     h+=renderCard([
         `<div class="detail-item"><span class="dt">Volumen del sistema</span>${renderSlider('vol',vol)}</div>`,
         renderRowItem('Silenciar',muted?t('enabled'):t('disabled'),renderToggle('mute',muted)),
+    ]);
+    h+=renderSection('Balance de audio');
+    h+=renderCard([
+        `<div class="detail-item">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                <span class="dt">Balance L/R</span>
+                <span style="font-size:13px;color:var(--tx2);font-variant-numeric:tabular-nums" id="bal-val">${balance===0?'Centro':(balance<0?'Izda '+Math.abs(balance):'Dcha '+balance)}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px">
+                <span style="font-size:12px;color:var(--tx2);min-width:14px">L</span>
+                <input type="range" class="range-input" id="bal-slider" min="-100" max="100" step="5" value="${balance}" style="flex:1">
+                <span style="font-size:12px;color:var(--tx2);min-width:14px;text-align:right">R</span>
+            </div>
+            <div style="display:flex;justify-content:center;margin-top:6px">
+                <button id="bal-center" class="btn btn-secondary btn-sm" style="padding:4px 12px;font-size:11px">Centrar</button>
+            </div>
+        </div>`
     ]);
 
     // Output device
@@ -1110,6 +1128,23 @@ export async function renderSonido(c){
     c.innerHTML=h;
 
     setupSlider('vol',async v=>{try{await tauriInvoke('set_volume',{value:parseInt(v)})}catch(e){}});
+    // Balance slider
+    const balSlider=document.getElementById('bal-slider');
+    const balVal=document.getElementById('bal-val');
+    const balLabel=v=>v===0?'Centro':(v<0?'Izda '+Math.abs(v):'Dcha '+v);
+    balSlider?.addEventListener('input',()=>{
+        const v=parseInt(balSlider.value);
+        if(balVal)balVal.textContent=balLabel(v);
+    });
+    balSlider?.addEventListener('change',async()=>{
+        const v=parseInt(balSlider.value);
+        try{await tauriInvoke('set_balance',{balance:v});}catch(e){}
+    });
+    document.getElementById('bal-center')?.addEventListener('click',async()=>{
+        if(balSlider){balSlider.value=0;if(balVal)balVal.textContent='Centro';}
+        try{await tauriInvoke('set_balance',{balance:0});}catch(e){}
+        toast('Balance centrado','🎧');
+    });
     setupToggle('mute',async()=>{try{await tauriInvoke('toggle_mute')}catch(e){}toast('Volumen cambiado','🔊');});
     setupToggle('snd-notif',async a=>{try{await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','plasmanotifyrc','--group','Notifications','--key','Sound',a?'true':'false']});}catch(e){}toast(a?'Sonidos de notificación activados':'Desactivados','🔔');});
     setupToggle('snd-ui',async a=>{try{await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','kdeglobals','--group','Sounds','--key','Enable',a?'true':'false']});}catch(e){}toast(a?'Sonidos de interfaz activados':'Desactivados');});

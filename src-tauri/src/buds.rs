@@ -60,8 +60,8 @@ const MSG_FIT_TEST_START: u8 = 112;        // FIT_TEST — start in-ear seal che
 const MSG_FIT_TEST_RESULT: u8 = 113;       // FIT_TEST result (L=byte0, R=byte1: 0=good,1=loose,2=poor)
 const MSG_FIT_TEST_STOP: u8 = 114;         // FIT_TEST stop
 const MSG_SET_EASY_PAIRING: u8 = 108;      // EASY_PAIRING — multipoint switch
-const MSG_DEBUG_BUILD_INFO_REQ: u8 = 40;   // request build info (firmware, serial)
-const MSG_DEBUG_BUILD_INFO_RES: u8 = 40;   // response (same id, payload differs)
+const MSG_DEBUG_BUILD_INFO_REQ: u8 = 40;   // request build info
+const MSG_DEBUG_BUILD_INFO_RES: u8 = 33;   // response msg_id (observed on Buds3 Pro)
 const MSG_DEBUG_SERIAL_REQ: u8 = 42;       // request SN
 const MSG_DEBUG_SERIAL_RES: u8 = 42;
 

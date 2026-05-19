@@ -526,6 +526,27 @@ fn regex_strip_rev(s: &str) -> String {
 }
 #[tauri::command] async fn toggle_mute() -> String { run("pactl",&["set-sink-mute","@DEFAULT_SINK@","toggle"]).await; r#"{"ok":true}"#.into() }
 
+/// Balance: -100=full left, 0=center, 100=full right.
+/// Converts to pactl dual-channel volume: e.g. balance=+50 → L=75%, R=100%
+#[tauri::command] async fn set_balance(balance: i32) -> String {
+    let b = balance.clamp(-100, 100);
+    let (l, r) = if b <= 0 {
+        (100u32, (100 + b) as u32)
+    } else {
+        ((100 - b) as u32, 100u32)
+    };
+    let vol_str = format!("{}% {}%", l, r);
+    run("pactl", &["set-sink-volume", "@DEFAULT_SINK@", &vol_str]).await;
+    set_bookos_setting("AudioBalance".into(), b.to_string());
+    r#"{"ok":true}"#.into()
+}
+
+#[tauri::command] fn get_balance() -> String {
+    let b = get_bookos_setting("AudioBalance".into(), "0".into())
+        .parse::<i32>().unwrap_or(0).clamp(-100, 100);
+    format!(r#"{{"balance":{}}}"#, b)
+}
+
 #[tauri::command] async fn get_battery_status() -> String {
     let path = upower_bat_path().await;
     let info = run("upower", &["-i", &path]).await;
@@ -3459,7 +3480,7 @@ fn main() {
             get_airplane_mode,toggle_airplane_mode,
             get_brightness,set_brightness,get_kbd_brightness,set_kbd_brightness,
             get_nightlight,set_nightlight,
-            get_volume,set_volume,toggle_mute,
+            get_volume,set_volume,toggle_mute,set_balance,get_balance,
             get_battery_status,get_battery_sysfs,get_battery_history,get_battery_csv_data,get_adaptive_predictions,set_adaptive_charging,
             get_display_info,set_resolution,set_vrr_policy,
             get_current_theme,get_available_themes,set_color_scheme,get_theme_schedule,set_theme_schedule,
