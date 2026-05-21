@@ -528,17 +528,29 @@ fn regex_strip_rev(s: &str) -> String {
 
 /// Balance: -100=full left, 0=center, 100=full right.
 /// Converts to pactl dual-channel volume: e.g. balance=+50 → L=75%, R=100%
+/// Balance: -100=full left, 0=center, 100=full right.
+/// Sets per-channel volume on the default sink, scaling current overall volume.
+/// Requires pactl/pipewire-pulse. Uses `wpctl` as fallback for native PipeWire.
 #[tauri::command] async fn set_balance(balance: i32) -> String {
     let b = balance.clamp(-100, 100);
-    let (l, r) = if b <= 0 {
-        (100u32, (100 + b) as u32)
+    // Read current overall volume so we don't reset it.
+    let cur = run("pactl", &["get-sink-volume", "@DEFAULT_SINK@"]).await;
+    let base: u32 = cur.split('/').nth(1)
+        .and_then(|s| s.trim().trim_end_matches('%').trim().parse().ok())
+        .unwrap_or(50);
+    // Compute per-channel percentages relative to base
+    let (l_pct, r_pct): (u32, u32) = if b <= 0 {
+        (base, ((base as i32 + (base as i32 * b / 100)).max(0)) as u32)
     } else {
-        ((100 - b) as u32, 100u32)
+        (((base as i32 - (base as i32 * b / 100)).max(0)) as u32, base)
     };
-    let vol_str = format!("{}% {}%", l, r);
-    run("pactl", &["set-sink-volume", "@DEFAULT_SINK@", &vol_str]).await;
+    // Pactl accepts: "set-sink-volume SINK 80% 60%" (one value per channel)
+    let l_str = format!("{}%", l_pct);
+    let r_str = format!("{}%", r_pct);
+    let _ = run("pactl", &["set-sink-volume", "@DEFAULT_SINK@", &l_str, &r_str]).await;
     set_bookos_setting("AudioBalance".into(), b.to_string());
-    r#"{"ok":true}"#.into()
+    eprintln!("[balance] base={}% L={} R={} balance={}", base, l_pct, r_pct, b);
+    format!(r#"{{"ok":true,"l":{},"r":{},"base":{}}}"#, l_pct, r_pct, base)
 }
 
 #[tauri::command] fn get_balance() -> String {

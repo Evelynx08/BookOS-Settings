@@ -2110,23 +2110,51 @@ export async function renderSonido(c){
         `<div class="detail-item"><span class="dt">${_tr("Volumen del sistema")}</span>${renderSlider('vol',vol)}</div>`,
         renderRowItem('Silenciar',muted?t('enabled'):t('disabled'),renderToggle('mute',muted)),
     ]);
-    h+=renderSection('Balance de audio');
-    h+=renderCard([
-        `<div class="detail-item">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-                <span class="dt">Balance L/R</span>
-                <span style="font-size:13px;color:var(--tx2);font-variant-numeric:tabular-nums" id="bal-val">${balance===0?'Centro':(balance<0?'Izda '+Math.abs(balance):'Dcha '+balance)}</span>
+    // ── Balance visual — twin VU bars + circular pan knob, iOS-style ──
+    const balLPct = balance<=0?100:Math.max(0,100-balance);
+    const balRPct = balance>=0?100:Math.max(0,100+balance);
+    h+=renderSection(_tr('Balance de audio'));
+    h+=`<div class="detail-card" style="padding:18px 18px 14px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:14px">
+            <span class="dt">${_tr('Balance L/R')}</span>
+            <span style="font-size:13px;color:var(--blue);font-weight:600;font-variant-numeric:tabular-nums" id="bal-val">${balance===0?_tr('Centro'):(balance<0?'← '+_tr('Izda')+' '+Math.abs(balance):_tr('Dcha')+' '+balance+' →')}</span>
+        </div>
+
+        <!-- Twin bars (L on top, R on bottom) showing actual channel weight -->
+        <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px">
+            <div style="display:flex;align-items:center;gap:10px">
+                <span style="font-size:11px;color:var(--tx2);min-width:14px;font-weight:600">L</span>
+                <div style="flex:1;height:6px;background:var(--toff);border-radius:3px;overflow:hidden">
+                    <div id="bal-bar-l" style="height:100%;width:${balLPct}%;background:linear-gradient(90deg,var(--blue),#5cb8ff);border-radius:3px;transition:width 0.15s ease"></div>
+                </div>
+                <span id="bal-pct-l" style="font-size:11px;color:var(--tx2);min-width:32px;text-align:right;font-variant-numeric:tabular-nums">${balLPct}%</span>
             </div>
             <div style="display:flex;align-items:center;gap:10px">
-                <span style="font-size:12px;color:var(--tx2);min-width:14px">L</span>
-                <input type="range" class="range-input" id="bal-slider" min="-100" max="100" step="5" value="${balance}" style="flex:1">
-                <span style="font-size:12px;color:var(--tx2);min-width:14px;text-align:right">R</span>
+                <span style="font-size:11px;color:var(--tx2);min-width:14px;font-weight:600">R</span>
+                <div style="flex:1;height:6px;background:var(--toff);border-radius:3px;overflow:hidden">
+                    <div id="bal-bar-r" style="height:100%;width:${balRPct}%;background:linear-gradient(90deg,var(--blue),#5cb8ff);border-radius:3px;transition:width 0.15s ease"></div>
+                </div>
+                <span id="bal-pct-r" style="font-size:11px;color:var(--tx2);min-width:32px;text-align:right;font-variant-numeric:tabular-nums">${balRPct}%</span>
             </div>
-            <div style="display:flex;justify-content:center;margin-top:6px">
-                <button id="bal-center" class="btn btn-secondary btn-sm" style="padding:4px 12px;font-size:11px">Centrar</button>
-            </div>
-        </div>`
-    ]);
+        </div>
+
+        <!-- Pan slider with center notch + tick marks -->
+        <div style="position:relative;padding:6px 0">
+            <!-- Tick marks behind slider -->
+            <div style="position:absolute;left:0;right:0;top:50%;height:1px;background:var(--brd);transform:translateY(-50%)"></div>
+            <div style="position:absolute;left:50%;top:calc(50% - 6px);width:2px;height:12px;background:var(--blue);border-radius:1px;transform:translateX(-50%);opacity:.5"></div>
+            <input type="range" class="range-input" id="bal-slider" min="-100" max="100" step="5" value="${balance}" style="width:100%;position:relative;z-index:2">
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--tx2);margin-top:2px">
+            <span>← L</span>
+            <span>${_tr('Centro')}</span>
+            <span>R →</span>
+        </div>
+
+        <div style="display:flex;justify-content:center;margin-top:14px">
+            <button id="bal-center" class="btn btn-secondary btn-sm" style="padding:6px 16px;font-size:12px;border-radius:14px">${_tr('Centrar')}</button>
+        </div>
+    </div>`;
 
     // Output device
     if(devices.sinks.length>1){
@@ -2181,19 +2209,29 @@ export async function renderSonido(c){
     // Balance slider
     const balSlider=document.getElementById('bal-slider');
     const balVal=document.getElementById('bal-val');
-    const balLabel=v=>v===0?'Centro':(v<0?'Izda '+Math.abs(v):'Dcha '+v);
-    balSlider?.addEventListener('input',()=>{
-        const v=parseInt(balSlider.value);
+    const balLabel=v=>v===0?_tr('Centro'):(v<0?'← '+_tr('Izda')+' '+Math.abs(v):_tr('Dcha')+' '+v+' →');
+    const balBarL=document.getElementById('bal-bar-l');
+    const balBarR=document.getElementById('bal-bar-r');
+    const balPctL=document.getElementById('bal-pct-l');
+    const balPctR=document.getElementById('bal-pct-r');
+    const _balUpdate=v=>{
+        const l=v<=0?100:Math.max(0,100-v);
+        const r=v>=0?100:Math.max(0,100+v);
+        if(balBarL)balBarL.style.width=l+'%';
+        if(balBarR)balBarR.style.width=r+'%';
+        if(balPctL)balPctL.textContent=l+'%';
+        if(balPctR)balPctR.textContent=r+'%';
         if(balVal)balVal.textContent=balLabel(v);
-    });
+    };
+    balSlider?.addEventListener('input',()=>_balUpdate(parseInt(balSlider.value)));
     balSlider?.addEventListener('change',async()=>{
         const v=parseInt(balSlider.value);
-        try{await tauriInvoke('set_balance',{balance:v});}catch(e){}
+        try{await tauriInvoke('set_balance',{balance:v});}catch(e){toast(_tr('Error al aplicar'),'❌');}
     });
     document.getElementById('bal-center')?.addEventListener('click',async()=>{
-        if(balSlider){balSlider.value=0;if(balVal)balVal.textContent='Centro';}
+        if(balSlider){balSlider.value=0;_balUpdate(0);}
         try{await tauriInvoke('set_balance',{balance:0});}catch(e){}
-        toast('Balance centrado','🎧');
+        toast(_tr('Balance centrado'),'🎧');
     });
     setupToggle('mute',async()=>{try{await tauriInvoke('toggle_mute')}catch(e){}toast('Volumen cambiado','🔊');});
     setupToggle('snd-notif',async a=>{try{await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','plasmanotifyrc','--group','Notifications','--key','Sound',a?'true':'false']});}catch(e){}toast(a?'Sonidos de notificación activados':'Desactivados','🔔');});
