@@ -771,12 +771,28 @@ pub async fn buds_fit_test_start(state: tauri::State<'_, BudsState>) -> Result<S
 /// Send a desktop notification with current buds battery levels.
 /// Frontend calls this on a timer + on low-battery threshold.
 #[tauri::command]
-pub fn buds_notify_battery(left: u8, right: u8, case: u8, low: bool) -> String {
-    let title = if low { "Batería baja — Buds" } else { "Galaxy Buds" };
+pub fn buds_notify_battery(left: u8, right: u8, case: u8, low: bool, lang: Option<String>) -> String {
+    let lang = lang.unwrap_or_else(|| "en".into());
+    let es = lang == "es";
+    let title = if low {
+        if es { "Batería baja — Buds" } else { "Low battery — Buds" }
+    } else {
+        "Galaxy Buds"
+    };
     let urgency = if low { "critical" } else { "normal" };
-    let body = format!("Izda: {}%  ·  Dcha: {}%  ·  Estuche: {}%", left, right, case);
+    let body = if es {
+        format!("Izda: {}%  ·  Dcha: {}%  ·  Estuche: {}%", left, right, case)
+    } else {
+        format!("L: {}%  ·  R: {}%  ·  Case: {}%", left, right, case)
+    };
+    // Prefer our own SVG when installed, else Freedesktop fallback.
+    let icon = if std::path::Path::new("/usr/share/icons/hicolor/scalable/apps/bookos-buds.svg").exists() {
+        "bookos-buds"
+    } else {
+        "audio-headphones"
+    };
     let _ = std::process::Command::new("notify-send")
-        .args(["-u", urgency, "-i", "audio-headphones", "-a", "BookOS Settings", title, &body])
+        .args(["-u", urgency, "-i", icon, "-a", "BookOS Settings", title, &body])
         .spawn();
     r#"{"ok":true}"#.into()
 }

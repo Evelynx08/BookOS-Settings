@@ -322,7 +322,8 @@ document.addEventListener('DOMContentLoaded',async()=>{
                 const key=(l<=20?'l':'')+(r<=20?'r':'');
                 if(!_budsLowFired[key]){
                     _budsLowFired[key]=true;
-                    await tauriInvoke('buds_notify_battery',{left:l,right:r,case:ca,low:true}).catch(()=>{});
+                    const lang=localStorage.getItem('bookos_lang')||'es';
+                    await tauriInvoke('buds_notify_battery',{left:l,right:r,case:ca,low:true,lang}).catch(()=>{});
                 }
             } else {
                 // Reset trigger when batteries recover

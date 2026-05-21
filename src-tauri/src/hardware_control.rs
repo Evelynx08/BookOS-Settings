@@ -125,6 +125,37 @@ async fn set_ppd_profile(profile: &str) -> Result<(), String> {
     ).await.map_err(|e| e.to_string())
 }
 
+/// Alias used by routines/labs frontend code. Same as `aplicar_perfil_termico`.
+#[tauri::command]
+pub async fn set_fan_mode(mode: String) -> Result<String, String> {
+    aplicar_perfil_termico(mode).await
+}
+
+/// Quick snapshot of current thermal/performance state. Used by routines snapshot.
+#[tauri::command]
+pub fn check_book_hw() -> String {
+    // Read PPD profile if available, else platform_profile sysfs.
+    let ppd = std::process::Command::new("powerprofilesctl").arg("get").output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let plat = std::fs::read_to_string("/sys/firmware/acpi/platform_profile")
+        .unwrap_or_default().trim().to_string();
+    let mode = if !ppd.is_empty() { match ppd.as_str() {
+        "power-saver" => "ahorro",
+        "balanced"    => "optimizado",
+        "performance" => "rendimiento",
+        _ => "optimizado",
+    }} else { match plat.as_str() {
+        "low-power"   => "ahorro",
+        "quiet"       => "silencioso",
+        "balanced"    => "optimizado",
+        "performance" => "rendimiento",
+        _ => "optimizado",
+    }};
+    format!(r#"{{"performance_mode":"{}","ppd":"{}","platform_profile":"{}"}}"#,
+        mode, ppd, plat)
+}
+
 #[tauri::command]
 pub async fn aplicar_perfil_termico(modo: String) -> Result<String, String> {
     // (pl1_uw, pl2_uw, platform_profile value, PPD value ("" = skip PPD))

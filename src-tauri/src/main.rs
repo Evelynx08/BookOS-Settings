@@ -3054,8 +3054,25 @@ fn save_bookos_settings(v: &serde_json::Value) {
     let timer_path = format!("{}/bookos-autoupdate.timer", service_dir);
     if enable {
         let _ = fs::create_dir_all(&service_dir);
-        let service = "[Unit]\nDescription=BookOS Auto Update Check\n\n[Service]\nType=oneshot\nExecStart=/bin/sh -c 'COUNT=$(checkupdates 2>/dev/null | wc -l); [ \"$COUNT\" -gt 0 ] && notify-send \"BookOS\" \"$COUNT actualizaciones disponibles. Abre Ajustes para instalar.\" --icon=software-update-available'\n";
-        let timer = "[Unit]\nDescription=BookOS Auto Update Check Timer\n\n[Timer]\nOnCalendar=daily\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n";
+        // Pick check command per distro. Flatpak added if installed.
+        let mgr = detect_pkg_mgr();
+        let sys_cmd = match mgr {
+            "pacman"      => "checkupdates 2>/dev/null | wc -l",
+            "dnf5"|"dnf"  => "dnf check-update -q 2>/dev/null | grep -cE '^[a-zA-Z0-9]'",
+            "apt"         => "apt list --upgradable 2>/dev/null | grep -c '/'",
+            "zypper"      => "zypper -q list-updates 2>/dev/null | grep -c '^v '",
+            _             => "echo 0",
+        };
+        let flat_cmd = "command -v flatpak >/dev/null && flatpak remote-ls --updates --columns=application 2>/dev/null | wc -l || echo 0";
+        let exec = format!(
+            "/bin/sh -c 'SYS=$({}); FL=$({}); TOTAL=$((SYS+FL)); if [ \"$TOTAL\" -gt 0 ]; then notify-send \"BookOS\" \"$TOTAL updates available. Open Settings to install.\" --icon=software-update-available -a \"BookOS Settings\"; fi'",
+            sys_cmd, flat_cmd
+        );
+        let service = format!(
+            "[Unit]\nDescription=BookOS Auto Update Check\n\n[Service]\nType=oneshot\nExecStart={}\n",
+            exec
+        );
+        let timer = "[Unit]\nDescription=BookOS Auto Update Check Timer\n\n[Timer]\nOnCalendar=daily\nPersistent=true\nRandomizedDelaySec=15min\n\n[Install]\nWantedBy=timers.target\n";
         let _ = fs::write(&service_path, service);
         let _ = fs::write(&timer_path, timer);
         let _ = StdCommand::new("systemctl").args(["--user","daemon-reload"]).output();
@@ -3507,6 +3524,8 @@ fn main() {
             get_audio_devices,set_default_sink,set_default_source,get_app_audio,set_app_volume,get_sink_descriptions,
             get_location_status,set_location_enabled,run_command,launch_app,which_app,
             hardware_control::aplicar_perfil_termico,
+            hardware_control::set_fan_mode,
+            hardware_control::check_book_hw,
             hardware_control::activar_vision_booster,hardware_control::desactivar_vision_booster,
             hardware_control::activar_hdr,hardware_control::desactivar_hdr,
             hardware_control::activar_ahorro_pantalla,hardware_control::desactivar_ahorro_pantalla,

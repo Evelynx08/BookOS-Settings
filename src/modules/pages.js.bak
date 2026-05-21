@@ -502,8 +502,7 @@ const _UI_TR_EN = {
     'Estándar':'Standard',
     'Plano':'Flat',
     'Suave':'Soft',
-    // Buds EQ "Claro" preset — same Spanish word as "Light", but JS object keys must be unique.
-    // Keep theme mapping (Claro→Light) and translate Buds preset inline at call site instead.
+    'Claro':'Clear',
     'Realce de graves':'Bass Boost',
     'Realce de agudos':'Treble Boost',
     'Sonido Ambiente':'Ambient Sound',
@@ -1150,95 +1149,6 @@ const _UI_TR_EN = {
     'WiFi':'WiFi','Wi-Fi':'Wi-Fi',
     'Wi-Fi Direct':'Wi-Fi Direct',
     'Wifi · Bluetooth · Modo Avión':'WiFi · Bluetooth · Airplane',
-    'Salud':'Health',
-    'Capacidad':'Capacity',
-    'Nivel de la batería':'Battery level',
-    'Cargando':'Charging',
-    'Completa':'Full',
-    'Hoy':'Today',
-    'En uso':'In use',
-    'Uso de la batería':'Battery usage',
-    'Vista previa de texto':'Text preview',
-    'El texto del sistema se verá así':'System text will look like this',
-    'Sin sonido':'No sound',
-    'Tamaño de texto':'Text size',
-    'Tamaño del cursor':'Cursor size',
-    'Colores invertidos':'Inverted colors',
-    'Invierte los colores (KWin)':'Inverts colors (KWin)',
-    'Minimiza animaciones del compositor':'Minimize compositor animations',
-    'Servicios de ubicación':'Location services',
-    'Desactivados':'Disabled',
-    'Alta precisión':'High precision',
-    'GPS, WiFi y redes móviles':'GPS, WiFi and mobile networks',
-    'Solo WiFi y redes':'WiFi and networks only',
-    'Solo dispositivo':'Device only',
-    'Sin conexión a internet':'No internet connection',
-    'Siempre':'Always',
-    'Preguntar':'Ask',
-    'Privacidad de ubicación':'Location privacy',
-    'La ubicación exacta solo se usa para funciones que la requieran. Nunca se envía sin permiso.':'Exact location is only used for features that need it. Never sent without permission.',
-    'Nombre visible':'Display name',
-    'Nombre del equipo':'Device name',
-    'Administrador de BookOS':'BookOS administrator',
-    'Cambia la contraseña de tu cuenta':'Change your account password',
-    'Omite la pantalla de inicio de sesión al encender':'Skip login screen on startup',
-    'No hay otros usuarios en este equipo.':'No other users on this device.',
-    'Crear cuenta nueva':'Create new account',
-    'Limpiar Flatpak':'Clean Flatpak',
-    'Elimina aplicaciones sin uso':'Remove unused applications',
-    'Limpiar':'Clean',
-    'Limpiar caché de paquetes':'Clean package cache',
-    'Limpia archivos de Paru/Pacman':'Clean Paru/Pacman files',
-    'Miniaturas temporales':'Temporary thumbnails',
-    'Clear thumbnail cache':'Clear thumbnail cache',
-    'Permisos de Hardware':'Hardware permissions',
-    'Configurar':'Configure',
-    'Exportar a JSON':'Export to JSON',
-    'Exportar configuración de BookOS':'Export BookOS settings',
-    'Exportar':'Export',
-    'Importar JSON':'Import JSON',
-    'Importar configuración (requiere elegir archivo)':'Import settings (requires file selection)',
-    'Importar':'Import',
-    'Borrar':'Delete',
-    'Fondo desenfocado bajo ventanas translúcidas':'Blurred background under translucent windows',
-    'Efecto de movimiento suave al arrastrar':'Smooth motion effect when dragging',
-    'Animación al minimizar ventanas':'Animation when minimizing windows',
-    'Optimizar latencia del cursor':'Optimize cursor latency',
-    'Ajusta KWin para menor latencia de entrada':'Adjusts KWin for lower input latency',
-    'Reiniciar compositor':'Restart compositor',
-    'Útil si hay artefactos gráficos':'Useful if there are graphical artifacts',
-    'Reiniciar':'Restart',
-    'Funciones experimentales. Pueden cambiar o desaparecer en futuras versiones.':'Experimental features. May change or disappear in future versions.',
-    'Laboratorio':'Lab',
-    'Menos movimiento en la interfaz':'Less interface motion',
-    'Muestra más datos en la barra lateral':'Show more data in the sidebar',
-    'En desarrollo':'In development',
-    'Panel de productividad':'Productivity panel',
-    'Vista rápida de tareas y notas':'Quick view of tasks and notes',
-    'Gestos avanzados':'Advanced gestures',
-    'Gestos táctiles personalizados':'Custom touch gestures',
-    'Sync de ajustes':'Settings sync',
-    'Copia de seguridad en la nube':'Cloud backup',
-    'IA contextual':'Contextual AI',
-    'Sugerencias según tu uso':'Suggestions based on your usage',
-    'Sin datos de uso aún':'No usage data yet',
-    'El uso se registra cuando actives el seguimiento':'Usage is recorded when you enable tracking',
-    'Límite diario':'Daily limit',
-    'Notificación cuando se supere el objetivo':'Notification when goal is exceeded',
-    'No molestar al activar enfoque':'Do not disturb when focus is on',
-    'Silencia notificaciones en modo enfoque':'Silence notifications in focus mode',
-    'Minimiza distracciones':'Minimize distractions',
-    'Uso del dispositivo':'Device usage',
-    'Monitoriza cuánto tiempo usas cada aplicación.':'Monitor how long you use each application.',
-    'Cambiar':'Change',
-    'Sin datos':'No data',
-    'No hay datos':'No data',
-    'No hay otros usuarios':'No other users',
-    'Atajos del sistema':'System shortcuts',
-    'Asigna teclas a acciones de KDE Plasma':'Assign keys to KDE Plasma actions',
-    'Atajos personalizados':'Custom shortcuts',
-    'Crea atajos para lanzar apps':'Create shortcuts to launch apps',
-    'Guardar':'Save',
 };
 
 function _tr(str){
@@ -2107,7 +2017,7 @@ export async function renderSonido(c){
     let h=renderHeader(t('hdr_sound'));
     h+=renderSection(t('sec_volume'));
     h+=renderCard([
-        `<div class="detail-item"><span class="dt">${_tr("Volumen del sistema")}</span>${renderSlider('vol',vol)}</div>`,
+        `<div class="detail-item"><span class="dt">Volumen del sistema</span>${renderSlider('vol',vol)}</div>`,
         renderRowItem('Silenciar',muted?t('enabled'):t('disabled'),renderToggle('mute',muted)),
     ]);
     h+=renderSection('Balance de audio');
@@ -2475,21 +2385,21 @@ async function _renderBateriaContent(c){
         const _todayCSV2=_jsDayCSV2(new Date().getDay());
         const todayRows2=csvData.ok?csvData.rows.filter(r=>r.day===_todayCSV2):[];
         const healthColor=health>=80?'var(--green)':health>=60?'#ff9500':'var(--red)';
-        let chips=`<div class="bat-stat-chip"><span class="bat-stat-label">${_tr("Salud")}</span><span class="bat-stat-val" style="color:${healthColor}">${health}%</span></div>`;
+        let chips=`<div class="bat-stat-chip"><span class="bat-stat-label">Salud</span><span class="bat-stat-val" style="color:${healthColor}">${health}%</span></div>`;
         if(todayRows2.length>1){
             const levels=todayRows2.map(r=>r.level);
             const todayMin=Math.min(...levels),todayMax=Math.max(...levels);
-            chips+=`<div class="bat-stat-chip"><span class="bat-stat-label">${_tr("Hoy")}</span><span class="bat-stat-val">${todayMin}%–${todayMax}%</span></div>`;
+            chips+=`<div class="bat-stat-chip"><span class="bat-stat-label">Hoy</span><span class="bat-stat-val">${todayMin}%–${todayMax}%</span></div>`;
             // Time on battery: count discharge samples (case-insensitive) × 0.5 min (logger runs every 30s)
             const dischCount=todayRows2.filter(r=>(r.state||'').toLowerCase()==='discharging').length;
             const dischMin=Math.round(dischCount*0.5);
             if(dischMin>0){
                 const dh=Math.floor(dischMin/60),dm=dischMin%60;
                 const parts=[dh>0?`${dh}h`:'',dm>0?`${dm}m`:''].filter(Boolean).join(' ')||'0m';
-                chips+=`<div class="bat-stat-chip"><span class="bat-stat-label">${_tr("En uso")}</span><span class="bat-stat-val">${parts}</span></div>`;
+                chips+=`<div class="bat-stat-chip"><span class="bat-stat-label">En uso</span><span class="bat-stat-val">${parts}</span></div>`;
             }
         }
-        if(ef>0&&efd>0) chips+=`<div class="bat-stat-chip"><span class="bat-stat-label">${_tr("Capacidad")}</span><span class="bat-stat-val">${Math.min(ef,efd).toFixed(0)} Wh</span></div>`;
+        if(ef>0&&efd>0) chips+=`<div class="bat-stat-chip"><span class="bat-stat-label">Capacidad</span><span class="bat-stat-val">${Math.min(ef,efd).toFixed(0)} Wh</span></div>`;
         h+=`<div class="bat-stats-row">${chips}</div>`;
     }
 
@@ -2580,9 +2490,9 @@ async function _renderBateriaContent(c){
                 </div>
                 <div style="position:relative;height:18px;margin-top:4px;padding-right:28px">${xLabels}</div>
                 <div class="bat-chart-legend" style="margin-top:6px">
-                    <span><span class="chart-legend-dot" style="background:${_c.discharge}"></span>${_tr("Nivel de la batería")}</span>
-                    <span><span class="chart-legend-dot" style="background:${_c.charge}"></span>${_tr("Cargando")}</span>
-                    <span><span class="chart-legend-dot" style="background:${_c.full}"></span>${_tr("Completa")}</span>
+                    <span><span class="chart-legend-dot" style="background:${_c.discharge}"></span>Nivel de la batería</span>
+                    <span><span class="chart-legend-dot" style="background:${_c.charge}"></span>Cargando</span>
+                    <span><span class="chart-legend-dot" style="background:${_c.full}"></span>Completa</span>
                 </div>
             </div>`;
         } else {
@@ -2651,7 +2561,7 @@ async function _renderBateriaContent(c){
             }).join('');
             h+=`<div class="bat-chart" style="background:transparent;border-radius:0;margin-bottom:0">
                 <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
-                    <span class="chart-title" style="color:${_c.tx}">${_tr("Hoy")}</span>
+                    <span class="chart-title" style="color:${_c.tx}">Hoy</span>
                 </div>
                 <div style="position:relative;height:${CHART_H}px;padding-right:30px">
                     <div style="display:flex;align-items:flex-end;height:100%;gap:3px">${barDivs}</div>
@@ -2659,9 +2569,9 @@ async function _renderBateriaContent(c){
                 </div>
                 <div style="position:relative;height:18px;margin-top:4px;padding-right:30px">${xLabels}</div>
                 <div class="bat-chart-legend" style="margin-top:6px">
-                    <span><span class="chart-legend-dot" style="background:${_c.discharge}"></span>${_tr("Nivel de la batería")}</span>
+                    <span><span class="chart-legend-dot" style="background:${_c.discharge}"></span>Nivel de la batería</span>
                     <span><span class="chart-legend-dot" style="background:${_c.estimated}"></span>Nivel de batería estimado</span>
-                    <span><span class="chart-legend-dot" style="background:${_c.charge}"></span>${_tr("Cargando")}</span>
+                    <span><span class="chart-legend-dot" style="background:${_c.charge}"></span>Cargando</span>
                     <span><span class="chart-legend-dot" style="background:${_c.powerSaver}"></span>Ahorro de energía</span>
                 </div>
             </div>`;
@@ -3307,7 +3217,7 @@ export async function renderBloqueo(c){
         `<div class="detail-card">
         ${renderRowItem('Modo oscuro','Pantalla de inicio oscura o clara',renderToggle('sddm-dark',sddmCfg.variant==='dark'))}
         <div class="detail-item detail-item-row">
-            <div class="detail-texts"><span class="dt">${_tr("Fondo")}</span></div>
+            <div class="detail-texts"><span class="dt">Fondo</span></div>
             <div class="seg-ctrl" id="sddm-bg-ctrl">${bgOpts.map(([v,l])=>`<button class="seg-btn${sddmCfg.background===v?' active':''}" data-val="${v}">${l}</button>`).join('')}</div>
         </div>
         <div class="detail-item detail-item-row" id="sddm-img-row" style="display:${sddmCfg.background==='solid'?'none':'flex'}">
@@ -4277,7 +4187,7 @@ export async function renderAcerca(c){
         <button class="about-rename-btn" id="btn-rename-device">Cambiar nombre</button>
         <div class="about-rename-row" id="about-rename-row" style="display:none">
             <input type="text" class="about-rename-input" id="about-rename-input" value="${esc(i.hostname)}" placeholder="Nombre del equipo">
-            <button class="btn btn-primary btn-sm" id="about-rename-ok">${_tr("Guardar")}</button>
+            <button class="btn btn-primary btn-sm" id="about-rename-ok">Guardar</button>
             <button class="btn btn-secondary btn-sm" id="about-rename-cancel">Cancelar</button>
         </div>
     </div>`;
@@ -4361,11 +4271,11 @@ export async function renderGeneral(c){
             ${keymaps.map(k=>`<div class="res-item ${k===loc.keymap?'active':''}" data-key="${esc(k)}"><span>${esc(k)}</span></div>`).join('')}
         </div></div>`,
         `<div class="detail-item detail-item-row" style="cursor:pointer" id="open-kde-shortcuts">
-            <div class="detail-texts"><span class="dt">${_tr("Atajos del sistema")}</span><span class="ds">${_tr("Asigna teclas a acciones de KDE Plasma")}</span></div>
+            <div class="detail-texts"><span class="dt">Atajos del sistema</span><span class="ds">Asigna teclas a acciones de KDE Plasma</span></div>
             <div style="color:var(--tx2);font-size:18px">›</div>
         </div>`,
         `<div class="detail-item detail-item-row" style="cursor:pointer" id="open-custom-shortcuts">
-            <div class="detail-texts"><span class="dt">${_tr("Atajos personalizados")}</span><span class="ds">${_tr("Crea atajos para lanzar apps")}</span></div>
+            <div class="detail-texts"><span class="dt">Atajos personalizados</span><span class="ds">Crea atajos para lanzar apps</span></div>
             <div style="color:var(--tx2);font-size:18px">›</div>
         </div>`
     ]) + renderSection(t('sec_app_behavior')) + renderCard([
@@ -4476,8 +4386,8 @@ export async function renderCuentas(c){
             </div>
         </div>
     ` + renderSection(t('sec_local_data')) + renderCard([
-        `<div class="detail-item"><span class="dt">${_tr("Nombre visible")}</span><div style="display:flex;gap:8px;margin-top:8px"><input type="text" id="dn" value="${esc(u.display_name)}" class="sel" style="flex:1"><button class="btn btn-primary btn-sm" id="sn">${_tr("Guardar")}</button></div></div>`,
-        `<div class="detail-item"><span class="dt">${_tr("Nombre del equipo")}</span><div style="display:flex;gap:8px;margin-top:8px"><input type="text" id="hn" value="${esc(u.hostname)}" class="sel" style="flex:1"><button class="btn btn-primary btn-sm" id="sh">${_tr("Guardar")}</button></div></div>`
+        `<div class="detail-item"><span class="dt">Nombre visible</span><div style="display:flex;gap:8px;margin-top:8px"><input type="text" id="dn" value="${esc(u.display_name)}" class="sel" style="flex:1"><button class="btn btn-primary btn-sm" id="sn">Guardar</button></div></div>`,
+        `<div class="detail-item"><span class="dt">Nombre del equipo</span><div style="display:flex;gap:8px;margin-top:8px"><input type="text" id="hn" value="${esc(u.hostname)}" class="sel" style="flex:1"><button class="btn btn-primary btn-sm" id="sh">Guardar</button></div></div>`
     ]) + renderSection(t('sec_security')) + renderCard([
         renderRowItem('Contraseña','Cambia la contraseña de tu cuenta',`<button class="btn btn-secondary btn-sm" id="acc-change-pw">Cambiar</button>`),
         renderRowItem(
@@ -4795,24 +4705,24 @@ export async function renderFondos(c){
     h += `<div class="wp-style-row">
         <div class="wp-style-card" id="wps-dark">
             <div class="ws-icon" style="background:#1a1a2e"><svg viewBox="0 0 24 24" width="18" height="18"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" fill="white"/></svg></div>
-            <span class="ws-label">${_tr("Oscuro")}</span>
+            <span class="ws-label">Oscuro</span>
         </div>
         <div class="wp-style-card" id="wps-light">
             <div class="ws-icon" style="background:#f5f5f5"><svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="5" fill="#ffb300"/><line x1="12" y1="1" x2="12" y2="3" stroke="#ffb300" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="21" x2="12" y2="23" stroke="#ffb300" stroke-width="2" stroke-linecap="round"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64" stroke="#ffb300" stroke-width="2" stroke-linecap="round"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" stroke="#ffb300" stroke-width="2" stroke-linecap="round"/><line x1="1" y1="12" x2="3" y2="12" stroke="#ffb300" stroke-width="2" stroke-linecap="round"/><line x1="21" y1="12" x2="23" y2="12" stroke="#ffb300" stroke-width="2" stroke-linecap="round"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36" stroke="#ffb300" stroke-width="2" stroke-linecap="round"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" stroke="#ffb300" stroke-width="2" stroke-linecap="round"/></svg></div>
-            <span class="ws-label">${_tr("Claro")}</span>
+            <span class="ws-label">Claro</span>
         </div>
         <div class="wp-style-card" id="wps-wallpaper">
             <div class="ws-icon" style="background:linear-gradient(135deg,#667eea,#764ba2)"><svg viewBox="0 0 24 24" width="18" height="18"><rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="white" stroke-width="2"/><circle cx="8.5" cy="8.5" r="1.5" fill="white"/><polyline points="21 15 16 10 5 21" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"/></svg></div>
-            <span class="ws-label">${_tr("Fondo")}</span>
+            <span class="ws-label">Fondo</span>
         </div>
         <div class="wp-style-card" id="wps-palette">
             <div class="ws-icon" style="background:linear-gradient(135deg,#f093fb,#f5576c)"><svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10c.55 0 1-.45 1-1 0-.26-.1-.5-.26-.69-.38-.46-.26-1.14.28-1.44A10 10 0 0 0 12 2z" fill="white" opacity=".8"/><circle cx="6.5" cy="11.5" r="1.5" fill="#f44336"/><circle cx="9.5" cy="7.5" r="1.5" fill="#ffeb3b"/><circle cx="14.5" cy="7.5" r="1.5" fill="#4caf50"/><circle cx="17.5" cy="11.5" r="1.5" fill="#2196f3"/></svg></div>
-            <span class="ws-label">${_tr("Paleta")}</span>
+            <span class="ws-label">Paleta</span>
         </div>
     </div>`;
 
     h += renderCard([
-        `<div class="detail-item" style="cursor:pointer;text-align:center" id="btn-change-wp"><span class="dt" style="color:var(--blue)">${_tr("Cambiar fondo de pantalla")}</span></div>`
+        `<div class="detail-item" style="cursor:pointer;text-align:center" id="btn-change-wp"><span class="dt" style="color:var(--blue)">Cambiar fondo de pantalla</span></div>`
     ]);
 
     h += renderCard([
@@ -5461,11 +5371,11 @@ export async function renderSaludDigital(c){
             </svg>
             <div class="sd-hero-ring-label">
                 <span class="sd-hero-time">${hasData?(totalH>0?totalH+'h ':'')+totalM+'m':'0m'}</span>
-                <span class="sd-hero-sub">${_tr("Hoy")}</span>
+                <span class="sd-hero-sub">Hoy</span>
             </div>
         </div>
         <div class="sd-hero-info">
-            <span class="sd-hero-title">${_tr("Uso del dispositivo")}</span>
+            <span class="sd-hero-title">Uso del dispositivo</span>
             <span class="sd-hero-desc">Monitoriza cuánto tiempo usas cada aplicación.</span>
         </div>
     </div>`;
@@ -5504,7 +5414,7 @@ export async function renderSaludDigital(c){
     // Volume
     h+=renderSection(t('sec_volume_audio'));
     h+=renderCard([
-        `<div class="detail-item"><span class="dt">${_tr("Volumen del sistema")}</span>${renderSlider('sd-vol',vol)}</div>`,
+        `<div class="detail-item"><span class="dt">Volumen del sistema</span>${renderSlider('sd-vol',vol)}</div>`,
         renderRowItem('Silenciar','Sin sonido',renderToggle('sd-mute',muted))
     ]);
 
@@ -5514,7 +5424,7 @@ export async function renderSaludDigital(c){
     h+=renderCard([
         `<div class="detail-item">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-                <span class="dt">${_tr("Límite diario")}</span>
+                <span class="dt">Límite diario</span>
                 <span style="font-size:13px;color:var(--tx2)" id="sd-goal-val">${goalH>0?goalH+'h ':''} ${goalM}m</span>
             </div>
             <input type="range" class="range-input" id="sd-goal" min="30" max="720" step="30" value="${goalMin}">
@@ -5597,14 +5507,14 @@ export async function renderAccesibilidad(c){
 
     let h=renderHeader(t('hdr_accessibility'));
     h+=`<div class="acc-preview-wrap">
-        <span class="acc-preview-label">${_tr("Vista previa de texto")}</span>
-        <span class="acc-preview-text" id="acc-prev-text" style="font-size:${Math.round(14*fontPct/100)}px">${_tr("El texto del sistema se verá así")}</span>
+        <span class="acc-preview-label">Vista previa de texto</span>
+        <span class="acc-preview-text" id="acc-prev-text" style="font-size:${Math.round(14*fontPct/100)}px">El texto del sistema se verá así</span>
     </div>`;
     h+=renderSection(t('sec_vision'));
     h+=renderCard([
         `<div class="detail-item">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-                <span class="dt">${_tr("Tamaño de texto")}</span>
+                <span class="dt">Tamaño de texto</span>
                 <span style="font-size:13px;color:var(--tx2);font-variant-numeric:tabular-nums" id="font-scale-val">${fontPct}%</span>
             </div>
             <input type="range" class="range-input" id="font-scale" min="75" max="150" step="5" value="${fontPct}">
@@ -5616,7 +5526,7 @@ export async function renderAccesibilidad(c){
     h+=renderCard([
         `<div class="detail-item">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-                <span class="dt">${_tr("Tamaño del cursor")}</span>
+                <span class="dt">Tamaño del cursor</span>
                 <span style="font-size:13px;color:var(--tx2);font-variant-numeric:tabular-nums" id="cursor-val">${cursorSize}px</span>
             </div>
             <input type="range" class="range-input" id="cursor-size" min="16" max="64" step="8" value="${cursorSize}">
@@ -7359,7 +7269,7 @@ export async function renderEmergencia(c){
                 <div><label style="font-size:12px;color:var(--tx2)">Medicamentos</label><input id="med-meds" class="about-rename-input" style="margin-top:4px" value="${esc(med.meds||'')}" placeholder="Ej. Ibuprofeno"></div>
                 <div><label style="font-size:12px;color:var(--tx2)">Condiciones</label><input id="med-cond" class="about-rename-input" style="margin-top:4px" value="${esc(med.cond||'')}" placeholder="Ej. Diabetes"></div>
             </div>
-            <button class="bk-dbtn confirm" id="med-save" style="margin-top:12px;width:100%">${_tr("Guardar")}</button>
+            <button class="bk-dbtn confirm" id="med-save" style="margin-top:12px;width:100%">Guardar</button>
         </div>`
     ]);
     h+=renderSection(t('sec_emergency_contacts'));

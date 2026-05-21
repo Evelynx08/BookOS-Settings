@@ -59,6 +59,9 @@ EOF
         "$pkgdir/usr/share/icons/hicolor/256x256/apps/bookos-settings.png"
     install -Dm644 "$_src/assets/settings.svg" \
         "$pkgdir/usr/share/icons/hicolor/scalable/apps/bookos-settings.svg"
+    # Notification icons used by Rust commands (notify-send -i bookos-buds, etc.)
+    install -Dm644 "${_builddir}/src-tauri/icons/bookos-buds.svg" \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/bookos-buds.svg"
 
     # Systemd system units
     install -Dm644 "$_extra/bookos-battery-adaptive.service" \
