@@ -1239,6 +1239,18 @@ const _UI_TR_EN = {
     'Atajos personalizados':'Custom shortcuts',
     'Crea atajos para lanzar apps':'Create shortcuts to launch apps',
     'Guardar':'Save',
+    'Una vez completada la descarga, la instalación tardará aproximadamente 10 minutos.':'Once the download is complete, installation will take about 10 minutes.',
+    'Canal de actualizaciones':'Update channel',
+    'Estable':'Stable',
+    'Beta':'Beta',
+    'Developer':'Developer',
+    'Versiones probadas y recomendadas':'Tested and recommended versions',
+    'Nuevas funciones en pruebas':'New features in testing',
+    'Actualizaciones más recientes, inestables':'Most recent updates, unstable',
+    'Canal cambiado a':'Channel changed to',
+    'Elige qué tan recientes quieres las actualizaciones de BookOS.':'Choose how recent you want BookOS updates.',
+    'Actual':'Current',
+    'Aplicar':'Apply',
 };
 
 function _tr(str){
@@ -1259,8 +1271,8 @@ function renderSlider(id, value=50, min=0, max=100){
     const fill=((value-min)/(max-min))*100;
     return `<div class="slider-container"><input type="range" class="filled" id="${id}" min="${min}" max="${max}" value="${value}" style="--fill:${fill}%"><span class="slider-label" id="${id}-l">${value}%</span></div>`;
 }
-function renderHeader(title){
-    return `<div class="detail-header"><button class="back-btn" onclick="window.goBack()">←</button><h2 class="detail-title">${_tr(title)}</h2></div>`;
+function renderHeader(title, rightActions=''){
+    return `<div class="detail-header"><button class="back-btn" onclick="window.goBack()">←</button><h2 class="detail-title">${_tr(title)}</h2>${rightActions?`<div class="detail-header-actions">${rightActions}</div>`:''}</div>`;
 }
 function renderSection(title){
     return `<p class="section-header">${_tr(title)}</p>`;
@@ -3671,7 +3683,22 @@ export async function renderBloqueo(c){
         if(window._sudoModal)window._sudoModal.remove();
         const pwd=await new Promise(resolve=>{
             const d=document.createElement('div');d.className='sudo-modal-overlay';
-            d.innerHTML=`<div class="sudo-modal"><div class="sudo-icon">🖥️</div><h3 class="sudo-title">Pantalla de inicio de sesión</h3><p class="sudo-desc">Introduce la contraseña para aplicar los cambios.</p><input type="password" class="sudo-input" id="sddm-pwd" placeholder="Contraseña"><div class="sudo-btns"><button class="btn btn-secondary" id="sddm-cancel">Cancelar</button><button class="btn btn-primary" id="sddm-ok">Aplicar</button></div></div>`;
+            d.innerHTML=`<div class="sudo-modal">
+                <div class="sudo-icon-wrap">
+                    <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="11" width="18" height="11" rx="2.5"/>
+                        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                        <circle cx="12" cy="16.5" r="1.2" fill="currentColor"/>
+                    </svg>
+                </div>
+                <h3 class="sudo-title">${_tr('Pantalla de inicio de sesión')}</h3>
+                <p class="sudo-desc">${_tr('Introduce la contraseña para aplicar los cambios.')}</p>
+                <input type="password" class="sudo-input" id="sddm-pwd" placeholder="${_tr('Contraseña')}">
+                <div class="sudo-btns">
+                    <button class="btn btn-secondary" id="sddm-cancel">${_tr('Cancelar')}</button>
+                    <button class="btn btn-primary" id="sddm-ok">${_tr('Aplicar')}</button>
+                </div>
+            </div>`;
             document.body.appendChild(d);window._sudoModal=d;
             const cleanup=()=>{d.remove();window._sudoModal=null;};
             document.getElementById('sddm-cancel').onclick=()=>{cleanup();resolve(null);};
@@ -4121,6 +4148,61 @@ async function promptUpdatePassword(distro){
     return r&&r.method==='password'?r.password:null;
 }
 
+// ── Channel picker dialog (3-dot menu on Updates page) ──────────────────
+function _openChannelDialog(c, currentChannel){
+    const channels=[
+        {id:'stable', label:_tr('Estable'),   desc:_tr('Versiones probadas y recomendadas'), badge:'STABLE'},
+        {id:'beta',   label:_tr('Beta'),      desc:_tr('Nuevas funciones en pruebas'),       badge:'BETA'},
+        {id:'dev',    label:_tr('Developer'), desc:_tr('Actualizaciones más recientes, inestables'), badge:'DEV'},
+    ];
+    let selected = currentChannel;
+    const overlay=document.createElement('div');
+    overlay.className='sudo-modal-overlay';
+    overlay.innerHTML=`
+        <div class="channel-dialog">
+            <h3>${_tr('Canal de actualizaciones')}</h3>
+            <p class="ch-sub">${_tr('Elige qué tan recientes quieres las actualizaciones de BookOS.')}</p>
+            <div class="channel-list">
+                ${channels.map(ch=>`
+                    <div class="channel-opt ${ch.id===selected?'active':''}" data-ch="${ch.id}">
+                        <div class="channel-opt-icon ${ch.id}">${ch.badge}</div>
+                        <div class="channel-opt-body">
+                            <div class="channel-opt-name">
+                                ${ch.label}
+                                ${ch.id===currentChannel?`<span class="ch-current-pill">${_tr('Actual')}</span>`:''}
+                            </div>
+                            <div class="channel-opt-desc">${ch.desc}</div>
+                        </div>
+                        <div class="channel-opt-radio"></div>
+                    </div>
+                `).join('')}
+            </div>
+            <div class="channel-dialog-actions">
+                <button class="btn-close" id="ch-close">${_tr('Cancelar')}</button>
+                <button class="btn btn-primary" id="ch-save">${_tr('Aplicar')}</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const close=()=>overlay.remove();
+    overlay.addEventListener('click',e=>{ if(e.target===overlay) close(); });
+    overlay.querySelectorAll('.channel-opt').forEach(opt=>opt.addEventListener('click',()=>{
+        overlay.querySelectorAll('.channel-opt').forEach(o=>o.classList.remove('active'));
+        opt.classList.add('active');
+        selected=opt.dataset.ch;
+    }));
+    overlay.querySelector('#ch-close').addEventListener('click',close);
+    overlay.querySelector('#ch-save').addEventListener('click',async()=>{
+        close();
+        if(selected===currentChannel) return;
+        try{await tauriInvoke('set_update_channel',{channel:selected});}catch(e){}
+        try{await tauriInvoke('refresh_bookos_release',{lang:(localStorage.getItem('bookos_lang')||'es')});}catch(e){}
+        toast(_tr('Canal cambiado a')+' '+selected.charAt(0).toUpperCase()+selected.slice(1),'🔄');
+        renderActualizacion(c);
+    });
+}
+
 async function _doCheckUpdates(c){
     // Fast path: if update already running, skip checkupdates (would block on pacman lock)
     // and jump straight to progress UI
@@ -4131,20 +4213,68 @@ async function _doCheckUpdates(c){
 
     let sys={count:0,packages:[]},flat={count:0,packages:[]},aur={count:0,packages:[]},sysInfo={distro:'BookOS',kernel:''};
     let autoupd=false;
+    let release={available:false,name:'BookOS',version:'',size:'',channel:'stable',changelog:'',description:'',installed:''};
     const force=window.__forceUpdCheck===true;
     window.__forceUpdCheck=false;
-    try{[sys,flat,aur,sysInfo,autoupd]=await Promise.all([
+    // Refresh BookOS release manifest from upstream when forced or on entry if cache empty.
+    // Best-effort; doesn't block UI.
+    try{
+        if(force) await tauriInvoke('refresh_bookos_release',{lang:(localStorage.getItem('bookos_lang')||'es')});
+    }catch(e){}
+    try{[sys,flat,aur,sysInfo,autoupd,release]=await Promise.all([
         tauriInvoke('check_system_updates',{force}).then(JSON.parse).catch(()=>({count:0,packages:[]})),
         tauriInvoke('check_flatpak_updates',{force}).then(JSON.parse).catch(()=>({count:0,packages:[]})),
         tauriInvoke('check_aur_updates',{force}).then(JSON.parse).catch(()=>({count:0,packages:[]})),
         tauriInvoke('get_system_info').then(JSON.parse).catch(()=>({distro:'BookOS',kernel:''})),
-        getSetting('AutoUpdate','false').then(v=>v==='true')
+        getSetting('AutoUpdate','false').then(v=>v==='true'),
+        tauriInvoke('get_bookos_release',{lang:(localStorage.getItem('bookos_lang')||'es')}).then(JSON.parse).catch(()=>({available:false,channel:'stable'}))
     ]);}catch(e){}
     const total=sys.count+flat.count+aur.count;
 
-    // ── Up to date ──
-    if(total===0){
-        c.innerHTML=renderHeader(t('hdr_updates'))+
+    // Pick release banner background per channel + theme
+    const _isDark=document.documentElement.classList.contains('dark-mode');
+    const _bannerBg = release.channel==='dev'  ? './assets/update-dev.svg'
+                    : release.channel==='beta' ? './assets/update-beta.svg'
+                    : (_isDark ? './assets/update-stable-dark.svg' : './assets/update-stable-light.svg');
+
+    // ── Helper: BookOS release hero card (big banner with version + desc) ──
+    const _releaseDesc = esc(release.description||t('upd_includes'))
+        .replace(/\\n\\n/g,'</p><p class="release-desc">')
+        .replace(/\\n/g,'<br>');
+    const _changelogP = release.changelog
+        ? `<a class="release-changelog-link" href="${esc(release.changelog)}" target="_blank">${esc(release.changelog)}</a>`
+        : '';
+    const _releaseCard = release.available ? `
+        <div class="bookos-release-card">
+            <div class="release-hero" style="background-image:url('${_bannerBg}')">
+                <div class="release-hero-row">
+                    <img src="./assets/bookos-logo.png" class="release-hero-logo" alt="BookOS">
+                    <div class="release-hero-meta">
+                        <span class="release-hero-name">${esc(release.name)}${release.channel!=='stable'?` <span class="release-channel-chip release-channel-${esc(release.channel)}">${(release.channel||'').toUpperCase()}</span>`:''}</span>
+                        <span class="release-hero-sub">${esc(release.version)}${release.size?' &nbsp;·&nbsp; '+esc(release.size):''}</span>
+                    </div>
+                    <div class="release-hero-spacer"></div>
+                    <div class="release-hero-actions">
+                        <button class="release-btn release-btn-ghost" id="rel-night">${t('upd_night')||'Actualizar por la noche'}</button>
+                        <button class="release-btn release-btn-primary" id="rel-now">${t('upd_now')||'Actualizar ahora'}</button>
+                    </div>
+                </div>
+            </div>
+            <div class="release-body">
+                <p class="release-desc">${_releaseDesc}</p>
+                ${_changelogP}
+                <div class="release-divider"></div>
+                <p class="release-install-note">${_tr('Una vez completada la descarga, la instalación tardará aproximadamente 10 minutos.')}</p>
+            </div>
+        </div>
+    ` : '';
+
+    // ── Up to date — but maybe BookOS release pending ──
+    if(total===0 && !release.available){
+        const _menuBtnOk = `<button class="icon-btn" id="upd-menu-btn" title="${_tr('Canal de actualizaciones')}">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+        </button>`;
+        c.innerHTML=renderHeader(t('hdr_updates'),_menuBtnOk)+
         `<div class="upd-ok">
             <div class="upd-ok-icon">
                 <svg viewBox="0 0 56 56" width="56" height="56" fill="none">
@@ -4161,6 +4291,10 @@ async function _doCheckUpdates(c){
         renderSection(t('sec_options'))+
         renderCard([renderRowItem(t('upd_auto'),t('upd_auto_sub'),renderToggle('auto-upd',autoupd))]);
         document.getElementById('re-check')?.addEventListener('click',()=>{window.__forceUpdCheck=true;renderActualizacion(c);});
+        document.getElementById('upd-menu-btn')?.addEventListener('click',async()=>{
+            const cur=(await tauriInvoke('get_update_channel').then(JSON.parse).catch(()=>({channel:'stable'}))).channel;
+            _openChannelDialog(c, cur);
+        });
         setupToggle('auto-upd',async a=>{
             setSetting('AutoUpdate',a?'true':'false');
             try{await tauriInvoke('configure_auto_update',{enable:a});}catch(e){}
@@ -4169,54 +4303,54 @@ async function _doCheckUpdates(c){
         return;
     }
 
-    // ── Updates available ──
-    let h=renderHeader(t('hdr_updates'));
+    // ── BookOS release OR package updates available ──
+    const _menuBtn = `<button class="icon-btn" id="upd-menu-btn" title="${_tr('Canal de actualizaciones')}" aria-label="${_tr('Canal de actualizaciones')}">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+    </button>`;
+    let h=renderHeader(t('hdr_updates'), _menuBtn);
 
-    // Summary card
-    h+=`<div class="upd-card">
-        <div class="upd-card-icon"><img src="assets/book-os.svg" alt="BookOS"></div>
-        <div class="upd-card-body">
-            <div class="upd-card-top">
-                <div class="upd-card-info">
-                    <span class="upd-card-name">${esc(sysInfo.distro||'BookOS')}</span>
-                    <span class="upd-card-ver">${total} ${total>1?t('upd_n_avail'):t('upd_n_avail_one')}</span>
-                </div>
-            </div>
-            <p class="upd-card-desc">${t('upd_includes')}</p>
-            <div class="upd-card-sources">
-                ${sys.count?`<span class="upd-src-chip">${t('label_system')||'Sistema'} <b>${sys.count}</b></span>`:''}
-                ${flat.count?`<span class="upd-src-chip">Flatpak <b>${flat.count}</b></span>`:''}
-                ${aur.count?`<span class="upd-src-chip">AUR <b>${aur.count}</b></span>`:''}
-            </div>
-            <div class="upd-progress-wrap" id="upd-progress" style="display:none">
-                <div class="upd-progress-track"><div class="upd-progress-fill" id="upd-bar"></div></div>
-                <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px">
-                    <span class="upd-progress-label" id="upd-text">${t('upd_preparing')||'Preparando...'}</span>
-                    <button class="bk-dbtn cancel" id="upd-cancel" style="padding:4px 14px;font-size:12px;margin-left:12px">${t('cancel')||'Cancelar'}</button>
-                </div>
-            </div>
-        </div>
-    </div>`;
+    // 1) BookOS release card (hero) when available
+    h += _releaseCard;
 
     h+=renderSection(t('sec_software_installed'));
-    h+=renderCard([renderRowItem(t('label_system')||'Sistema',esc(sysInfo.distro||'BookOS'),''),renderRowItem(t('label_kernel')||'Kernel',esc(sysInfo.kernel||''),'')]);
-
-    h+=renderSection(t('sec_options'));
     h+=renderCard([
-        `<div class="detail-item detail-item-row upd-install-row" id="upd-goto-pkgs" style="cursor:pointer">
-            <div style="display:flex;flex-direction:column;gap:2px">
-                <span class="dt" style="color:var(--blue)">${t('upd_install_packages')}</span>
-                <span style="font-size:12px;color:var(--tx2)">${total} ${total>1?t('upd_n_avail'):t('upd_n_avail_one')}</span>
-            </div>
-            <svg viewBox="0 0 8 14" width="8" height="14" fill="none" style="color:var(--tx3);flex-shrink:0"><path d="M1 1l6 6-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </div>`,
-        renderRowItem(t('upd_auto'),t('upd_auto_sub'),renderToggle('auto-upd',autoupd)),
+        renderRowItem(t('label_system')||'Sistema',esc(sysInfo.distro||'BookOS'),''),
+        renderRowItem(t('label_kernel')||'Kernel',esc(sysInfo.kernel||''),'')
     ]);
+
+
+    // ── Auto-update + install packages combined card ──
+    const _autoRow = renderRowItem(t('upd_auto'),t('upd_auto_sub'),renderToggle('auto-upd',autoupd));
+    const _pkgsRow = total>0 ? `<div class="detail-item detail-item-row upd-install-row" id="upd-goto-pkgs" style="cursor:pointer">
+                <div style="display:flex;flex-direction:column;gap:2px">
+                    <span class="dt">${t('upd_install_packages')}</span>
+                    <span style="font-size:12px;color:var(--tx2)">${total} ${total>1?t('upd_n_avail'):t('upd_n_avail_one')}</span>
+                </div>
+                <svg viewBox="0 0 8 14" width="8" height="14" fill="none" style="color:var(--tx2);flex-shrink:0"><path d="M1 1l6 6-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </div>` : '';
+    h+=renderCard([_autoRow, _pkgsRow].filter(Boolean));
 
     c.innerHTML=h;
 
     document.getElementById('upd-goto-pkgs')?.addEventListener('click',()=>{
         renderUpdatesPackages(c,sys,flat,aur,sysInfo);
+    });
+    // Menu button (3 dots) → open channel picker dialog
+    document.getElementById('upd-menu-btn')?.addEventListener('click',()=>_openChannelDialog(c, release.channel || 'stable'));
+    // ── BookOS release actions ──
+    document.getElementById('rel-night')?.addEventListener('click',()=>{
+        setSetting('NightRelease',release.version||'1');
+        toast(t('upd_scheduled_night')||'Programado para esta noche');
+    });
+    document.getElementById('rel-now')?.addEventListener('click',async()=>{
+        const pwd=await promptUpdatePassword(release.name||'BookOS');
+        if(!pwd)return;
+        try{
+            const started=JSON.parse(await tauriInvoke('apply_bookos_release',{password:pwd}));
+            if(!started.ok&&!started.started)throw new Error(started.error||'Falló');
+            toast(_tr('Descargando e instalando actualizaciones...'),'⬇');
+            renderActualizacion(c);
+        }catch(e){toast('Error: '+(e.message||'Fallo'),'✕');}
     });
 
     setupToggle('auto-upd',async a=>{setSetting('AutoUpdate',a?'true':'false');try{await tauriInvoke('configure_auto_update',{enable:a});}catch(e){}toast(a?t('upd_auto_on'):t('upd_auto_off'));});

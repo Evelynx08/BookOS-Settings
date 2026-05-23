@@ -142,6 +142,261 @@ fn regex_strip_rev(s: &str) -> String {
 }
 
 // ── System Info ──────────────────────────────────────────────────────────
+/// BookOS release info — separate from package updates. Reads /etc/bookos-release.
+/// Format (key=value lines):
+///   NAME=BookOS 1.0
+///   VERSION=1.0
+///   SIZE=1 GB
+///   CHANNEL=stable    # stable | beta | dev
+///   CHANGELOG=https://bookos.es/changelog
+///   DESCRIPTION=BookOS 1.0 includes…  (single line, \n placeholder for breaks)
+///   INSTALLED=BookOS 0.2 Preview
+/// Returns sensible defaults if file missing.
+/// Default upstream releases URL. Override via /etc/bookos-update.conf line `UPSTREAM=...`.
+const DEFAULT_UPSTREAM: &str = "https://bookos.es/api/releases.json";
+
+/// Read update config. /etc/bookos-update.conf is the system default;
+/// ~/.config/bookos-update.conf overrides per-user (no sudo to switch channel).
+fn read_update_conf() -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    let mut paths: Vec<String> = vec!["/etc/bookos-update.conf".to_string()];
+    if let Ok(home) = std::env::var("HOME") {
+        paths.push(format!("{}/.config/bookos-update.conf", home));
+    }
+    for p in paths {
+        if let Ok(txt) = std::fs::read_to_string(&p) {
+            for l in txt.lines() {
+                let l = l.trim();
+                if l.is_empty() || l.starts_with('#') { continue; }
+                if let Some(eq) = l.find('=') {
+                    m.insert(l[..eq].trim().to_string(), l[eq+1..].trim().trim_matches('"').to_string());
+                }
+            }
+        }
+    }
+    m
+}
+
+/// Fetch upstream releases.json from BookOS server. Picks the latest release
+/// matching the configured CHANNEL. Returns the json text on success.
+/// Refuses to block more than 5s — safe for sync UI calls.
+async fn fetch_upstream_release(channel: &str) -> Option<serde_json::Value> {
+    let conf = read_update_conf();
+    let mut url = conf.get("UPSTREAM").cloned().unwrap_or_else(|| DEFAULT_UPSTREAM.to_string());
+    if !url.contains('?') { url.push('?'); } else { url.push('&'); }
+    url.push_str(&format!("channel={}", urlencode(channel)));
+    // Use curl since reqwest isn't in deps. -fsSL: fail on HTTP error, silent, follow redirects.
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        Command::new("curl").args(["-fsSL", "--max-time", "5", &url]).output()
+    ).await.ok()?.ok()?;
+    if !out.status.success() { return None; }
+    let body = String::from_utf8_lossy(&out.stdout);
+    serde_json::from_str::<serde_json::Value>(&body).ok()
+}
+
+fn urlencode(s: &str) -> String {
+    s.chars().map(|c| match c {
+        'a'..='z'|'A'..='Z'|'0'..='9'|'-'|'_'|'.'|'~' => c.to_string(),
+        _ => format!("%{:02X}", c as u32),
+    }).collect()
+}
+
+/// Apply BookOS release update. Fedora-only flow:
+///   sudo dnf upgrade -y bookos-meta
+/// The 'bookos-meta' RPM has Requires: for the BookOS package set; upgrading it
+/// pulls all dependencies to the manifested version.
+/// Channel-specific repos must be enabled beforehand (see /etc/yum.repos.d/bookos-*).
+#[tauri::command]
+async fn apply_bookos_release(password: String, state: tauri::State<'_, UpdateState>) -> Result<String, String> {
+    use std::io::Write;
+    {
+        let mut s = state.lock().unwrap();
+        if s.running { return Ok(r#"{"ok":false,"error":"Ya hay una actualización en curso"}"#.into()); }
+        *s = UpdateProgress { running: true, done: false, ok: false, output: "Iniciando...".into(), child_pid: None };
+    }
+    let state_clone = std::sync::Arc::clone(&state);
+    std::thread::spawn(move || {
+        // Determine current channel to know which repo group to use.
+        let channel = read_update_conf().get("CHANNEL").cloned().unwrap_or_else(|| "stable".into());
+        // Ensure the right repo is enabled; disable the others.
+        let enable_arg = format!("--enablerepo=bookos-{}", channel);
+        let disable_args: Vec<String> = ["stable","beta","dev"].iter()
+            .filter(|c| **c != channel.as_str())
+            .map(|c| format!("--disablerepo=bookos-{}", c))
+            .collect();
+
+        let mut args: Vec<String> = vec!["-k".into(), "-S".into(), "dnf".into(), "upgrade".into(), "-y".into(), "--refresh".into()];
+        args.push(enable_arg);
+        args.extend(disable_args);
+        args.push("bookos-meta".into());
+
+        let mut child = match StdCommand::new("sudo")
+            .args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    if let Ok(mut s) = state_clone.lock() {
+                        s.running = false; s.done = true; s.ok = false;
+                        s.output = format!("spawn fail: {}", e);
+                    }
+                    return;
+                }
+            };
+        if let Some(mut sin) = child.stdin.take() {
+            let _ = sin.write_all(password.as_bytes());
+            let _ = sin.write_all(b"\n");
+        }
+        if let Ok(mut s) = state_clone.lock() { s.child_pid = child.id().into(); }
+        match child.wait_with_output() {
+            Ok(o) => {
+                let combined = String::from_utf8_lossy(&o.stdout).to_string()
+                             + &String::from_utf8_lossy(&o.stderr);
+                if let Ok(mut s) = state_clone.lock() {
+                    s.running = false; s.done = true;
+                    s.ok = o.status.success();
+                    s.output = combined;
+                }
+            },
+            Err(e) => {
+                if let Ok(mut s) = state_clone.lock() {
+                    s.running = false; s.done = true; s.ok = false;
+                    s.output = format!("wait: {}", e);
+                }
+            }
+        }
+    });
+    Ok(r#"{"ok":true,"started":true}"#.into())
+}
+
+/// Get current update channel ("stable" default).
+#[tauri::command]
+fn get_update_channel() -> String {
+    let ch = read_update_conf().get("CHANNEL").cloned()
+        .or_else(|| std::fs::read_to_string("/etc/bookos-release").ok()
+            .and_then(|t| t.lines().find_map(|l| l.strip_prefix("CHANNEL=").map(|s| s.trim().to_string()))))
+        .unwrap_or_else(|| "stable".to_string());
+    format!(r#"{{"channel":"{}"}}"#, esc(&ch))
+}
+
+/// Switch update channel. Tries /etc first, falls back to user override file
+/// (~/.config/bookos-update.conf) so it works without sudo.
+#[tauri::command]
+fn set_update_channel(channel: String) -> String {
+    if !["stable","beta","dev"].contains(&channel.as_str()) {
+        return r#"{"ok":false,"error":"invalid channel"}"#.into();
+    }
+    // Read/update conf, preserving other keys
+    let mut conf = read_update_conf();
+    conf.insert("CHANNEL".to_string(), channel.clone());
+    let out: String = conf.iter().map(|(k,v)| format!("{}={}\n", k, v)).collect();
+
+    if std::fs::write("/etc/bookos-update.conf", &out).is_err() {
+        if let Ok(home) = std::env::var("HOME") {
+            let _ = std::fs::create_dir_all(format!("{}/.config", home));
+            let _ = std::fs::write(format!("{}/.config/bookos-update.conf", home), &out);
+        }
+    }
+    format!(r#"{{"ok":true,"channel":"{}"}}"#, esc(&channel))
+}
+
+#[tauri::command]
+async fn refresh_bookos_release(lang: Option<String>) -> String {
+    // Online check — fetches manifest, picks latest for current channel,
+    // writes /etc/bookos-release atomically. Requires sudo writability — if
+    // not possible (e.g. typical user), writes to ~/.config/bookos-release-cache
+    // and get_bookos_release will prefer that override when present.
+    let conf = read_update_conf();
+    let channel = conf.get("CHANNEL").cloned()
+        .or_else(|| std::fs::read_to_string("/etc/bookos-release").ok()
+            .and_then(|t| t.lines().find_map(|l| l.strip_prefix("CHANNEL=").map(|s| s.trim().to_string()))))
+        .unwrap_or_else(|| "stable".to_string());
+
+    let json = match fetch_upstream_release(&channel).await {
+        Some(j) => j,
+        None => return r#"{"ok":false,"error":"upstream unreachable"}"#.into(),
+    };
+    let latest = match json.get("by_channel").and_then(|m| m.get(&channel)).or_else(|| json.get("latest")) {
+        Some(v) => v,
+        None => return r#"{"ok":false,"error":"no release in manifest"}"#.into(),
+    };
+
+    let gs = |k: &str| -> String { latest.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string() };
+    let installed = std::fs::read_to_string("/etc/bookos-release").ok()
+        .and_then(|t| t.lines().find_map(|l| l.strip_prefix("INSTALLED=").map(|s| s.trim().to_string())))
+        .unwrap_or_default();
+
+    let new_conf = format!(
+        "NAME=BookOS {ver}\nVERSION={ver}\nSIZE={size}\nCHANNEL={ch}\nCHANGELOG={cl}\nDESCRIPTION={desc}\nDESCRIPTION_EN={desc_en}\nINSTALLED={inst}\n",
+        ver = gs("version"),
+        size = gs("size_human").is_empty().then(|| latest.get("size").and_then(|v| v.as_u64()).map(|b| format_bytes(b)).unwrap_or_default()).unwrap_or_else(|| gs("size_human")),
+        ch = channel,
+        cl = gs("changelog_url"),
+        desc = gs("notes").replace('\n', "\\n"),
+        desc_en = gs("notes_en").replace('\n', "\\n"),
+        inst = installed,
+    );
+
+    // Try /etc first (root); fallback to user cache that get_bookos_release reads.
+    if std::fs::write("/etc/bookos-release", &new_conf).is_err() {
+        if let Ok(home) = std::env::var("HOME") {
+            let _ = std::fs::create_dir_all(format!("{}/.config", home));
+            let _ = std::fs::write(format!("{}/.config/bookos-release-cache", home), &new_conf);
+        }
+    }
+    let _ = lang;
+    r#"{"ok":true}"#.into()
+}
+
+fn format_bytes(b: u64) -> String {
+    if b >= 1_000_000_000 { format!("{:.1} GB", b as f64 / 1e9) }
+    else if b >= 1_000_000 { format!("{:.0} MB", b as f64 / 1e6) }
+    else if b >= 1_000     { format!("{:.0} KB", b as f64 / 1e3) }
+    else                   { format!("{} B", b) }
+}
+
+#[tauri::command]
+fn get_bookos_release(lang: Option<String>) -> String {
+    // Prefer user cache (refresh_bookos_release writes here when /etc not writable)
+    let home = std::env::var("HOME").unwrap_or_default();
+    let user_cache = format!("{}/.config/bookos-release-cache", home);
+    let txt = if std::path::Path::new(&user_cache).exists() {
+        std::fs::read_to_string(&user_cache).unwrap_or_default()
+    } else {
+        std::fs::read_to_string("/etc/bookos-release").unwrap_or_default()
+    };
+    let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for line in txt.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') { continue; }
+        if let Some(eq) = l.find('=') {
+            map.insert(l[..eq].trim().to_string(), l[eq+1..].trim().trim_matches('"').to_string());
+        }
+    }
+    let get = |k: &str, def: &str| -> String { map.get(k).cloned().unwrap_or_else(|| def.to_string()) };
+    // Pick description per lang: DESCRIPTION_EN/_ES, fallback to DESCRIPTION.
+    let l = lang.unwrap_or_else(|| "es".to_string());
+    let desc_key = if l == "en" { "DESCRIPTION_EN" } else { "DESCRIPTION_ES" };
+    let description = if let Some(s) = map.get(desc_key) { s.clone() } else { get("DESCRIPTION","") };
+    // Same for changelog URL (optional override)
+    let cl_key = if l == "en" { "CHANGELOG_EN" } else { "CHANGELOG_ES" };
+    let changelog = if let Some(s) = map.get(cl_key) { s.clone() } else { get("CHANGELOG","") };
+    format!(
+        r#"{{"name":"{}","version":"{}","size":"{}","channel":"{}","changelog":"{}","description":"{}","installed":"{}","available":{}}}"#,
+        esc(&get("NAME","BookOS")),
+        esc(&get("VERSION","")),
+        esc(&get("SIZE","")),
+        esc(&get("CHANNEL","stable")),
+        esc(&changelog),
+        esc(&description),
+        esc(&get("INSTALLED","")),
+        if map.contains_key("VERSION") { "true" } else { "false" }
+    )
+}
+
 #[tauri::command] async fn get_system_info() -> String {
     let host = run("hostname",&[]).await;
     let kern = run("uname",&["-r"]).await;
@@ -1026,6 +1281,40 @@ async fn logout_session() -> String {
     r#"{"ok":true}"#.into()
 }
 
+/// Sync the `variant=` line of the BookOS SDDM theme.conf so the lockscreen QML
+/// (which reads that file) picks up the user's chosen light/dark mode.
+/// Requires sudo cached or polkit rule; silent no-op if not writable.
+async fn sync_sddm_variant(is_dark: bool) {
+    // Per-user override mirrors /usr/share/.../theme.conf but is writable without sudo.
+    // Lockscreen QML reads /usr/share/sddm/themes/bookos/theme.conf; we use a separate
+    // user-writable file and let the lockscreen check both. To avoid root for routine
+    // theme switches, we ALSO write to ~/.config/bookos-sddm-variant which the
+    // lockscreen reads as override.
+    let home = match std::env::var("HOME") { Ok(h) => h, Err(_) => return };
+    let user_override = format!("{}/.config/bookos-sddm-variant", home);
+    let new_variant = if is_dark { "dark" } else { "light" };
+    let _ = std::fs::write(&user_override, format!("variant={}\n", new_variant));
+
+    // Also try silent direct write to /usr/share if user already has perm (no prompt).
+    let conf_path = "/usr/share/sddm/themes/bookos/theme.conf";
+    if let Ok(cur) = std::fs::read_to_string(conf_path) {
+        let mut found = false;
+        let mut out: Vec<String> = cur.lines().map(|l| {
+            if l.starts_with("variant=") {
+                found = true;
+                format!("variant={}", new_variant)
+            } else { l.to_string() }
+        }).collect();
+        if !found { out.push(format!("variant={}", new_variant)); }
+        let new_content = out.join("\n") + "\n";
+        if new_content != cur {
+            // Only direct fs::write — no pkexec. If it fails, the per-user
+            // override above is enough for the lockscreen.
+            let _ = std::fs::write(conf_path, &new_content);
+        }
+    }
+}
+
 /// Tell running apps a theme change happened so they re-style without restart.
 /// Strictly non-invasive: only fires D-Bus signals + gsettings. Does NOT restart
 /// plasmashell, kwin, or any service.
@@ -1199,6 +1488,7 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
         apply_gtk_theme(&cfg, is_dark),
         apply_lockscreen_theme(is_dark),
     );
+    sync_sddm_variant(is_dark).await;
     notify_theme_change(is_dark).await;
     r#"{"ok":true}"#.into()
 }
@@ -1247,6 +1537,7 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
         apply_gtk_theme(&cfg, is_dark),
         apply_lockscreen_theme(is_dark),
     );
+    sync_sddm_variant(is_dark).await;
     notify_theme_change(is_dark).await;
     r#"{"ok":true}"#.into()
 }
@@ -1880,22 +2171,43 @@ fn detect_pkg_mgr() -> &'static str {
     show_date: String, show_battery: String, show_bookbar: String,
     password: String
 ) -> String {
-    use tokio::io::AsyncWriteExt;
+    use std::io::Write;
     let conf = format!(
         "[General]\nvariant={}\nbackground={}\nbgImage={}\naccentColor={}\nclockFormat={}\nclockFont={}\nblurRadius={}\nshowDate={}\nshowBattery={}\nshowBookBar={}\n",
         variant, background, bg_image, accent_color, clock_format, clock_font, blur_radius, show_date, show_battery, show_bookbar
     );
-    let mut child = Command::new("sudo")
-        .args(["-S", "tee", "/usr/share/sddm/themes/bookos/theme.conf"])
+    // Write to user tmp, then sudo-mv. Avoids password being mixed with file content.
+    let tmp = format!("/tmp/.bookos-sddm-conf-{}", std::process::id());
+    if let Err(e) = std::fs::write(&tmp, &conf) {
+        return format!(r#"{{"ok":false,"error":"tmp write: {}"}}"#, esc(&e.to_string()));
+    }
+    let script = format!(
+        "set -e; mkdir -p /usr/share/sddm/themes/bookos; mv '{}' /usr/share/sddm/themes/bookos/theme.conf; chmod 644 /usr/share/sddm/themes/bookos/theme.conf",
+        tmp
+    );
+    eprintln!("[set_sddm_config] script:\n{}", script);
+    let mut child = match StdCommand::new("sudo")
+        .args(["-k", "-S", "-p", "", "--", "sh", "-c", &script])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn().expect("spawn failed");
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(format!("{}\n{}", password, conf).as_bytes()).await;
+        .spawn() { Ok(c) => c, Err(e) => { let _ = std::fs::remove_file(&tmp); return format!(r#"{{"ok":false,"error":"spawn: {}"}}"#, esc(&e.to_string())); } };
+    if let Some(mut sin) = child.stdin.take() {
+        let _ = sin.write_all(password.as_bytes());
+        let _ = sin.write_all(b"\n");
+        drop(sin);
     }
-    let output = child.wait_with_output().await.unwrap();
-    format!(r#"{{"ok":{}}}"#, output.status.success())
+    let result = match child.wait_with_output() {
+        Ok(o) if o.status.success() => r#"{"ok":true}"#.into(),
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            eprintln!("[set_sddm_config] FAIL stderr={}", err);
+            format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&err))
+        },
+        Err(e) => format!(r#"{{"ok":false,"error":"wait: {}"}}"#, esc(&e.to_string())),
+    };
+    let _ = std::fs::remove_file(&tmp);
+    result
 }
 
 // ── BookOS lockscreen theme install/uninstall ───────────────────────────
@@ -1932,37 +2244,61 @@ fn lockscreen_source() -> Option<String> {
     use std::io::Write;
     let src = match lockscreen_source() {
         Some(s) => s,
-        None => return r#"{"ok":false,"error":"source files not found"}"#.into(),
+        None => return r#"{"ok":false,"error":"lockscreen QML stage not found at /usr/share/bookos-settings/lockscreen/ — reinstall bookos-settings"}"#.into(),
     };
-    let mut script = String::new();
-    script.push_str(&format!("mkdir -p \"{}\" && ", LOCKSCREEN_BACKUP));
+    // Verify Plasma shell dir exists
+    if !std::path::Path::new(LOCKSCREEN_DEST).is_dir() {
+        return format!(r#"{{"ok":false,"error":"Plasma shell lockscreen not found at {}"}}"#, LOCKSCREEN_DEST).into();
+    }
+    // Verify source files actually exist
+    for f in LOCKSCREEN_FILES {
+        let p = format!("{}/{}", src, f);
+        if !std::path::Path::new(&p).is_file() {
+            return format!(r#"{{"ok":false,"error":"missing source file: {}"}}"#, esc(&p)).into();
+        }
+    }
+
+    // set -e = abort on first error so we get a real error code
+    let mut script = String::from("set -e; ");
+    script.push_str(&format!("mkdir -p '{}'; ", LOCKSCREEN_BACKUP));
     for f in LOCKSCREEN_FILES {
         // Backup original if not yet backed up
         script.push_str(&format!(
-            "[ -f \"{dest}/{file}\" ] && [ ! -f \"{bk}/{file}\" ] && cp \"{dest}/{file}\" \"{bk}/{file}\"; ",
+            "if [ -f '{dest}/{file}' ] && [ ! -f '{bk}/{file}' ]; then cp '{dest}/{file}' '{bk}/{file}'; fi; ",
             dest=LOCKSCREEN_DEST, bk=LOCKSCREEN_BACKUP, file=f
         ));
-        // Copy ours over
+        // Copy ours over — required, error if missing
         script.push_str(&format!(
-            "[ -f \"{src}/{file}\" ] && cp \"{src}/{file}\" \"{dest}/{file}\"; ",
+            "cp '{src}/{file}' '{dest}/{file}'; ",
             src=src, dest=LOCKSCREEN_DEST, file=f
         ));
     }
-    script.push_str(&format!("touch \"{}/.bookos-installed\"", LOCKSCREEN_DEST));
+    script.push_str(&format!("touch '{}/.bookos-installed'", LOCKSCREEN_DEST));
+
+    eprintln!("[install_lockscreen] script:\n{}", script);
 
     let mut child = match StdCommand::new("sudo")
-        .args(["-k", "-S", "--", "sh", "-c", &script])
+        .args(["-k", "-S", "-p", "", "--", "sh", "-c", &script])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn() { Ok(c) => c, Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())) };
+        .spawn() { Ok(c) => c, Err(e) => return format!(r#"{{"ok":false,"error":"spawn: {}"}}"#, esc(&e.to_string())) };
     if let Some(mut sin) = child.stdin.take() {
-        let _ = sin.write_all(format!("{}\n", password).as_bytes());
+        let _ = sin.write_all(password.as_bytes());
+        let _ = sin.write_all(b"\n");
+        drop(sin);
     }
     match child.wait_with_output() {
-        Ok(o) if o.status.success() => r#"{"ok":true}"#.into(),
-        Ok(o) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&String::from_utf8_lossy(&o.stderr))),
-        Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+        Ok(o) if o.status.success() => {
+            eprintln!("[install_lockscreen] OK");
+            r#"{"ok":true}"#.into()
+        },
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            eprintln!("[install_lockscreen] FAIL status={:?} stderr={}", o.status, err);
+            format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&err))
+        },
+        Err(e) => format!(r#"{{"ok":false,"error":"wait: {}"}}"#, esc(&e.to_string())),
     }
 }
 
@@ -2005,31 +2341,49 @@ fn lockscreen_source() -> Option<String> {
     let dest = "/usr/share/sddm/themes/bookos";
     let staged = "/usr/share/bookos-settings/sddm-theme";
 
-    // One shell script: copy theme from staging if missing, then write SDDM config.
-    let mut script = String::new();
-    if !std::path::Path::new(dest).is_dir() {
-        if !std::path::Path::new(staged).is_dir() {
-            return r#"{"ok":false,"error":"theme staging missing at /usr/share/bookos-settings/sddm-theme — reinstall bookos-settings package"}"#.into();
-        }
-        script.push_str(&format!("mkdir -p '{}' && cp -r '{}/.' '{}/' && ", dest, staged, dest));
+    if !std::path::Path::new(staged).is_dir() && !std::path::Path::new(dest).is_dir() {
+        return r#"{"ok":false,"error":"SDDM theme stage not found at /usr/share/bookos-settings/sddm-theme — reinstall bookos-settings"}"#.into();
     }
-    script.push_str("mkdir -p /etc/sddm.conf.d && cat > /etc/sddm.conf.d/bookos-theme.conf");
+
+    // Write SDDM conf to a tmpfile owned by the user, then sudo-mv it.
+    // This avoids the cat-pipe-with-password hack.
+    let tmp_conf = format!("/tmp/.bookos-sddm-conf-{}", std::process::id());
+    let cfg = "[Theme]\nCurrent=bookos\nCursorTheme=Apple-cursors\n";
+    if let Err(e) = std::fs::write(&tmp_conf, cfg) {
+        return format!(r#"{{"ok":false,"error":"tmp write: {}"}}"#, esc(&e.to_string()));
+    }
+
+    let mut script = String::from("set -e; ");
+    if !std::path::Path::new(dest).is_dir() {
+        script.push_str(&format!("mkdir -p '{}'; cp -r '{}/.' '{}/'; ", dest, staged, dest));
+    }
+    script.push_str(&format!("mkdir -p /etc/sddm.conf.d; mv '{}' /etc/sddm.conf.d/bookos-theme.conf; chmod 644 /etc/sddm.conf.d/bookos-theme.conf", tmp_conf));
+
+    eprintln!("[install_sddm] script:\n{}", script);
 
     let mut child = match StdCommand::new("sudo")
-        .args(["-k", "-S", "--", "sh", "-c", &script])
+        .args(["-k", "-S", "-p", "", "--", "sh", "-c", &script])
         .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn() { Ok(c) => c, Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())) };
+        .spawn() { Ok(c) => c, Err(e) => { let _ = std::fs::remove_file(&tmp_conf); return format!(r#"{{"ok":false,"error":"spawn: {}"}}"#, esc(&e.to_string())); } };
     if let Some(mut sin) = child.stdin.take() {
-        // First sudo password (consumed by sudo -S), then SDDM conf piped into the final `cat >` of the script
-        let _ = sin.write_all(format!("{}\n[Theme]\nCurrent=bookos\nCursorTheme=Apple-cursors\n", password).as_bytes());
+        let _ = sin.write_all(password.as_bytes());
+        let _ = sin.write_all(b"\n");
+        drop(sin);
     }
-    match child.wait_with_output() {
+    let result = match child.wait_with_output() {
         Ok(o) if o.status.success() => r#"{"ok":true}"#.into(),
-        Ok(o) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&String::from_utf8_lossy(&o.stderr))),
-        Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
-    }
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            eprintln!("[install_sddm] FAIL stderr={}", err);
+            format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&err))
+        },
+        Err(e) => format!(r#"{{"ok":false,"error":"wait: {}"}}"#, esc(&e.to_string())),
+    };
+    // Cleanup tmpfile if still there
+    let _ = std::fs::remove_file(&tmp_conf);
+    result
 }
 
 #[tauri::command] async fn uninstall_sddm_theme(password: String) -> String {
@@ -3066,7 +3420,6 @@ fn save_bookos_settings(v: &serde_json::Value) {
     let timer_path = format!("{}/bookos-autoupdate.timer", service_dir);
     if enable {
         let _ = fs::create_dir_all(&service_dir);
-        // Pick check command per distro. Flatpak added if installed.
         let mgr = detect_pkg_mgr();
         let sys_cmd = match mgr {
             "pacman"      => "checkupdates 2>/dev/null | wc -l",
@@ -3076,9 +3429,45 @@ fn save_bookos_settings(v: &serde_json::Value) {
             _             => "echo 0",
         };
         let flat_cmd = "command -v flatpak >/dev/null && flatpak remote-ls --updates --columns=application 2>/dev/null | wc -l || echo 0";
+        // Two-tier notification:
+        //   1. If /etc/bookos-release has a new VERSION (≠ INSTALLED) → notify BookOS release
+        //   2. Always: if package updates pending → notify package count
+        // Multi-lang: ES if LANG starts with es, else EN.
+        // Icon: prefer hicolor bookos-settings, fall back to system theme.
         let exec = format!(
-            "/bin/sh -c 'SYS=$({}); FL=$({}); TOTAL=$((SYS+FL)); if [ \"$TOTAL\" -gt 0 ]; then notify-send \"BookOS\" \"$TOTAL updates available. Open Settings to install.\" --icon=software-update-available -a \"BookOS Settings\"; fi'",
-            sys_cmd, flat_cmd
+"/bin/sh -c '\
+LANG_PREFIX=$(echo \"${{LANG:-en}}\" | cut -c1-2); \
+ICON=software-update-available; \
+[ -f /usr/share/icons/hicolor/scalable/apps/bookos-settings.svg ] && ICON=bookos-settings; \
+# ── BookOS release check ─────────────────────────────────
+if [ -f /etc/bookos-release ]; then \
+  REL_VER=$(grep -m1 ^VERSION= /etc/bookos-release | cut -d= -f2-); \
+  REL_INST=$(grep -m1 ^INSTALLED= /etc/bookos-release | cut -d= -f2- | sed \"s/.*[Bb]ook[Oo][Ss][[:space:]]*//\"); \
+  REL_NAME=$(grep -m1 ^NAME= /etc/bookos-release | cut -d= -f2-); \
+  if [ -n \"$REL_VER\" ] && [ \"$REL_VER\" != \"$REL_INST\" ]; then \
+    if [ \"$LANG_PREFIX\" = \"es\" ]; then \
+      T_TITLE=\"Nueva versión de BookOS\"; \
+      T_BODY=\"$REL_NAME está disponible. Abre Ajustes para instalar.\"; \
+    else \
+      T_TITLE=\"New BookOS version\"; \
+      T_BODY=\"$REL_NAME is available. Open Settings to install.\"; \
+    fi; \
+    notify-send -u normal --icon=$ICON -a \"BookOS Settings\" \"$T_TITLE\" \"$T_BODY\"; \
+  fi; \
+fi; \
+# ── Package updates ───────────────────────────────────────
+SYS=$({sys_cmd}); FL=$({flat_cmd}); TOTAL=$((SYS+FL)); \
+if [ \"$TOTAL\" -gt 0 ]; then \
+  if [ \"$LANG_PREFIX\" = \"es\" ]; then \
+    [ \"$TOTAL\" = \"1\" ] && U_TITLE=\"1 actualización disponible\" || U_TITLE=\"$TOTAL actualizaciones disponibles\"; \
+    U_BODY=\"Abre BookOS Settings para revisar e instalar.\"; \
+  else \
+    [ \"$TOTAL\" = \"1\" ] && U_TITLE=\"1 update available\" || U_TITLE=\"$TOTAL updates available\"; \
+    U_BODY=\"Open BookOS Settings to review and install.\"; \
+  fi; \
+  notify-send -u normal --icon=$ICON -a \"BookOS Settings\" \"$U_TITLE\" \"$U_BODY\"; \
+fi'",
+            sys_cmd = sys_cmd, flat_cmd = flat_cmd
         );
         let service = format!(
             "[Unit]\nDescription=BookOS Auto Update Check\n\n[Service]\nType=oneshot\nExecStart={}\n",
@@ -3502,7 +3891,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            get_user_info,set_display_name,set_hostname,get_system_info,
+            get_user_info,set_display_name,set_hostname,get_system_info,get_bookos_release,refresh_bookos_release,get_update_channel,set_update_channel,apply_bookos_release,
             check_hw_features,set_performance_mode,set_charge_limit,set_background_throttle,predict_battery_runtime,
             get_wifi_status,toggle_wifi,get_wifi_list,connect_wifi,wifi_rescan,
             get_bluetooth_status,toggle_bluetooth,get_bluetooth_devices,connect_bluetooth,disconnect_bluetooth,bluetooth_scan,

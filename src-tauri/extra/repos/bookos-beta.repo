@@ -1,0 +1,8 @@
+[bookos-beta]
+name=BookOS Beta
+baseurl=https://bookos.es/repo/fedora/$releasever/$basearch/beta/
+enabled=0
+gpgcheck=1
+gpgkey=https://bookos.es/api/pubkey.php?type=gpg
+metadata_expire=1h
+priority=20

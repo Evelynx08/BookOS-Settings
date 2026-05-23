@@ -69,6 +69,65 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Roboto,
 .back-btn{background:0;border:0;color:var(--blue);font-size:20px;cursor:pointer;padding:4px;border-radius:8px;display:flex;align-items:center;line-height:1;transition:.12s}
 .back-btn:hover{background:var(--hov)}
 .detail-title{font-size:22px;font-weight:700;letter-spacing:-.3px}
+.detail-header-actions{margin-left:auto;display:flex;gap:6px;align-items:center}
+.detail-header-actions .icon-btn{
+    width:36px;height:36px;border-radius:50%;
+    border:none;background:var(--sbg);color:var(--tx);
+    cursor:pointer;display:flex;align-items:center;justify-content:center;
+    transition:.15s;font-family:inherit;
+}
+.detail-header-actions .icon-btn:hover{background:var(--hov);transform:scale(1.05)}
+.detail-header-actions .icon-btn:active{transform:scale(.95)}
+
+/* ── Channel picker dialog ── */
+.channel-dialog{
+    background:var(--card);border-radius:24px;padding:24px 20px 18px;
+    max-width:420px;width:90%;
+    box-shadow:0 24px 48px rgba(0,0,0,.3);
+    animation:modalPop .25s cubic-bezier(.34,1.4,.64,1);
+}
+.channel-dialog h3{font-size:18px;font-weight:700;text-align:center;margin:0 0 4px}
+.channel-dialog .ch-sub{font-size:13px;color:var(--tx2);text-align:center;margin:0 0 18px;line-height:1.45}
+.channel-list{display:flex;flex-direction:column;gap:8px}
+.channel-opt{
+    display:flex;align-items:center;gap:14px;
+    padding:14px 16px;border-radius:16px;
+    border:1.5px solid var(--brd);
+    cursor:pointer;transition:.15s;
+    background:transparent;
+}
+.channel-opt:hover{background:var(--hov)}
+.channel-opt.active{border-color:var(--blue);background:color-mix(in srgb,var(--blue) 8%,transparent)}
+.channel-opt-icon{
+    width:42px;height:42px;border-radius:12px;flex-shrink:0;
+    display:flex;align-items:center;justify-content:center;
+    color:#fff;font-weight:700;font-size:11px;letter-spacing:.5px;
+}
+.channel-opt-icon.stable{background:linear-gradient(135deg,#34c759,#30a050)}
+.channel-opt-icon.beta{background:linear-gradient(135deg,#ff9500,#ff6b00)}
+.channel-opt-icon.dev{background:linear-gradient(135deg,#ff3b30,#c41e3a)}
+.channel-opt-body{flex:1;min-width:0}
+.channel-opt-name{font-size:15px;font-weight:600;color:var(--tx);display:flex;align-items:center;gap:8px}
+.channel-opt-name .ch-current-pill{
+    font-size:9px;font-weight:700;letter-spacing:.4px;
+    background:var(--blue);color:#fff;
+    padding:2px 7px;border-radius:8px;
+}
+.channel-opt-desc{font-size:12px;color:var(--tx2);margin-top:2px;line-height:1.4}
+.channel-opt-radio{
+    width:22px;height:22px;border-radius:50%;
+    border:2px solid var(--brd);flex-shrink:0;
+    display:flex;align-items:center;justify-content:center;
+    transition:.15s;
+}
+.channel-opt.active .channel-opt-radio{border-color:var(--blue);background:var(--blue)}
+.channel-opt.active .channel-opt-radio::after{
+    content:"";width:8px;height:8px;border-radius:50%;background:#fff;
+}
+.channel-dialog-actions{display:flex;gap:8px;margin-top:16px}
+.channel-dialog-actions button{flex:1;height:42px;border-radius:12px;font-size:14px;font-weight:600;border:0;cursor:pointer;font-family:inherit;transition:.15s}
+.channel-dialog-actions .btn-close{background:var(--sbg);color:var(--tx)}
+.channel-dialog-actions .btn-close:hover{background:var(--hov)}
 .empty-state{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--tx2);font-size:14px;gap:14px}
 .empty-icon{width:56px;height:56px;opacity:.25}
 
@@ -403,8 +462,10 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 .sudo-modal{background:var(--card);border-radius:26px;padding:28px 24px 20px;max-width:340px;width:90%;display:flex;flex-direction:column;align-items:stretch;gap:10px;box-shadow:0 24px 48px rgba(0,0,0,.3);animation:modalPop .25s cubic-bezier(.34,1.4,.64,1)}
 @keyframes modalPop{from{opacity:0;transform:scale(.92) translateY(12px)}to{opacity:1;transform:scale(1) translateY(0)}}
 .sudo-icon{font-size:38px;margin-bottom:2px;text-align:center}
-.sudo-title{font-size:17px;font-weight:700;text-align:center}
-.sudo-desc{font-size:13px;color:var(--tx2);text-align:center;line-height:1.45}
+.sudo-icon-wrap{width:56px;height:56px;border-radius:50%;background:var(--sbg);color:var(--blue);display:flex;align-items:center;justify-content:center;margin:0 auto 4px;box-shadow:0 0 0 1px var(--brd) inset}
+.sudo-title{font-size:18px;font-weight:700;text-align:center;margin:2px 0 0}
+.sudo-desc{font-size:13px;color:var(--tx2);text-align:center;line-height:1.45;margin:0 0 8px}
+.sudo-btns .btn{flex:1;height:42px;border-radius:12px;font-size:14px;font-weight:600}
 .sudo-pw-wrap{position:relative;width:100%}
 .sudo-input{width:100%;height:48px;background:var(--sbg);border:1.5px solid transparent;border-radius:14px;padding:0 44px 0 16px;font-size:15px;color:var(--tx);outline:0;font-family:inherit;transition:border-color .15s;box-sizing:border-box}
 .sudo-input:focus{border-color:var(--blue)}
@@ -783,7 +844,133 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 .upd-recheck:hover{background:var(--hov)}
 
 /* Update card (macOS-style icon left + body right) */
+/* ─── BookOS release card (BookOS 1.0 hero) ───────────────── */
+.bookos-release-card{
+    background: var(--card);
+    border-radius: 25px;
+    overflow: hidden;
+    margin-bottom: 18px;
+}
+.release-hero{
+    position: relative;
+    padding: 18px 20px;
+    background-size: cover;
+    background-position: center;
+    background-color: #1a0d4d;
+    color: #fff;
+    min-height: 110px;
+    display: flex;
+    align-items: center;
+}
+.release-hero-row{
+    display: flex; align-items: center; gap: 14px; width: 100%;
+    position: relative; z-index: 1;
+}
+.release-hero-logo{
+    width: 84px; height: 84px;
+    object-fit: contain;
+    filter: drop-shadow(0 3px 10px rgba(0,0,0,0.35));
+    flex-shrink: 0;
+}
+.release-hero-meta{display:flex;flex-direction:column;gap:2px;min-width:0}
+.release-hero-name{font-size:22px;font-weight:700;letter-spacing:-.4px;text-shadow:0 1px 8px rgba(0,0,0,0.35)}
+.release-hero-sub{font-size:13px;opacity:.88;text-shadow:0 1px 4px rgba(0,0,0,0.35)}
+.release-hero-spacer{flex:1}
+.release-hero-actions{display: flex; gap: 10px; flex-shrink: 0}
+.release-btn{
+    border: 0; border-radius: 14px; padding: 10px 18px;
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    transition: .15s; font-family: inherit; white-space: nowrap;
+}
+.release-btn-ghost{
+    background: rgba(255,255,255,0.18);
+    border: 1px solid rgba(255,255,255,0.28);
+    color: #fff;
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+}
+.release-btn-ghost:hover{background: rgba(255,255,255,0.26)}
+.release-btn-primary{
+    background: #fff;
+    color: #2d1370;
+}
+.release-btn-primary:hover{background:#f5f0ff;transform:translateY(-1px)}
+.release-body{padding: 18px 22px 18px}
+.release-desc{
+    font-size: 14px;
+    color: var(--tx);
+    line-height: 1.55;
+    margin: 0 0 12px;
+}
+.release-changelog-link{
+    color: var(--blue);
+    font-size: 14px;
+    text-decoration: none;
+    word-break: break-all;
+}
+.release-changelog-link:hover{text-decoration: underline}
+.release-divider{
+    height: 1px;
+    background: var(--div);
+    margin: 14px 0 12px;
+}
+.release-install-note{
+    font-size: 12px;
+    color: var(--tx2);
+    margin: 0;
+    line-height: 1.5;
+}
+.release-channel-chip{
+    display: inline-block;
+    font-size: 10px; font-weight: 700; letter-spacing: 0.5px;
+    padding: 2px 8px;
+    border-radius: 8px;
+    vertical-align: middle;
+    margin-left: 6px;
+    text-transform: uppercase;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+}
+.release-channel-beta{ background: #ff9500; color: #fff; }
+.release-channel-dev{  background: #ff3b30; color: #fff; }
+.release-channel-stable{ background: #34c759; color: #fff; }
+
 .upd-card{display:flex;gap:16px;background:var(--card);border-radius:25px;padding:20px 20px 20px 18px;margin-bottom:16px;align-items:flex-start}
+/* Vibrant variant for "updates available" — BookOS iOS style with aurora gradient.
+   Triggered by adding .upd-card-vibrant class when total > 0. */
+.upd-card-vibrant{
+    background: linear-gradient(135deg, #1a0d4d 0%, #3b2178 32%, #6b3fb8 64%, #2d6bff 100%);
+    color: #fff;
+    box-shadow: 0 12px 36px -8px rgba(107, 63, 184, 0.45), 0 2px 8px rgba(45, 107, 255, 0.25);
+    position: relative; overflow: hidden;
+}
+.upd-card-vibrant::before{
+    /* glossy highlight top */
+    content:""; position:absolute; inset:0;
+    background: radial-gradient(120% 60% at 20% 0%, rgba(167,139,250,0.35), transparent 50%),
+                radial-gradient(80% 50% at 90% 100%, rgba(45,107,255,0.30), transparent 60%);
+    pointer-events:none;
+}
+.upd-card-vibrant > *{position:relative;z-index:1}
+.upd-card-vibrant .upd-card-icon{
+    background: rgba(255,255,255,0.14);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.18) inset;
+}
+.upd-card-vibrant .upd-card-name{color:#fff}
+.upd-card-vibrant .upd-card-ver{
+    display:inline-block; margin-top:4px;
+    background: rgba(255,255,255,0.18);
+    border: 1px solid rgba(255,255,255,0.25);
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    color:#e0d4ff; padding:3px 10px; border-radius:10px;
+    font-size:11px; font-weight:600; letter-spacing:.2px;
+}
+.upd-card-vibrant .upd-card-desc{color:rgba(255,255,255,0.78)}
+.upd-card-vibrant .upd-src-chip{
+    background: rgba(255,255,255,0.16);
+    border:1px solid rgba(255,255,255,0.20);
+    color:#fff;
+}
+.upd-card-vibrant .upd-src-chip b{color:#a78bfa}
 .upd-card-icon{flex-shrink:0;width:54px;height:54px;border-radius:16px;overflow:hidden;background:var(--sbg);display:flex;align-items:center;justify-content:center}
 .upd-card-icon img{width:54px;height:54px;object-fit:contain}
 .upd-card-body{flex:1;min-width:0}

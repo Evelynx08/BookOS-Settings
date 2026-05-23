@@ -38,23 +38,39 @@ SessionManagementScreen {
     }
 
     // ── Read SDDM theme.conf so lockscreen matches what user picked in app ──
+    // User override at ~/.config/bookos-sddm-variant takes precedence (set by
+    // BookOS Settings when theme switches, no sudo required).
     property var themeConf: ({})
-    function readSddmConf() {
+    function _readFile(url) {
         try {
             var xhr = new XMLHttpRequest()
-            xhr.open("GET", "file:///usr/share/sddm/themes/bookos/theme.conf", false)
+            xhr.open("GET", url, false)
             xhr.send()
-            var lines = (xhr.responseText || "").split("\n")
-            var out = {}
-            for (var i = 0; i < lines.length; i++) {
-                var l = lines[i].trim()
-                if (l === "" || l[0] === "#" || l[0] === "[") continue
-                var eq = l.indexOf("=")
-                if (eq <= 0) continue
-                out[l.substring(0, eq).trim()] = l.substring(eq + 1).trim()
-            }
-            themeConf = out
-        } catch(e) { themeConf = {} }
+            return xhr.responseText || ""
+        } catch(e) { return "" }
+    }
+    function _parseConf(text) {
+        var out = {}
+        var lines = text.split("\n")
+        for (var i = 0; i < lines.length; i++) {
+            var l = lines[i].trim()
+            if (l === "" || l[0] === "#" || l[0] === "[") continue
+            var eq = l.indexOf("=")
+            if (eq <= 0) continue
+            out[l.substring(0, eq).trim()] = l.substring(eq + 1).trim()
+        }
+        return out
+    }
+    function readSddmConf() {
+        var sys = _parseConf(_readFile("file:///usr/share/sddm/themes/bookos/theme.conf"))
+        // Per-user override file
+        var home = (typeof kscreenlocker_userName !== "undefined") ? "/home/" + kscreenlocker_userName : ""
+        if (home !== "") {
+            var override = _parseConf(_readFile("file://" + home + "/.config/bookos-sddm-variant"))
+            // Override keys take precedence
+            for (var k in override) sys[k] = override[k]
+        }
+        themeConf = sys
     }
     Component.onCompleted: readSddmConf()
 

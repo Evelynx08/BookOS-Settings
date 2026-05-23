@@ -1,0 +1,12 @@
+// BookOS — Allow members of the 'wheel' group to write the SDDM theme.conf
+// without a Polkit prompt. Used by BookOS Settings to sync the lockscreen
+// variant (light/dark) with the user's chosen theme.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.policykit.exec" &&
+        subject.isInGroup("wheel")) {
+        var cmd = action.lookup("command_line") || "";
+        if (cmd.indexOf("/usr/share/sddm/themes/bookos/theme.conf") >= 0) {
+            return polkit.Result.YES;
+        }
+    }
+});

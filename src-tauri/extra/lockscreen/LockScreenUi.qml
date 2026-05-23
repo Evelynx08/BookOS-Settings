@@ -201,24 +201,36 @@ Item {
         }
 
         // Clock — SDDM style: top center
-        // Read SDDM theme.conf — share config with login screen
+        // Read SDDM theme.conf — share config with login screen.
+        // Per-user override at ~/.config/bookos-sddm-variant takes precedence (no sudo needed).
         property var sddmConf: ({})
-        function readSddmConf() {
+        function _lsReadFile(url) {
             try {
                 var xhr = new XMLHttpRequest()
-                xhr.open("GET", "file:///usr/share/sddm/themes/bookos/theme.conf", false)
-                xhr.send()
-                var lines = (xhr.responseText || "").split("\n")
-                var out = {}
-                for (var i = 0; i < lines.length; i++) {
-                    var l = lines[i].trim()
-                    if (l === "" || l[0] === "#" || l[0] === "[") continue
-                    var eq = l.indexOf("=")
-                    if (eq <= 0) continue
-                    out[l.substring(0, eq).trim()] = l.substring(eq + 1).trim()
-                }
-                sddmConf = out
-            } catch(e) { sddmConf = {} }
+                xhr.open("GET", url, false); xhr.send()
+                return xhr.responseText || ""
+            } catch(e) { return "" }
+        }
+        function _lsParseConf(text) {
+            var out = {}
+            var lines = text.split("\n")
+            for (var i = 0; i < lines.length; i++) {
+                var l = lines[i].trim()
+                if (l === "" || l[0] === "#" || l[0] === "[") continue
+                var eq = l.indexOf("=")
+                if (eq <= 0) continue
+                out[l.substring(0, eq).trim()] = l.substring(eq + 1).trim()
+            }
+            return out
+        }
+        function readSddmConf() {
+            var sys = _lsParseConf(_lsReadFile("file:///usr/share/sddm/themes/bookos/theme.conf"))
+            var home = (typeof kscreenlocker_userName !== "undefined") ? "/home/" + kscreenlocker_userName : ""
+            if (home !== "") {
+                var override = _lsParseConf(_lsReadFile("file://" + home + "/.config/bookos-sddm-variant"))
+                for (var k in override) sys[k] = override[k]
+            }
+            sddmConf = sys
         }
 
         readonly property bool conf_isDark: (sddmConf.variant || "dark") !== "light"

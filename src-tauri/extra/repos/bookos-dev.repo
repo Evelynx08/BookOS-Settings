@@ -1,0 +1,8 @@
+[bookos-dev]
+name=BookOS Developer
+baseurl=https://bookos.es/repo/fedora/$releasever/$basearch/dev/
+enabled=0
+gpgcheck=1
+gpgkey=https://bookos.es/api/pubkey.php?type=gpg
+metadata_expire=30m
+priority=30
