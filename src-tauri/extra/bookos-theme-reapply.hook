@@ -1,0 +1,13 @@
+# Re-apply the BookOS lockscreen patch whenever plasma-workspace is (re)installed
+# or upgraded, since those updates overwrite the patched shell lockscreen QML.
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = plasma-workspace
+
+[Action]
+Description = Re-applying BookOS lockscreen patch...
+When = PostTransaction
+Exec = /usr/lib/bookos/bookos-reapply-theme.sh
+NeedsTargets

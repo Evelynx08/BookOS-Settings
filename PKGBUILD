@@ -1,6 +1,6 @@
 # Maintainer: Jose <josrebe333@gmail.com>
 pkgname=bookos-settings
-pkgver=0.4.2
+pkgver=0.5.0
 pkgrel=1
 pkgdesc="BookOS Settings — settings application for KDE Plasma (Samsung Galaxy Book / BookOS)"
 arch=('x86_64')
@@ -18,18 +18,17 @@ optdepends=(
 )
 makedepends=('rust' 'cargo' 'protobuf' 'git')
 
-source=("${pkgname}::git+https://github.com/Evelynx08/BookOS-Settings.git#tag=v${pkgver}")
-sha256sums=('SKIP')
+source=()
+sha256sums=()
 
 build() {
-    cd "${pkgname}/src-tauri"
-    # cargo build is enough — no tauri CLI needed, frontend ya está en src/
-    cargo build --release --locked
+    cd "${startdir}/src-tauri"
+    cargo build --release
 }
 
 package() {
     # Definimos las rutas relativas al directorio de compilación
-    local _builddir="${srcdir}/${pkgname}"
+    local _builddir="${startdir}"
     local _bin="${_builddir}/src-tauri/target/release"
     local _extra="${_builddir}/src-tauri/extra"
     local _search="${_builddir}/src-tauri/extra/search"
@@ -108,6 +107,13 @@ EOF
         "$pkgdir/usr/lib/bookos/bookos-register-shortcut.sh"
     install -Dm755 "$_extra/bookos-toggle-as-user.sh" \
         "$pkgdir/usr/lib/bookos/bookos-toggle-as-user.sh"
+    install -Dm755 "$_extra/scripts/bookos-reapply-theme.sh" \
+        "$pkgdir/usr/lib/bookos/bookos-reapply-theme.sh"
+
+    # pacman hook: re-apply the lockscreen patch after plasma-workspace upgrades
+    # (Plasma overwrites the patched shell QML, reverting the BookOS lockscreen).
+    install -Dm644 "$_extra/bookos-theme-reapply.hook" \
+        "$pkgdir/usr/share/libalpm/hooks/95-bookos-theme-reapply.hook"
 
     # BookOS lockscreen QML — installed by the app (toggle in Settings)
     for f in MainBlock.qml LockScreenUi.qml BookBar.qml MediaControls.qml; do

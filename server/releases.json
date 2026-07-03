@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "generated_at": "2026-06-24T00:00:00+00:00",
+  "channels": ["stable", "beta", "dev"],
+
+  "_comment": "Served at https://bookos.es/api/releases.json. Client appends ?channel=<stable|beta|dev>. It reads by_channel[<channel>] (canonical object form), falling back to releases[] or latest. Each release MUST have `version` (drives the update check vs INSTALLED= in /etc/bookos-release) and size_human|size, changelog_url, notes, notes_en. `version` must match the bookos-meta RPM published in that channel repo. STATE: dev = 0.6.1 (the channel being published). stable/beta stay at 0.6 until their 0.6.1 RPMs are signed+published — bumping a channel here before its repo has the matching version makes devices see an update that fails to install. `size`/`size_human` is the download shown in Settings; set it to the real delta of the bookos-* packages the dnf upgrade pulls.",
+
+  "by_channel": {
+    "stable": {
+      "channel": "stable",
+      "version": "0.6",
+      "size_human": "1.2 GB",
+      "size": 1288490188,
+      "changelog_url": "https://bookos.es/changelog/0.6",
+      "notes": "BookOS 0.6.\\n• Rediseño cohesivo del escritorio (estilo macOS)\\n• Nuevo centro de control y Ajustes\\n• Widgets integrados en el set de release\\n• Mejoras de batería y rendimiento",
+      "notes_en": "BookOS 0.6.\\n• Cohesive desktop redesign (macOS-style)\\n• New control center and Settings\\n• Widgets pinned into the release set\\n• Battery and performance improvements"
+    },
+    "beta": {
+      "channel": "beta",
+      "version": "0.6",
+      "size_human": "1.2 GB",
+      "size": 1288490188,
+      "changelog_url": "https://bookos.es/changelog/0.6-beta",
+      "notes": "BookOS 0.6 beta.\\n• Mismas novedades que stable, antes de tiempo\\n• Posibles inestabilidades",
+      "notes_en": "BookOS 0.6 beta.\\n• Same features as stable, ahead of time\\n• Possible instabilities"
+    },
+    "dev": {
+      "channel": "dev",
+      "version": "0.6.1",
+      "size_human": "250 MB",
+      "size": 262144000,
+      "changelog_url": "https://bookos.es/changelog/dev",
+      "notes": "BookOS 0.6.1 (dev).\\n• Panel y dock corregidos (alturas, ajuste/relleno, flotante)\\n• Widgets se instalan de forma fiable\\n• Repositorios firmados (actualizaciones verificadas)\\n• Instalador en español + correcciones varias",
+      "notes_en": "BookOS 0.6.1 (dev).\\n• Panel and dock fixed (heights, fit/fill, floating)\\n• Widgets install reliably\\n• Signed repositories (verified updates)\\n• Spanish installer + assorted fixes"
+    }
+  },
+
+  "releases": [
+    { "channel": "stable", "version": "0.6", "size_human": "1.2 GB", "changelog_url": "https://bookos.es/changelog/0.6", "notes": "BookOS 0.6.", "notes_en": "BookOS 0.6." },
+    { "channel": "beta",   "version": "0.6", "size_human": "1.2 GB", "changelog_url": "https://bookos.es/changelog/0.6-beta", "notes": "BookOS 0.6 beta.", "notes_en": "BookOS 0.6 beta." },
+    { "channel": "dev",    "version": "0.6.1", "size_human": "250 MB", "changelog_url": "https://bookos.es/changelog/dev", "notes": "BookOS 0.6.1 dev.", "notes_en": "BookOS 0.6.1 dev." }
+  ]
+}

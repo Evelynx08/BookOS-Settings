@@ -2,16 +2,20 @@
 # BookOS battery CSV logger
 # Appends one row to /var/log/bookos/battery.csv every time it runs.
 # Designed to be called by a systemd timer every 30 seconds.
-# Format: dia_semana,hora,minuto,nivel,estado,power_uw
+# Android-style event logging: a row is written when the level or the charge
+# state changes; otherwise a heartbeat row every HEARTBEAT seconds keeps the
+# timeline alive without bloating the file.
+# Format: dia_semana,hora,minuto,nivel,estado,power_uw,ts
 # dia_semana: 1=Mon ... 7=Sun (matches JS getDay() converted)
 
 CSV="/var/log/bookos/battery.csv"
-MAXLINES=60000   # keep ~3 weeks of 30-sec samples
+MAXLINES=60000   # keep weeks of event samples
+HEARTBEAT=300    # max seconds between rows when nothing changes
 
 # Ensure directory and file exist with header
 mkdir -p /var/log/bookos
 if [ ! -f "$CSV" ]; then
-    echo "dia_semana,hora,minuto,nivel,estado,power_uw" > "$CSV"
+    echo "dia_semana,hora,minuto,nivel,estado,power_uw,ts" > "$CSV"
 fi
 
 # Read battery info
@@ -32,8 +36,18 @@ POWER=$(( _CUR * _VOL / 1000000 ))
 DOW=$(date +%u)
 HOUR=$(date +%H | sed 's/^0//')
 MIN=$(date +%M | sed 's/^0//')
+TS=$(date +%s)
 
-echo "$DOW,$HOUR,$MIN,$LEVEL,$STATUS,$POWER" >> "$CSV"
+# Event-based dedupe: skip if level and state are unchanged and the last row
+# is younger than HEARTBEAT (mirrors Android's batterystats event recording).
+LAST=$(tail -n 1 "$CSV")
+IFS=',' read -r _ _ _ L_LVL L_ST _ L_TS <<< "$LAST"
+if [ "$L_LVL" = "$LEVEL" ] && [ "$L_ST" = "$STATUS" ] && [ -n "$L_TS" ]; then
+    AGE=$(( TS - L_TS ))
+    [ "$AGE" -ge 0 ] && [ "$AGE" -lt "$HEARTBEAT" ] && exit 0
+fi
+
+echo "$DOW,$HOUR,$MIN,$LEVEL,$STATUS,$POWER,$TS" >> "$CSV"
 
 # Trim to MAXLINES (keep header + last MAXLINES-1 data rows)
 LINES=$(wc -l < "$CSV")

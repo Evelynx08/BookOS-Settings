@@ -2,4 +2,4 @@ pkg/
 src-tauri/target/
 src-tauri/gen/
 *.tar.gz
-*.log
+*.logsrc/modules/*.bak

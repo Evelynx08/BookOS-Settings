@@ -226,10 +226,18 @@ async fn apply_bookos_release(password: String, state: tauri::State<'_, UpdateSt
             .map(|c| format!("--disablerepo=bookos-{}", c))
             .collect();
 
-        let mut args: Vec<String> = vec!["-k".into(), "-S".into(), "dnf".into(), "upgrade".into(), "-y".into(), "--refresh".into()];
-        args.push(enable_arg);
-        args.extend(disable_args);
-        args.push("bookos-meta".into());
+        // Build the dnf upgrade command (channel repos toggled).
+        let mut dnf = format!("dnf upgrade -y --refresh {}", enable_arg);
+        for d in &disable_args { dnf.push(' '); dnf.push_str(d); }
+        dnf.push_str(" bookos-meta");
+        // Take a btrfs snapshot first (rollback safety net) unless the user set
+        // SnapshotPolicy=never. If snapper isn't present it's a no-op. Run both
+        // under one sudo so the password is asked once.
+        let snap = if should_snapshot(false) {
+            "snapper -c root create -d 'Antes de actualizar BookOS' 2>/dev/null; "
+        } else { "" };
+        let shell_cmd = format!("{}{}", snap, dnf);
+        let args: Vec<String> = vec!["-k".into(), "-S".into(), "sh".into(), "-c".into(), shell_cmd];
 
         let mut child = match StdCommand::new("sudo")
             .args(&args)
@@ -255,6 +263,16 @@ async fn apply_bookos_release(password: String, state: tauri::State<'_, UpdateSt
             Ok(o) => {
                 let combined = String::from_utf8_lossy(&o.stdout).to_string()
                              + &String::from_utf8_lossy(&o.stderr);
+                // On success, stamp INSTALLED to the version we just upgraded to
+                // so the "update available" check clears (bug: it never updated).
+                if o.status.success() {
+                    let installed_ver = std::fs::read_to_string("/etc/bookos-release").ok()
+                        .or_else(|| std::env::var("HOME").ok()
+                            .and_then(|h| std::fs::read_to_string(format!("{}/.config/bookos-release-cache", h)).ok()))
+                        .and_then(|t| t.lines().find_map(|l| l.strip_prefix("VERSION=").map(|s| s.trim().to_string())))
+                        .unwrap_or_default();
+                    if !installed_ver.is_empty() { mark_installed(&installed_ver); }
+                }
                 if let Ok(mut s) = state_clone.lock() {
                     s.running = false; s.done = true;
                     s.ok = o.status.success();
@@ -270,6 +288,76 @@ async fn apply_bookos_release(password: String, state: tauri::State<'_, UpdateSt
         }
     });
     Ok(r#"{"ok":true,"started":true}"#.into())
+}
+
+/// Whether to take a snapshot, per SnapshotPolicy setting.
+/// "never" → no. "packages" → on both package + OS updates. "osupdate"
+/// (default) → only on OS release upgrades.
+fn should_snapshot(is_packages: bool) -> bool {
+    let policy = load_bookos_settings().get("SnapshotPolicy")
+        .and_then(|v| v.as_str()).unwrap_or("osupdate").to_string();
+    match policy.as_str() {
+        "never" => false,
+        "packages" => true,
+        _ => !is_packages,
+    }
+}
+
+/// Is this system capable of snapshots? (root on btrfs + snapper present)
+#[tauri::command]
+async fn get_snapshot_support() -> String {
+    let fs = Command::new("findmnt").args(["-n","-o","FSTYPE","/"]).output().await
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    let snapper = Command::new("sh").args(["-c","command -v snapper >/dev/null"]).output().await
+        .map(|o| o.status.success()).unwrap_or(false);
+    format!(r#"{{"supported":{},"fs":"{}","snapper":{}}}"#, fs=="btrfs" && snapper, esc(&fs), snapper)
+}
+
+/// List btrfs/snapper snapshots (rollback points). Returns [] if snapper
+/// isn't installed or the system isn't on btrfs.
+#[tauri::command]
+async fn list_bookos_snapshots() -> String {
+    let out = match Command::new("snapper").args(["-c","root","--machine-readable","csv","list"]).output().await {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return "[]".into(),
+    };
+    // CSV header first; columns include number, date, description.
+    let mut items: Vec<String> = Vec::new();
+    for (i, line) in out.lines().enumerate() {
+        if i == 0 || line.trim().is_empty() { continue; }
+        let cols: Vec<&str> = line.split(',').collect();
+        // snapper csv: config,subvolume,number,default,active,date,user,cleanup,description,...
+        let num  = cols.get(2).map(|s| s.trim()).unwrap_or("");
+        let date = cols.get(5).map(|s| s.trim()).unwrap_or("");
+        let desc = cols.get(8).map(|s| s.trim()).unwrap_or("");
+        if num.is_empty() || num == "0" { continue; }
+        items.push(format!(r#"{{"number":"{}","date":"{}","description":"{}"}}"#, esc(num), esc(date), esc(desc)));
+    }
+    format!("[{}]", items.join(","))
+}
+
+/// Roll the system back to a snapshot (needs reboot to take effect).
+#[tauri::command]
+async fn rollback_bookos_snapshot(password: String, number: String) -> String {
+    if !number.chars().all(|c| c.is_ascii_digit()) || number.is_empty() {
+        return r#"{"ok":false,"error":"invalid snapshot"}"#.into();
+    }
+    let cmd = format!("snapper -c root rollback {}", number);
+    let out = Command::new("sudo").args(["-k","-S","sh","-c",&cmd])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match out { Ok(c) => c, Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())) };
+    if let Some(mut sin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = sin.write_all(format!("{}\n", password).as_bytes()).await;
+    }
+    match child.wait_with_output().await {
+        Ok(o) if o.status.success() => r#"{"ok":true,"reboot_required":true}"#.into(),
+        Ok(o) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    }
 }
 
 /// Get current update channel ("stable" default).
@@ -303,6 +391,38 @@ fn set_update_channel(channel: String) -> String {
     format!(r#"{{"ok":true,"channel":"{}"}}"#, esc(&channel))
 }
 
+// ── BookOS dnf repo (custom packages: modified libfprint, BookOS apps) ──
+const BOOKOS_REPO_PATH: &str = "/etc/yum.repos.d/bookos.repo";
+const BOOKOS_REPO_URL: &str = "https://bookos.es/store-files/bookos.repo";
+
+/// Is the BookOS dnf repo installed on this system?
+#[tauri::command]
+fn get_bookos_repo_status() -> String {
+    let supported = std::path::Path::new("/etc/yum.repos.d").exists();
+    let enabled = std::fs::read_to_string(BOOKOS_REPO_PATH)
+        .map(|c| !c.contains("enabled=0"))
+        .unwrap_or(false);
+    format!(r#"{{"supported":{},"enabled":{}}}"#, supported, enabled)
+}
+
+/// Install/remove the BookOS dnf repo. Uses pkexec (graphical polkit prompt).
+#[tauri::command]
+async fn set_bookos_repo(enable: bool) -> String {
+    let script = if enable {
+        format!(
+            "curl -fsSL --proto '=https' --max-time 20 {url} -o {path} && chmod 644 {path}",
+            url = BOOKOS_REPO_URL, path = BOOKOS_REPO_PATH
+        )
+    } else {
+        format!("rm -f {}", BOOKOS_REPO_PATH)
+    };
+    match Command::new("pkexec").args(["sh", "-c", &script]).output().await {
+        Ok(o) if o.status.success() => r#"{"ok":true}"#.into(),
+        Ok(o) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    }
+}
+
 #[tauri::command]
 async fn refresh_bookos_release(lang: Option<String>) -> String {
     // Online check — fetches manifest, picks latest for current channel,
@@ -319,7 +439,7 @@ async fn refresh_bookos_release(lang: Option<String>) -> String {
         Some(j) => j,
         None => return r#"{"ok":false,"error":"upstream unreachable"}"#.into(),
     };
-    let latest = match json.get("by_channel").and_then(|m| m.get(&channel)).or_else(|| json.get("latest")) {
+    let latest = match select_release(&json, &channel) {
         Some(v) => v,
         None => return r#"{"ok":false,"error":"no release in manifest"}"#.into(),
     };
@@ -349,6 +469,109 @@ async fn refresh_bookos_release(lang: Option<String>) -> String {
     }
     let _ = lang;
     r#"{"ok":true}"#.into()
+}
+
+/// Select the newest release object for `channel` from a manifest, tolerating
+/// several reasonable server shapes so a schema tweak can't silently break
+/// updates:
+///   1. `by_channel` as an object keyed by channel: {"stable": {...}}
+///   2. `by_channel` as an array of release objects (each with a "channel")
+///   3. a flat `releases` array (filtered by "channel", newest wins)
+///   4. a single `latest` object (used only if it matches the channel/unlabeled)
+fn select_release<'a>(json: &'a serde_json::Value, channel: &str) -> Option<&'a serde_json::Value> {
+    let ver = |r: &serde_json::Value| r.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // An entry matches when it has no channel label or its label equals `channel`.
+    let matches_ch = |r: &serde_json::Value| r.get("channel").and_then(|v| v.as_str()).map_or(true, |c| c == channel);
+
+    // 1) by_channel as object
+    if let Some(obj) = json.get("by_channel").and_then(|v| v.as_object()) {
+        if let Some(r) = obj.get(channel) {
+            if r.is_object() { return Some(r); }
+        }
+    }
+    // 2/3) by_channel or releases as array — newest matching channel
+    for key in ["by_channel", "releases"] {
+        if let Some(arr) = json.get(key).and_then(|v| v.as_array()) {
+            if let Some(r) = arr.iter()
+                .filter(|r| r.is_object() && matches_ch(r))
+                .max_by(|a, b| cmp_versions(&ver(a), &ver(b))) {
+                return Some(r);
+            }
+        }
+    }
+    // 4) single latest object
+    if let Some(r) = json.get("latest") {
+        if r.is_object() && matches_ch(r) { return Some(r); }
+    }
+    None
+}
+
+/// Pull a comparable version token out of a free-form string, e.g.
+/// "BookOS 1.2.0" → "1.2.0", "BookOS 1.0 Preview" → "1.0", "1.1-rc.1" → "1.1-rc.1".
+fn extract_version(s: &str) -> String {
+    s.split_whitespace()
+        .find(|t| t.chars().next().map_or(false, |c| c.is_ascii_digit()))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Compare two dotted versions. A plain release outranks a pre-release of the
+/// same core (1.0 > 1.0-rc.1); pre-releases compare lexically among themselves.
+fn cmp_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let split = |v: &str| -> (Vec<u64>, String) {
+        let (core, pre) = match v.split_once('-') {
+            Some((c, p)) => (c, p.to_string()),
+            None => (v, String::new()),
+        };
+        (core.split('.').map(|n| n.parse::<u64>().unwrap_or(0)).collect(), pre)
+    };
+    let (na, pa) = split(a);
+    let (nb, pb) = split(b);
+    for i in 0..na.len().max(nb.len()) {
+        match na.get(i).copied().unwrap_or(0).cmp(&nb.get(i).copied().unwrap_or(0)) {
+            Ordering::Equal => continue,
+            o => return o,
+        }
+    }
+    match (pa.is_empty(), pb.is_empty()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,   // release > pre-release
+        (false, true) => Ordering::Less,
+        (false, false) => pa.cmp(&pb),
+    }
+}
+
+/// True when `available` is a strictly newer version than `installed`.
+/// If the installed version can't be determined, we don't nag (returns false).
+fn update_is_available(available: &str, installed: &str) -> bool {
+    let inst = extract_version(installed);
+    !available.is_empty() && !inst.is_empty()
+        && cmp_versions(available, &inst) == std::cmp::Ordering::Greater
+}
+
+/// Rewrite the INSTALLED= line in the bookos-release file after a successful
+/// upgrade, so the "update available" check stops firing. Tries /etc, falls
+/// back to the per-user cache that get_bookos_release also reads.
+fn mark_installed(version: &str) {
+    let stamp = format!("BookOS {}", version);
+    let patch = |txt: String| -> String {
+        let mut seen = false;
+        let mut out: String = txt.lines().map(|l| {
+            if l.trim_start().starts_with("INSTALLED=") { seen = true; format!("INSTALLED={}\n", stamp) }
+            else { format!("{}\n", l) }
+        }).collect();
+        if !seen { out.push_str(&format!("INSTALLED={}\n", stamp)); }
+        out
+    };
+    if let Ok(txt) = std::fs::read_to_string("/etc/bookos-release") {
+        if std::fs::write("/etc/bookos-release", patch(txt)).is_ok() { return; }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let p = format!("{}/.config/bookos-release-cache", home);
+        let txt = std::fs::read_to_string(&p).unwrap_or_default();
+        let _ = std::fs::write(&p, patch(txt));
+    }
 }
 
 fn format_bytes(b: u64) -> String {
@@ -393,8 +616,49 @@ fn get_bookos_release(lang: Option<String>) -> String {
         esc(&changelog),
         esc(&description),
         esc(&get("INSTALLED","")),
-        if map.contains_key("VERSION") { "true" } else { "false" }
+        // Available only when the manifest version is strictly newer than what's
+        // installed — not merely "a VERSION line exists" (which was always true
+        // after a refresh and left the banner stuck on forever).
+        if update_is_available(&get("VERSION",""), &get("INSTALLED","")) { "true" } else { "false" }
     )
+}
+
+/// Map the Samsung DMI model code (e.g. "940XHA", "NP754QKG-…") to the
+/// commercial Galaxy Book name. Codes condensed from modelos_book.md:
+///   Book5: *XHA Pro · *QQHA Pro360 · *QHA 360 · *XHD (base)
+///   Book4: *XGL Ultra · *QKG Edge(ARM) · *QGK Pro360/360 · *XGK Pro/base · *XGJ base
+/// The 960/940 vs 750 numeric prefix disambiguates Pro vs base / Pro360 vs 360.
+fn detect_book_model() -> Option<String> {
+    let raw = format!("{} {}",
+        read("/sys/class/dmi/id/product_name"),
+        read("/sys/class/dmi/id/board_name"));
+    let code = raw.to_uppercase();
+    let c = |s: &str| code.contains(s);
+    // numeric prefix present anywhere (clamshell sizes 940/960, convertibles 750/754)
+    let hi = c("960") || c("964") || c("940") || c("944");   // Pro / Ultra tier
+    let name = if c("QQHA") { "Galaxy Book5 Pro 360" }
+        else if c("XHA")    { "Galaxy Book5 Pro" }
+        else if c("QHA")    { "Galaxy Book5 360" }
+        else if c("XHD")    { "Galaxy Book5" }
+        else if c("XGL")    { "Galaxy Book4 Ultra" }
+        else if c("QKG")    { "Galaxy Book4 Edge" }          // ARM
+        else if c("QGK")    { if hi { "Galaxy Book4 Pro 360" } else { "Galaxy Book4 360" } }
+        else if c("XGK")    { if hi { "Galaxy Book4 Pro" } else { "Galaxy Book4" } }
+        else if c("XGJ")    { "Galaxy Book4" }
+        else { return None };
+    Some(name.to_string())
+}
+
+/// Default hostname derived from the laptop model: "Galaxy Book5 Pro" →
+/// "book5-pro". Falls back to "bookos" when the model is unknown.
+#[tauri::command] fn get_default_hostname() -> String {
+    let slug = detect_book_model()
+        .map(|m| m.to_lowercase()
+            .replace("galaxy ", "")
+            .trim().replace(' ', "-"))
+        .filter(|s| s.starts_with("book"))
+        .unwrap_or_else(|| "bookos".to_string());
+    format!(r#"{{"hostname":"{}"}}"#, esc(&slug))
 }
 
 #[tauri::command] async fn get_system_info() -> String {
@@ -441,8 +705,11 @@ fn get_bookos_release(lang: Option<String>) -> String {
         })
         .unwrap_or_default();
     let plasma = { let v = run("plasmashell",&["--version"]).await; v.split_whitespace().last().unwrap_or(&v).to_string() };
-    format!(r#"{{"hostname":"{}","kernel":"{}","distro":"{}","cpu":"{}","ram":"{}","gpu":"{}","plasma":"{}"}}"#,
-        esc(&host),esc(&kern),esc(&distro),esc(&cpu),esc(&ram),esc(&gpu),esc(&plasma))
+    // Commercial model name (Galaxy Book4/5 …) from DMI, else raw product_name.
+    let model = detect_book_model()
+        .unwrap_or_else(|| { let p = read("/sys/class/dmi/id/product_name").trim().to_string(); if p.is_empty() { "—".into() } else { p } });
+    format!(r#"{{"hostname":"{}","kernel":"{}","distro":"{}","cpu":"{}","ram":"{}","gpu":"{}","plasma":"{}","model":"{}"}}"#,
+        esc(&host),esc(&kern),esc(&distro),esc(&cpu),esc(&ram),esc(&gpu),esc(&plasma),esc(&model))
 }
 
 // ── Hardware feature detection (generic Linux — no vendor assumptions) ────
@@ -748,7 +1015,40 @@ fn get_bookos_release(lang: Option<String>) -> String {
 #[tauri::command] async fn get_nightlight() -> String {
     let a = run("kreadconfig6",&["--file","kwinrc","--group","NightColor","--key","Active"]).await;
     let t = run("kreadconfig6",&["--file","kwinrc","--group","NightColor","--key","NightTemperature"]).await;
-    format!(r#"{{"active":{},"temperature":{}}}"#,a=="true",if t.is_empty(){"4500".into()}else{t})
+    // Mode: 0=auto location, 1=manual times, 2=location coords, 3=constant
+    let mode = run("kreadconfig6",&["--file","kwinrc","--group","NightColor","--key","Mode"]).await;
+    let begin = run("kreadconfig6",&["--file","kwinrc","--group","NightColor","--key","EveningBeginFixed"]).await;
+    let morn = run("kreadconfig6",&["--file","kwinrc","--group","NightColor","--key","MorningBeginFixed"]).await;
+    // KDE stores HHMMSS strings (e.g. "1800"). Normalise to HH:MM.
+    let fmt = |s: &str, def: &str| -> String {
+        let s = if s.is_empty() { def } else { s };
+        let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+        let p = format!("{:0>4}", digits);
+        if p.len() >= 4 { format!("{}:{}", &p[0..2], &p[2..4]) } else { def.to_string() }
+    };
+    format!(r#"{{"active":{},"temperature":{},"mode":"{}","evening":"{}","morning":"{}"}}"#,
+        a=="true", if t.is_empty(){"4500".into()}else{t},
+        if mode.is_empty(){"0".into()}else{esc(mode.trim())},
+        fmt(begin.trim(),"18:00"), fmt(morn.trim(),"06:00"))
+}
+
+// Configure a fixed-time night light schedule (Mode=1). Times are "HH:MM".
+#[tauri::command] async fn set_nightlight_schedule(scheduled: bool, evening: String, morning: String, temperature: Option<u32>) -> String {
+    // Mode 1 = custom times, Mode 3 = always on (constant).
+    let mode = if scheduled { "1" } else { "3" };
+    run("kwriteconfig6",&["--file","kwinrc","--group","NightColor","--key","Active","true"]).await;
+    run("kwriteconfig6",&["--file","kwinrc","--group","NightColor","--key","Mode",mode]).await;
+    if scheduled {
+        let to_kde = |hhmm: &str| hhmm.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
+        let ev = to_kde(&evening); let mo = to_kde(&morning);
+        run("kwriteconfig6",&["--file","kwinrc","--group","NightColor","--key","EveningBeginFixed",&ev]).await;
+        run("kwriteconfig6",&["--file","kwinrc","--group","NightColor","--key","MorningBeginFixed",&mo]).await;
+    }
+    if let Some(t) = temperature {
+        run("kwriteconfig6",&["--file","kwinrc","--group","NightColor","--key","NightTemperature",&t.to_string()]).await;
+    }
+    run("qdbus6",&["org.kde.KWin","/KWin","reconfigure"]).await;
+    r#"{"ok":true}"#.into()
 }
 #[tauri::command] async fn set_nightlight(active: bool, temperature: Option<u32>) -> String {
     run("kwriteconfig6",&["--file","kwinrc","--group","NightColor","--key","Active",if active{"true"}else{"false"}]).await;
@@ -894,8 +1194,12 @@ fn parse_upower(info: &str) -> String {
         Ok(c) => c,
         Err(_) => return r#"{"ok":false,"rows":[]}"#.to_string(),
     };
+    // Only parse the tail (~24h worth) — the file can hold weeks of samples
+    // and parsing it all made the chart slow to load.
+    let lines: Vec<&str> = content.lines().skip(1).collect();
+    let tail_start = lines.len().saturating_sub(2880);
     let mut rows: Vec<String> = Vec::new();
-    for line in content.lines().skip(1) { // skip header
+    for line in &lines[tail_start..] {
         let p: Vec<&str> = line.split(',').collect();
         if p.len() >= 5 {
             if let (Ok(day), Ok(h), Ok(m), Ok(lvl)) = (
@@ -905,14 +1209,13 @@ fn parse_upower(info: &str) -> String {
                 p[3].trim().parse::<u32>(),
             ) {
                 let power_uw: u64 = p.get(5).and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-                rows.push(format!(r#"{{"day":{},"h":{},"m":{},"level":{},"state":"{}","power_uw":{}}}"#,
-                    day, h, m, lvl, esc(p[4].trim()), power_uw));
+                let ts: i64 = p.get(6).and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+                rows.push(format!(r#"{{"day":{},"h":{},"m":{},"level":{},"state":"{}","power_uw":{},"ts":{}}}"#,
+                    day, h, m, lvl, esc(p[4].trim()), power_uw, ts));
             }
         }
     }
-    // Keep ~24h of samples at 30-second cadence (2880 rows).
-    let start = if rows.len() > 2880 { rows.len() - 2880 } else { 0 };
-    format!(r#"{{"ok":true,"rows":[{}]}}"#, rows[start..].join(","))
+    format!(r#"{{"ok":true,"rows":[{}]}}"#, rows.join(","))
 }
 
 /// Returns last 900 rows (~30 min @ 2s) from /var/log/bookos/thermal.csv.
@@ -1186,7 +1489,17 @@ fn parse_upower(info: &str) -> String {
 
 // ── Display / Resolution ─────────────────────────────────────────────────
 #[tauri::command] async fn get_display_info() -> String {
-    let out = run("kscreen-doctor",&["-o"]).await;
+    let raw = run("kscreen-doctor",&["-o"]).await;
+    // kscreen-doctor emits ANSI colour codes even when piped — strip them or
+    // line prefixes like "Output:" never match.
+    let mut out = String::with_capacity(raw.len());
+    {
+        let mut chars = raw.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' { while let Some(nc) = chars.next() { if nc.is_ascii_alphabetic() { break; } } }
+            else { out.push(c); }
+        }
+    }
     // Parse outputs and their modes
     let mut outputs = Vec::new();
     let mut current_output = String::new();
@@ -1299,11 +1612,20 @@ async fn sync_sddm_variant(is_dark: bool) {
     let conf_path = "/usr/share/sddm/themes/bookos/theme.conf";
     if let Ok(cur) = std::fs::read_to_string(conf_path) {
         let mut found = false;
-        let mut out: Vec<String> = cur.lines().map(|l| {
+        let mut out: Vec<String> = cur.lines().filter_map(|l| {
+            let trimmed = l.trim();
+            // Self-heal: drop garbage lines (no '=', not a section header/comment),
+            // e.g. a stray "1408" that would corrupt the theme.conf.
+            if !trimmed.is_empty()
+                && !trimmed.starts_with('[')
+                && !trimmed.starts_with('#')
+                && !trimmed.contains('=') {
+                return None;
+            }
             if l.starts_with("variant=") {
                 found = true;
-                format!("variant={}", new_variant)
-            } else { l.to_string() }
+                Some(format!("variant={}", new_variant))
+            } else { Some(l.to_string()) }
         }).collect();
         if !found { out.push(format!("variant={}", new_variant)); }
         let new_content = out.join("\n") + "\n";
@@ -1542,14 +1864,271 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
     r#"{"ok":true}"#.into()
 }
 
+// ── BookOS icon style (Light / Dark / Tinted) ───────────────────────────
+// Each app icon is a rounded square (neutral dark/light background) with the
+// app logo on top. "Tinted" keeps the neutral square and recolours just the
+// LOGO to a monochrome tint of the chosen hue — iOS style.
+
+// Candidate source locations for the shipped packs.
+// variant: "light" | "dark" | "tinted-light" | "tinted-dark"
+fn icon_pack_src(variant: &str) -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let name = match variant {
+        "light"        => "BookOS-Icon-Pack-Light",
+        "tinted-dark"  => "BookOS-Icon-Pack-Tinted-Dark",
+        "tinted-light" => "BookOS-Icon-Pack-Tinted-Light",
+        _              => "BookOS-Icon-Pack-Dark",
+    };
+    let roots = [
+        format!("{}/Descargas/BookOS/Icons", home),
+        "/usr/share/bookos/icons".to_string(),
+        format!("{}/.local/share/bookos/icons", home),
+    ];
+    for r in &roots {
+        let p = std::path::PathBuf::from(format!("{}/{}", r, name));
+        if p.join("index.theme").exists() { return Some(p); }
+    }
+    None
+}
+
+fn icons_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    std::path::PathBuf::from(format!("{}/.local/share/icons", home))
+}
+
+// Copy a directory tree recursively (std-only).
+fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        if path.is_dir() { copy_tree(&path, &target)?; }
+        else { std::fs::copy(&path, &target)?; }
+    }
+    Ok(())
+}
+
+// hue 0-360, strength 0-100 → (r,g,b) floats 0-1.
+// strength low = strong/saturated, high = washed toward white (matches the UI slider).
+fn tint_rgb(hue: f64, strength: f64) -> (f64, f64, f64) {
+    let sat = (0.90 - (strength / 100.0) * 0.55).clamp(0.0, 1.0);
+    let light = (0.42 + (strength / 100.0) * 0.38).clamp(0.0, 1.0);
+    let c = (1.0 - (2.0 * light - 1.0).abs()) * sat;
+    let h = hue / 60.0;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r1, g1, b1) = match h as i32 {
+        0 => (c, x, 0.0), 1 => (x, c, 0.0), 2 => (0.0, c, x),
+        3 => (0.0, x, c), 4 => (x, 0.0, c), _ => (c, 0.0, x),
+    };
+    let m = light - c / 2.0;
+    ((r1 + m).clamp(0.0, 1.0), (g1 + m).clamp(0.0, 1.0), (b1 + m).clamp(0.0, 1.0))
+}
+
+// QSvgRenderer (what KDE uses to rasterise icons) implements SVG Tiny and
+// IGNORES <filter> elements entirely, so the tint cannot be a filter — it has
+// to be baked into the fills. We rewrite every hex colour in the logo to the
+// tint colour scaled by the original's luminance (same mapping the old
+// feComponentTransfer filter described: out = tint * (0.45 + 0.55 * lum)).
+fn tint_hex_color(hex: &str, r: f64, g: f64, b: f64) -> Option<String> {
+    let v: Vec<u32> = hex.chars().map(|c| c.to_digit(16)).collect::<Option<_>>()?;
+    let (or, og, ob) = match v.len() {
+        6 => ((v[0] * 16 + v[1]) as f64, (v[2] * 16 + v[3]) as f64, (v[4] * 16 + v[5]) as f64),
+        3 => ((v[0] * 17) as f64, (v[1] * 17) as f64, (v[2] * 17) as f64),
+        _ => return None,
+    };
+    let lum = (0.2126 * or + 0.7152 * og + 0.0722 * ob) / 255.0;
+    let f = 0.45 + 0.55 * lum;
+    Some(format!("{:02X}{:02X}{:02X}",
+        (r * f * 255.0).round() as u8,
+        (g * f * 255.0).round() as u8,
+        (b * f * 255.0).round() as u8))
+}
+
+// Replace every #RRGGBB / #RGB in `s` with its tinted equivalent.
+fn tint_svg_colors(s: &str, r: f64, g: f64, b: f64) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' {
+            let hexlen = bytes[i + 1..].iter().take(7).take_while(|c| c.is_ascii_hexdigit()).count();
+            // 6 or 3 digits, not followed by another hex digit (avoids ids like #a1b2c3d4)
+            let take = if hexlen >= 6 { 6 } else if hexlen >= 3 { 3 } else { 0 };
+            if (take == 6 && hexlen == 6) || (take == 3 && hexlen == 3) {
+                let hex = &s[i + 1..i + 1 + take];
+                if let Some(t) = tint_hex_color(hex, r, g, b) {
+                    out.push('#');
+                    out.push_str(&t);
+                    i += 1 + take;
+                    continue;
+                }
+            }
+        }
+        let ch = s[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+// Install a pack into ~/.local/share/icons/<theme_name>.
+// When `tint` (r,g,b 0-1) is given, every app icon's logo is recoloured to a
+// monochrome tint of that colour (iOS style); the rounded background is left
+// untouched (neutral per light/dark mode).
+fn install_icon_pack(variant: &str, theme_name: &str, base_tint: Option<(f64, f64, f64)>, logo_tint: Option<(f64, f64, f64)>) -> Result<String, String> {
+    let src = icon_pack_src(variant).ok_or_else(|| format!("pack '{}' no encontrado", variant))?;
+    let dst = icons_dir().join(theme_name);
+    let _ = std::fs::remove_dir_all(&dst);
+    if base_tint.is_none() && logo_tint.is_none() {
+        copy_tree(&src, &dst).map_err(|e| e.to_string())?;
+    } else {
+        // Single pass: copy everything except apps/ verbatim; the app icons
+        // are tinted while copying (instead of copy + rewrite = double IO).
+        std::fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
+        for entry in std::fs::read_dir(&src).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if entry.file_name() == "apps" { continue; }
+            let p = entry.path();
+            let t = dst.join(entry.file_name());
+            if p.is_dir() { copy_tree(&p, &t).map_err(|e| e.to_string())?; }
+            else { std::fs::copy(&p, &t).map_err(|e| e.to_string())?; }
+        }
+    }
+
+    // Set the theme Name= inside index.theme so KDE shows it distinctly.
+    let idx = dst.join("index.theme");
+    if let Ok(content) = std::fs::read_to_string(&idx) {
+        let new: String = content.lines().map(|l| {
+            if l.trim_start().starts_with("Name=") { format!("Name={}", theme_name) } else { l.to_string() }
+        }).collect::<Vec<_>>().join("\n");
+        let _ = std::fs::write(&idx, new + "\n");
+    }
+
+    // Apply the tint. Colours are rewritten in place (no SVG filter —
+    // QSvgRenderer ignores filters, so a filter-based tint renders as no tint
+    // at all). The rounded BASE rect always takes the tint colour; the logo
+    // is only recoloured (luminance-mapped) when `tint_logo` is set.
+    if base_tint.is_some() || logo_tint.is_some() {
+        let base_hex = base_tint.map(|(r, g, b)| format!("{:02X}{:02X}{:02X}",
+            (r * 255.0).round() as u8, (g * 255.0).round() as u8, (b * 255.0).round() as u8));
+        let src_apps = src.join("apps").join("scalable");
+        let dst_apps = dst.join("apps").join("scalable");
+        std::fs::create_dir_all(&dst_apps).map_err(|e| e.to_string())?;
+        let files: Vec<_> = std::fs::read_dir(&src_apps)
+            .map_err(|e| e.to_string())?
+            .flatten().map(|e| e.path()).collect();
+        // ~8k files: split across threads — the per-file work is tiny, the
+        // wall time is IO + string churn, parallelism cuts it ~4x.
+        let nthreads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
+        let chunk = files.len().div_ceil(nthreads);
+        std::thread::scope(|s| {
+            for part in files.chunks(chunk.max(1)) {
+                let dst_apps = &dst_apps;
+                let base_hex = &base_hex;
+                s.spawn(move || {
+                    for p in part {
+                        let target = dst_apps.join(p.file_name().unwrap_or_default());
+                        if p.extension().and_then(|x| x.to_str()) != Some("svg") {
+                            let _ = std::fs::copy(p, &target);
+                            continue;
+                        }
+                        let Ok(svg) = std::fs::read_to_string(p) else { continue };
+                        if let Some(pos) = svg.find("<g transform=") {
+                            let (head, logo) = svg.split_at(pos);
+                            // The generator writes the base colour as an isolated
+                            // `fill="#XXXXXX"` on the <rect> before the logo group.
+                            let mut new_head = head.to_string();
+                            if let Some(hex) = base_hex.as_deref() {
+                                if let Some(fp) = head.find("fill=\"#") {
+                                    let start = fp + 7;
+                                    if head.len() >= start + 6 {
+                                        new_head.replace_range(start..start + 6, hex);
+                                    }
+                                }
+                            }
+                            let new_logo = match logo_tint {
+                                Some((r, g, b)) => tint_svg_colors(logo, r, g, b),
+                                None => logo.to_string(),
+                            };
+                            let _ = std::fs::write(&target, format!("{}{}", new_head, new_logo));
+                        } else {
+                            let _ = std::fs::copy(p, &target);
+                        }
+                    }
+                });
+            }
+        });
+    }
+    Ok(theme_name.to_string())
+}
+
+// Apply the chosen icon theme to KDE live.
+async fn apply_icon_theme(theme: &str) {
+    // plasma-changeicons no-ops when kdeglobals already names the target theme,
+    // so it must run BEFORE kwriteconfig (it lives outside PATH on Arch — try both).
+    let r = run("/usr/lib/plasma-changeicons", &[theme]).await;
+    if r.contains("No such file") { run("plasma-changeicons", &[theme]).await; }
+    run("kwriteconfig6", &["--file","kdeglobals","--group","Icons","--key","Theme", theme]).await;
+    // plasma-changeicons already notifies KIconLoader/Plasma; kbuildsycoca6 and
+    // extra dbus signals here only added seconds without visible effect.
+    run("dbus-send", &["--session","--type=signal","/KIconLoader","org.kde.KIconLoader.iconChanged","int32:0"]).await;
+}
+
+/// Set the BookOS app-icon style.
+/// mode: "light" | "dark" | "tinted".
+/// For tinted: hue 0-360 + strength 0-100, and `dark` picks the base (the
+/// tinted icon keeps a dark or light square depending on the system mode).
+#[tauri::command]
+async fn set_icon_style(mode: String, hue: Option<f64>, strength: Option<f64>, dark: Option<bool>, tint_base: Option<bool>, tint_logo: Option<bool>, logo_hue: Option<f64>) -> String {
+    let theme = match mode.as_str() {
+        "light" => match install_icon_pack("light", "BookOS-Light", None, None) {
+            Ok(t) => t,
+            // Light pack missing → fall back to the dark pack art.
+            Err(_) => match install_icon_pack("dark", "BookOS-Light", None, None) {
+                Ok(t) => t, Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e)),
+            },
+        },
+        "dark" => match install_icon_pack("dark", "BookOS-Dark", None, None) {
+            Ok(t) => t, Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e)),
+        },
+        "tinted" => {
+            // Base and logo are tinted independently; the logo has its own hue.
+            let st = strength.unwrap_or(45.0);
+            let base = if tint_base.unwrap_or(true) { Some(tint_rgb(hue.unwrap_or(210.0), st)) } else { None };
+            let logo = if tint_logo.unwrap_or(false) { Some(tint_rgb(logo_hue.or(hue).unwrap_or(210.0), st)) } else { None };
+            let is_dark = dark.unwrap_or(true);
+            // Re-applying the SAME theme name is a no-op for Plasma (icon cache
+            // is keyed by name), so alternate between two names — each apply is
+            // then a real theme switch: one repaint, no cache nuking.
+            let cur = run("kreadconfig6", &["--file","kdeglobals","--group","Icons","--key","Theme"]).await;
+            let name = if cur.trim() == "BookOS-Tinted" { "BookOS-Tinted-B" } else { "BookOS-Tinted" };
+            // The pack rewrite touches ~8k SVGs — run it off the async runtime
+            // so the UI stays responsive.
+            let nm = name.to_string();
+            let res = tauri::async_runtime::spawn_blocking(move || {
+                let src_variant = if is_dark { "tinted-dark" } else { "tinted-light" };
+                install_icon_pack(src_variant, &nm, base, logo)
+                    .or_else(|_| install_icon_pack(if is_dark {"dark"} else {"light"}, &nm, base, logo))
+            }).await.unwrap_or_else(|e| Err(e.to_string()));
+            match res { Ok(t) => t, Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e)) }
+        },
+        _ => return r#"{"ok":false,"error":"modo inválido"}"#.into(),
+    };
+    apply_icon_theme(&theme).await;
+    format!(r#"{{"ok":true,"theme":"{}"}}"#, esc(&theme))
+}
+
 // ── Notifications ────────────────────────────────────────────────────────
 #[tauri::command] async fn get_dnd_status() -> String {
     let d = run("kreadconfig6",&["--file","plasmanotifyrc","--group","DoNotDisturb","--key","Until"]).await;
     format!(r#"{{"dnd_active":{}}}"#,!d.is_empty())
 }
 #[tauri::command] async fn toggle_dnd(enable: bool) -> String {
-    if enable { run("kwriteconfig6",&["--file","plasmanotifyrc","--group","DoNotDisturb","--key","Until","2099-12-31T23:59:59"]).await; }
-    else { run("kwriteconfig6",&["--file","plasmanotifyrc","--group","DoNotDisturb","--key","Until",""]).await; }
+    // Plasma stores Until as a KConfig QDateTime list ("y,M,d,h,m,s"), NOT ISO.
+    // An ISO string fails to parse and DnD silently never engages.
+    if enable { run("kwriteconfig6",&["--file","plasmanotifyrc","--group","DoNotDisturb","--key","Until","2099,12,31,23,59,59"]).await; }
+    else { run("kwriteconfig6",&["--file","plasmanotifyrc","--group","DoNotDisturb","--key","Until","--delete"]).await; }
     r#"{"ok":true}"#.into()
 }
 
@@ -1562,14 +2141,19 @@ async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
     let p = format!("{}/.config/autostart/bookos-settings.desktop", std::env::var("HOME").unwrap_or_default());
     format!(r#"{{"enabled":{}}}"#, std::path::Path::new(&p).exists())
 }
+const AUTOSTART_DESKTOP: &str = "[Desktop Entry]\nName=BookOS Settings\nExec=bookos-settings --hidden\nIcon=preferences-system\nType=Application\nNoDisplay=true\nX-KDE-autostart-phase=1\n";
+fn autostart_optout_path() -> String { format!("{}/.config/bookos-settings-autostart.disabled", std::env::var("HOME").unwrap_or_default()) }
 #[tauri::command] async fn toggle_autostart_bookos(enable: bool) -> String {
-    let p = format!("{}/.config/autostart/bookos-settings.desktop", std::env::var("HOME").unwrap_or_default());
+    let home = std::env::var("HOME").unwrap_or_default();
+    let p = format!("{}/.config/autostart/bookos-settings.desktop", home);
     if enable {
-        let _ = std::fs::create_dir_all(format!("{}/.config/autostart", std::env::var("HOME").unwrap_or_default()));
-        let desktop = "[Desktop Entry]\nName=BookOS Settings\nExec=bookos-settings --hidden\nIcon=preferences-system\nType=Application\nNoDisplay=true\nX-KDE-autostart-phase=1\n";
-        let _ = std::fs::write(&p, desktop);
+        let _ = std::fs::create_dir_all(format!("{}/.config/autostart", home));
+        let _ = std::fs::write(&p, AUTOSTART_DESKTOP);
+        let _ = std::fs::remove_file(autostart_optout_path());
     } else {
         let _ = std::fs::remove_file(&p);
+        // Opt-out marker so setup() doesn't re-create it on next launch
+        let _ = std::fs::write(autostart_optout_path(), "");
     }
     r#"{"ok":true}"#.into()
 }
@@ -1760,11 +2344,22 @@ fn detect_pkg_mgr() -> &'static str {
         }
         "dnf5" | "dnf" => {
             // dnf check-update prints "pkg.arch  newver  repo"
-            let u = run(mgr, &["check-update", "--quiet"]).await;
-            u.lines().filter(|l| !l.is_empty() && !l.starts_with("Last") && !l.starts_with("Obsoleting"))
+            // dnf may refresh repo metadata first, which on a slow mirror easily
+            // exceeds the default 12s run() timeout — and a timeout returns "" =
+            // false "0 updates / up to date". Give it room.
+            let u = run_timeout(mgr, &["check-update", "--quiet"], 60_000).await;
+            // The upgrade list ends at a blank line or the "Obsoleting Packages"
+            // section; take_while stops there so obsoleted pkgs aren't counted as
+            // updates. Skip indented continuation lines and any "Last metadata…".
+            u.lines()
+                .take_while(|l| { let t = l.trim(); !t.is_empty() && !t.starts_with("Obsoleting") })
+                .filter(|l| l.starts_with(|c: char| c.is_ascii_alphanumeric()) && !l.starts_with("Last"))
                 .take(100).map(|l| {
                     let p: Vec<&str> = l.split_whitespace().collect();
-                    let name = p.first().unwrap_or(&"").split('.').next().unwrap_or("");
+                    // Token is "name.arch" — strip only the trailing arch segment
+                    // (rsplit) so versioned names like python3.11 survive.
+                    let tok = *p.first().unwrap_or(&"");
+                    let name = tok.rsplit_once('.').map(|(n, _)| n).unwrap_or(tok);
                     format!(r#"{{"name":"{}","old":"","new":"{}"}}"#,
                         esc(name), esc(p.get(1).unwrap_or(&"")))
                 }).collect()
@@ -1824,7 +2419,9 @@ fn detect_pkg_mgr() -> &'static str {
         return Ok(r#"{"count":0,"packages":[]}"#.into());
     }
     if !force.unwrap_or(false) { if let Some(c) = cache_get("flat") { return Ok(c); } }
-    let u = run("flatpak",&["remote-ls","--updates","--columns=application,version"]).await;
+    // remote-ls hits the network; the default 12s timeout can return "" (= false
+    // "0 updates") on a slow connection. Allow more time.
+    let u = run_timeout("flatpak",&["remote-ls","--updates","--columns=application,version"], 60_000).await;
     let pkgs: Vec<String> = u.lines().filter(|l| !l.is_empty()).map(|l| {
         let p: Vec<&str> = l.split('\t').collect();
         format!(r#"{{"name":"{}","version":"{}"}}"#,esc(p.first().unwrap_or(&"")),esc(p.get(1).unwrap_or(&"")))
@@ -1870,8 +2467,11 @@ fn detect_pkg_mgr() -> &'static str {
                 .stderr(std::process::Stdio::piped())
                 .spawn()
         } else if mgr == "dnf5" || mgr == "dnf" {
+            // Snapshot before package upgrade when SnapshotPolicy=packages.
+            let snap = if should_snapshot(true) { "snapper -c root create -d 'Antes de actualizar paquetes' 2>/dev/null; " } else { "" };
+            let cmd = format!("{}{} upgrade -y", snap, mgr);
             StdCommand::new("sudo")
-                .args(["-k", "-S", mgr, "upgrade", "-y"])
+                .args(["-k", "-S", "sh", "-c", &cmd])
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -2176,38 +2776,59 @@ fn detect_pkg_mgr() -> &'static str {
         "[General]\nvariant={}\nbackground={}\nbgImage={}\naccentColor={}\nclockFormat={}\nclockFont={}\nblurRadius={}\nshowDate={}\nshowBattery={}\nshowBookBar={}\n",
         variant, background, bg_image, accent_color, clock_format, clock_font, blur_radius, show_date, show_battery, show_bookbar
     );
-    // Write to user tmp, then sudo-mv. Avoids password being mixed with file content.
+    // Write to user tmp, then move into place with elevation.
     let tmp = format!("/tmp/.bookos-sddm-conf-{}", std::process::id());
     if let Err(e) = std::fs::write(&tmp, &conf) {
         return format!(r#"{{"ok":false,"error":"tmp write: {}"}}"#, esc(&e.to_string()));
     }
     let script = format!(
-        "set -e; mkdir -p /usr/share/sddm/themes/bookos; mv '{}' /usr/share/sddm/themes/bookos/theme.conf; chmod 644 /usr/share/sddm/themes/bookos/theme.conf",
-        tmp
+        "set -e; mkdir -p /usr/share/sddm/themes/bookos; cp '{tmp}' /usr/share/sddm/themes/bookos/theme.conf; chmod 644 /usr/share/sddm/themes/bookos/theme.conf; rm -f '{tmp}'",
+        tmp = tmp
     );
     eprintln!("[set_sddm_config] script:\n{}", script);
-    let mut child = match StdCommand::new("sudo")
-        .args(["-k", "-S", "-p", "", "--", "sh", "-c", &script])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn() { Ok(c) => c, Err(e) => { let _ = std::fs::remove_file(&tmp); return format!(r#"{{"ok":false,"error":"spawn: {}"}}"#, esc(&e.to_string())); } };
-    if let Some(mut sin) = child.stdin.take() {
-        let _ = sin.write_all(password.as_bytes());
-        let _ = sin.write_all(b"\n");
-        drop(sin);
-    }
-    let result = match child.wait_with_output() {
-        Ok(o) if o.status.success() => r#"{"ok":true}"#.into(),
-        Ok(o) => {
-            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            eprintln!("[set_sddm_config] FAIL stderr={}", err);
-            format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&err))
-        },
-        Err(e) => format!(r#"{{"ok":false,"error":"wait: {}"}}"#, esc(&e.to_string())),
+
+    // Primary path: sudo -S with the provided password. Some Fedora/PAM setups
+    // reject password-over-stdin, so we fall back to pkexec (graphical polkit
+    // prompt) when sudo fails for any reason other than success.
+    let try_sudo = |pw: &str| -> Result<bool, String> {
+        let mut child = StdCommand::new("sudo")
+            .args(["-S", "-p", "", "--", "sh", "-c", &script])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn().map_err(|e| e.to_string())?;
+        if let Some(mut sin) = child.stdin.take() {
+            let _ = sin.write_all(pw.as_bytes());
+            let _ = sin.write_all(b"\n");
+            drop(sin);
+        }
+        let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        Ok(out.status.success())
     };
+
+    let mut ok = false;
+    let mut last_err = String::new();
+    if !password.is_empty() {
+        match try_sudo(&password) {
+            Ok(true) => ok = true,
+            Ok(false) => last_err = "sudo: autenticación fallida".into(),
+            Err(e) => last_err = e,
+        }
+    }
+    // Fallback: pkexec shows its own polkit dialog (no password handling here).
+    if !ok && std::path::Path::new(&tmp).exists() {
+        match StdCommand::new("pkexec").args(["sh", "-c", &script]).status() {
+            Ok(s) if s.success() => ok = true,
+            Ok(s) => last_err = format!("pkexec exit {}", s.code().unwrap_or(-1)),
+            Err(e) => last_err = format!("pkexec: {}", e),
+        }
+    }
     let _ = std::fs::remove_file(&tmp);
-    result
+    if ok { r#"{"ok":true}"#.into() }
+    else {
+        eprintln!("[set_sddm_config] FAIL: {}", last_err);
+        format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&last_err))
+    }
 }
 
 // ── BookOS lockscreen theme install/uninstall ───────────────────────────
@@ -2331,8 +2952,20 @@ fn lockscreen_source() -> Option<String> {
 
 // ── BookOS SDDM theme toggle ────────────────────────────────────────────
 #[tauri::command] fn is_sddm_theme_installed() -> String {
-    let conf = std::fs::read_to_string("/etc/sddm.conf.d/bookos-theme.conf").unwrap_or_default();
-    let installed = conf.contains("Current=bookos");
+    // The active SDDM theme can be selected from /etc/sddm.conf or *any* file in
+    // /etc/sddm.conf.d/ (Arch's KDE setup uses kde_settings.conf, not our own
+    // bookos-theme.conf), so scan all of them for Current=bookos.
+    let mut installed = std::fs::read_to_string("/etc/sddm.conf")
+        .map(|c| c.contains("Current=bookos")).unwrap_or(false);
+    if !installed {
+        if let Ok(entries) = std::fs::read_dir("/etc/sddm.conf.d") {
+            for e in entries.flatten() {
+                if let Ok(c) = std::fs::read_to_string(e.path()) {
+                    if c.contains("Current=bookos") { installed = true; break; }
+                }
+            }
+        }
+    }
     format!(r#"{{"installed":{}}}"#, installed)
 }
 
@@ -2354,8 +2987,17 @@ fn lockscreen_source() -> Option<String> {
     }
 
     let mut script = String::from("set -e; ");
-    if !std::path::Path::new(dest).is_dir() {
-        script.push_str(&format!("mkdir -p '{}'; cp -r '{}/.' '{}/'; ", dest, staged, dest));
+    // Always refresh the theme files from the staged copy so updates to Main.qml
+    // etc. actually land (the old `if !dest exists` guard meant reinstalling never
+    // updated an existing theme). Preserve the user's theme.conf across the refresh.
+    if std::path::Path::new(staged).is_dir() {
+        script.push_str(&format!(
+            "mkdir -p '{dest}'; \
+             if [ -f '{dest}/theme.conf' ]; then cp '{dest}/theme.conf' /tmp/.bookos-themeconf-keep; fi; \
+             cp -rf '{staged}/.' '{dest}/'; \
+             if [ -f /tmp/.bookos-themeconf-keep ]; then mv -f /tmp/.bookos-themeconf-keep '{dest}/theme.conf'; fi; ",
+            staged = staged, dest = dest
+        ));
     }
     script.push_str(&format!("mkdir -p /etc/sddm.conf.d; mv '{}' /etc/sddm.conf.d/bookos-theme.conf; chmod 644 /etc/sddm.conf.d/bookos-theme.conf", tmp_conf));
 
@@ -2440,7 +3082,9 @@ fn lockscreen_source() -> Option<String> {
 }
 
 #[tauri::command] async fn run_flatpak_update() -> Result<String, String> {
-    let output = run("flatpak", &["update", "-y"]).await;
+    // A real update downloads runtimes/apps and takes minutes — the default 12s
+    // run() would return early and make the UI report success prematurely.
+    let output = run_timeout("flatpak", &["update", "-y"], 600_000).await;
     Ok(format!(r#"{{"ok":true,"output":"{}"}}"#, esc(&output)))
 }
 
@@ -2453,7 +3097,9 @@ fn lockscreen_source() -> Option<String> {
     } else {
         return Ok(r#"{"ok":false,"error":"no AUR helper (yay/paru) found"}"#.into());
     };
-    let output = run(helper, &["-Sua", "--noconfirm"]).await;
+    // Building AUR packages takes minutes — don't let the default 12s run() cut
+    // it short and report success while the build is still going.
+    let output = run_timeout(helper, &["-Sua", "--noconfirm"], 600_000).await;
     Ok(format!(r#"{{"ok":true,"output":"{}"}}"#, esc(&output)))
 }
 
@@ -2476,6 +3122,33 @@ fn lockscreen_source() -> Option<String> {
     format!("[{}]",maps.join(","))
 }
 #[tauri::command] async fn set_keymap(layout: String) -> String { run("localectl",&["set-x11-keymap",&layout]).await; r#"{"ok":true}"#.into() }
+
+// ── Date & time (timedatectl) ─────────────────────────────────────────────
+#[tauri::command] async fn get_datetime_info() -> String {
+    let s = run("timedatectl",&["show"]).await;
+    let mut tz = String::new(); let mut ntp = false; let mut synced = false;
+    for line in s.lines() {
+        if let Some(v) = line.strip_prefix("Timezone=") { tz = v.trim().to_string(); }
+        else if let Some(v) = line.strip_prefix("NTP=") { ntp = v.trim() == "yes"; }
+        else if let Some(v) = line.strip_prefix("NTPSynchronized=") { synced = v.trim() == "yes"; }
+    }
+    format!(r#"{{"timezone":"{}","ntp":{},"synced":{}}}"#, esc(&tz), ntp, synced)
+}
+#[tauri::command] async fn list_timezones() -> String {
+    let l = run("timedatectl",&["list-timezones"]).await;
+    let zones: Vec<String> = l.lines().map(|l| format!(r#""{}""#, esc(l.trim()))).collect();
+    format!("[{}]", zones.join(","))
+}
+#[tauri::command] async fn set_timezone(timezone: String) -> String {
+    // timedatectl needs root → use pkexec (graphical polkit prompt).
+    let out = StdCommand::new("pkexec").args(["timedatectl","set-timezone",&timezone]).status();
+    match out { Ok(s) if s.success() => r#"{"ok":true}"#.into(), _ => r#"{"ok":false}"#.into() }
+}
+#[tauri::command] async fn set_ntp(enable: bool) -> String {
+    let v = if enable { "true" } else { "false" };
+    let out = StdCommand::new("pkexec").args(["timedatectl","set-ntp",v]).status();
+    match out { Ok(s) if s.success() => r#"{"ok":true}"#.into(), _ => r#"{"ok":false}"#.into() }
+}
 
 // ── Scheduled Theme ──────────────────────────────────────────────────────
 #[tauri::command] fn get_theme_schedule() -> String {
@@ -2509,10 +3182,25 @@ fn lockscreen_source() -> Option<String> {
 #[tauri::command] async fn run_maintenance(target: String) -> String {
     let r = match target.as_str() {
         "flatpak" => run("flatpak", &["uninstall", "--unused", "-y"]).await,
-        "packages" => run("paru", &["-Sc", "--noconfirm"]).await,
+        "packages" => {
+            // Clean the package-manager cache, per distro. pkexec for root ops.
+            match detect_pkg_mgr() {
+                "pacman" => {
+                    // paru cleans AUR build cache as the user; pacman cache needs root.
+                    let aur = run("paru", &["-Sc", "--noconfirm"]).await;
+                    let sys = run("pkexec", &["paccache", "-r", "-k1"]).await;
+                    format!("{}\n{}", aur.trim(), sys.trim())
+                }
+                "dnf5" => run("pkexec", &["dnf5", "clean", "all"]).await,
+                "dnf"  => run("pkexec", &["dnf", "clean", "all"]).await,
+                "apt"  => run("pkexec", &["sh", "-c", "apt-get clean && apt-get autoclean"]).await,
+                "zypper" => run("pkexec", &["zypper", "clean", "--all"]).await,
+                _ => "Gestor de paquetes no soportado".to_string(),
+            }
+        }
         "cache" => {
             let home = std::env::var("HOME").unwrap_or_default();
-            run("rm", &["-rf", &format!("{}/.cache/thumbnails/*", home)]).await
+            run("sh", &["-c", &format!("rm -rf '{}/.cache/thumbnails/'* 2>/dev/null; true", home)]).await
         },
         _ => "Invalid target".to_string(),
     };
@@ -2558,7 +3246,11 @@ fn lockscreen_source() -> Option<String> {
         _ => return r#"{"ok":false}"#.into(),
     };
     run("kwriteconfig6", &["--file", "kwinrc", "--group", "Plugins", "--key", key, if enable { "true" } else { "false" }]).await;
-    run("qdbus", &["org.kde.KWin", "/KWin", "reconfigure"]).await;
+    // Plasma 6 ships qdbus6; older systems have qdbus. Try the former, fall back.
+    let r = run("qdbus6", &["org.kde.KWin", "/KWin", "reconfigure"]).await;
+    if r.contains("not found") || r.contains("No such") || r.is_empty() {
+        run("qdbus", &["org.kde.KWin", "/KWin", "reconfigure"]).await;
+    }
     r#"{"ok":true}"#.into()
 }
 
@@ -2685,6 +3377,35 @@ fn lockscreen_source() -> Option<String> {
     }
     format!("[{}]", wallpapers.join(","))
 }
+/// Copy user-picked image files into ~/.local/share/wallpapers so they persist
+/// and show up in get_wallpapers(). Returns the number of files added.
+#[tauri::command] fn add_wallpapers(paths: Vec<String>) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dest_dir = format!("{}/.local/share/wallpapers", home);
+    if let Err(e) = fs::create_dir_all(&dest_dir) {
+        return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string()));
+    }
+    let mut added = 0;
+    for p in &paths {
+        let src = std::path::Path::new(p);
+        let ext = src.extension().unwrap_or_default().to_string_lossy().to_lowercase();
+        if !["jpg","jpeg","png","webp"].contains(&ext.as_str()) { continue; }
+        let fname = match src.file_name() { Some(f) => f.to_string_lossy().to_string(), None => continue };
+        // Avoid clobbering an existing file with a different image: suffix on collision.
+        let mut dest = std::path::Path::new(&dest_dir).join(&fname);
+        if dest.exists() && fs::read(&dest).ok() != fs::read(src).ok() {
+            let stem = src.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            let mut n = 1;
+            loop {
+                let cand = std::path::Path::new(&dest_dir).join(format!("{}-{}.{}", stem, n, ext));
+                if !cand.exists() { dest = cand; break; }
+                n += 1;
+            }
+        }
+        if fs::copy(src, &dest).is_ok() { added += 1; }
+    }
+    format!(r#"{{"ok":true,"added":{}}}"#, added)
+}
 #[tauri::command] async fn get_current_wallpaper() -> String {
     // Plasma stores the wallpaper inside a Containment whose number varies.
     // Parse the appletsrc directly to find the first Wallpaper Image key.
@@ -2712,12 +3433,222 @@ fn lockscreen_source() -> Option<String> {
 }
 
 // ── Default Apps ──────────────────────────────────────────────────────
-#[tauri::command] async fn get_default_apps() -> String {
-    let browser = run("xdg-settings", &["get", "default-web-browser"]).await;
-    let email = run("xdg-settings", &["get", "default-url-scheme-handler", "mailto"]).await;
-    let fm_raw = run("xdg-mime", &["query", "default", "inode/directory"]).await;
-    format!(r#"{{"browser":"{}","email":"{}","filemanager":"{}"}}"#, esc(&browser), esc(&email), esc(&fm_raw))
+// Search the standard XDG dirs for a .desktop file and pull out a field.
+fn desktop_file_path(id: &str) -> Option<std::path::PathBuf> {
+    if id.is_empty() { return None; }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dirs = [
+        format!("{}/.local/share/applications", home),
+        "/usr/share/applications".into(),
+        "/usr/local/share/applications".into(),
+        "/var/lib/flatpak/exports/share/applications".into(),
+        format!("{}/.local/share/flatpak/exports/share/applications", home),
+    ];
+    for d in &dirs {
+        let p = std::path::Path::new(d).join(id);
+        if p.is_file() { return Some(p); }
+    }
+    None
 }
+fn desktop_field(path: &std::path::Path, key: &str) -> String {
+    let content = fs::read_to_string(path).unwrap_or_default();
+    // Only read the [Desktop Entry] group, stop at the next group.
+    let mut in_entry = false;
+    for line in content.lines() {
+        let l = line.trim();
+        if l.starts_with('[') { in_entry = l == "[Desktop Entry]"; continue; }
+        if in_entry {
+            if let Some(v) = l.strip_prefix(&format!("{}=", key)) { return v.trim().to_string(); }
+        }
+    }
+    String::new()
+}
+// Friendly Name + Icon for a .desktop id (e.g. "firefox.desktop").
+// Resolve a freedesktop icon *name* (e.g. "firefox", "org.kde.dolphin") to an
+// absolute file path by scanning the common theme dirs. If `name` is already an
+// absolute path, it's returned as-is. Returns "" if nothing is found.
+fn resolve_icon_file(name: &str) -> String {
+    if name.is_empty() { return String::new(); }
+    if name.starts_with('/') && std::path::Path::new(name).exists() { return name.to_string(); }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let user_dirs = [
+        format!("{}/.local/share/icons/hicolor/256x256/apps", home),
+        format!("{}/.local/share/icons/hicolor/128x128/apps", home),
+        format!("{}/.local/share/icons/hicolor/64x64/apps", home),
+        format!("{}/.local/share/icons/hicolor/scalable/apps", home),
+    ];
+    let sys_dirs = [
+        "/usr/share/icons/hicolor/scalable/apps",
+        "/usr/share/icons/hicolor/256x256/apps",
+        "/usr/share/icons/hicolor/128x128/apps",
+        "/usr/share/icons/hicolor/64x64/apps",
+        "/usr/share/icons/hicolor/48x48/apps",
+        "/usr/share/icons/breeze/apps/64",
+        "/usr/share/icons/breeze/apps/48",
+        "/usr/share/icons/breeze-dark/apps/48",
+        "/usr/share/icons/Papirus/64x64/apps",
+        "/usr/share/icons/Papirus/48x48/apps",
+        "/usr/share/pixmaps",
+    ];
+    let exts = ["svg", "png", "xpm"];
+    for dir in user_dirs.iter().map(|s| s.as_str()).chain(sys_dirs.iter().copied()) {
+        for ext in &exts {
+            let p = format!("{}/{}.{}", dir, name, ext);
+            if std::path::Path::new(&p).exists() { return p; }
+        }
+    }
+    String::new()
+}
+
+fn app_label_icon(id: &str) -> (String, String) {
+    match desktop_file_path(id) {
+        Some(p) => {
+            let mut name = desktop_field(&p, "Name");
+            if name.is_empty() { name = id.trim_end_matches(".desktop").to_string(); }
+            let icon_name = desktop_field(&p, "Icon");
+            // Resolve the Icon= name to an absolute file the webview can load.
+            let icon = resolve_icon_file(&icon_name);
+            (name, icon)
+        }
+        None => (id.trim_end_matches(".desktop").to_string(), String::new()),
+    }
+}
+
+#[tauri::command] async fn get_default_apps() -> String {
+    let roles = default_app_roles();
+    let mut parts: Vec<String> = Vec::new();
+    for (role, query_mime, _all_mimes, _cat) in &roles {
+        let id = if *role == "browser" {
+            run("xdg-settings", &["get", "default-web-browser"]).await
+        } else {
+            run("xdg-mime", &["query", "default", query_mime]).await
+        };
+        let id = id.trim();
+        let (name, icon) = app_label_icon(id);
+        parts.push(format!(r#""{}":{{"id":"{}","name":"{}","icon":"{}"}}"#,
+            role, esc(id), esc(&name), esc(&icon)));
+    }
+    format!("{{{}}}", parts.join(","))
+}
+
+// Central table of default-app roles. Each entry:
+//   (role key, primary MIME for query/match, all MIMEs to bind on set, category fallback)
+fn default_app_roles() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+    vec![
+        ("browser",     "x-scheme-handler/http", "x-scheme-handler/http;x-scheme-handler/https;text/html", "WebBrowser"),
+        ("email",       "x-scheme-handler/mailto", "x-scheme-handler/mailto", "Email"),
+        ("filemanager", "inode/directory", "inode/directory", "FileManager"),
+        ("image",       "image/png", "image/png;image/jpeg;image/gif;image/webp;image/bmp;image/tiff;image/svg+xml", "ImageViewer"),
+        ("video",       "video/mp4", "video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;video/mpeg", "Player"),
+        ("audio",       "audio/mpeg", "audio/mpeg;audio/flac;audio/x-wav;audio/ogg;audio/aac;audio/x-m4a", "AudioVideo"),
+        ("pdf",         "application/pdf", "application/pdf", "Viewer"),
+        ("text",        "text/plain", "text/plain", "TextEditor"),
+        ("archive",     "application/zip", "application/zip;application/x-7z-compressed;application/x-tar;application/x-rar;application/gzip;application/x-xz", "Archiving"),
+    ]
+}
+
+// List installed apps that declare support for a given role.
+#[tauri::command] fn list_apps_for_role(role: String) -> String {
+    let roles = default_app_roles();
+    let entry = match roles.iter().find(|r| r.0 == role) {
+        Some(e) => e,
+        None => return "[]".into(),
+    };
+    // Build the set of MIME types this role considers a match.
+    let role_mimes: Vec<&str> = entry.2.split(';').filter(|s| !s.is_empty()).collect();
+    let cat = entry.3;
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dirs = [
+        format!("{}/.local/share/applications", home),
+        "/usr/share/applications".to_string(),
+        "/usr/local/share/applications".to_string(),
+        "/var/lib/flatpak/exports/share/applications".to_string(),
+        format!("{}/.local/share/flatpak/exports/share/applications", home),
+    ];
+    let mut seen = std::collections::HashSet::new();
+    let mut apps: Vec<serde_json::Value> = Vec::new();
+    for d in &dirs {
+        let entries = match fs::read_dir(d) { Ok(e) => e, Err(_) => continue };
+        for de in entries.flatten() {
+            let path = de.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("desktop") { continue; }
+            let id = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            if id.is_empty() || !seen.insert(id.clone()) { continue; }
+            let content = fs::read_to_string(&path).unwrap_or_default();
+            if content.contains("NoDisplay=true") || content.contains("Hidden=true") { continue; }
+            let mimes = desktop_field(&path, "MimeType");
+            let cats = desktop_field(&path, "Categories");
+            let declared: Vec<&str> = mimes.split(';').filter(|s| !s.is_empty()).collect();
+            // Match if the app declares any of the role's MIME types, or its
+            // category matches as a fallback.
+            let mime_match = declared.iter().any(|m| role_mimes.contains(m));
+            let cat_match = !cat.is_empty() && cats.contains(cat);
+            if !mime_match && !cat_match { continue; }
+            let name = desktop_field(&path, "Name");
+            if name.is_empty() { continue; }
+            let icon = resolve_icon_file(&desktop_field(&path, "Icon"));
+            apps.push(serde_json::json!({"id":id,"name":name,"icon":icon}));
+        }
+    }
+    apps.sort_by(|a,b| a["name"].as_str().unwrap_or("").to_lowercase().cmp(&b["name"].as_str().unwrap_or("").to_lowercase()));
+    serde_json::to_string(&apps).unwrap_or_else(|_| "[]".into())
+}
+
+// Set the default app (.desktop id) for a role.
+#[tauri::command] async fn set_default_app(role: String, desktop_id: String) -> String {
+    let roles = default_app_roles();
+    let entry = match roles.iter().find(|r| r.0 == role) {
+        Some(e) => e,
+        None => return r#"{"ok":false,"error":"rol desconocido"}"#.into(),
+    };
+    if role == "browser" {
+        run("xdg-settings", &["set", "default-web-browser", &desktop_id]).await;
+    }
+    // Bind every MIME type for this role to the chosen app via xdg-mime…
+    let mut args: Vec<&str> = vec!["default", &desktop_id];
+    let mimes: Vec<&str> = entry.2.split(';').filter(|s| !s.is_empty()).collect();
+    args.extend(mimes.iter());
+    run("xdg-mime", &args).await;
+
+    // …but xdg-mime is unreliable on KDE (Wayland/portals), so also write the
+    // associations directly into ~/.config/mimeapps.list under [Default Applications].
+    // This is what KIO/Plasma actually reads.
+    if let Ok(home) = std::env::var("HOME") {
+        let path = format!("{}/.config/mimeapps.list", home);
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut lines: Vec<String> = existing.lines().map(|l| l.to_string()).collect();
+        // Ensure [Default Applications] section exists.
+        let hdr = "[Default Applications]";
+        if !lines.iter().any(|l| l.trim() == hdr) {
+            if !lines.is_empty() && !lines.last().map(|l| l.is_empty()).unwrap_or(true) { lines.push(String::new()); }
+            lines.push(hdr.to_string());
+        }
+        // Find the section bounds.
+        let start = lines.iter().position(|l| l.trim() == hdr).unwrap();
+        let end = lines[start+1..].iter().position(|l| l.trim_start().starts_with('['))
+            .map(|p| start + 1 + p).unwrap_or(lines.len());
+        for mime in &mimes {
+            let key = format!("{}=", mime);
+            let line = format!("{}={}", mime, desktop_id);
+            if let Some(idx) = lines[start..end].iter().position(|l| l.trim_start().starts_with(&key)) {
+                lines[start + idx] = line;
+            } else {
+                lines.insert(end, line);
+            }
+        }
+        let _ = std::fs::write(&path, lines.join("\n") + "\n");
+    }
+
+    // Verify the change actually took effect for the primary MIME.
+    let got = if role == "browser" {
+        run("xdg-settings", &["get", "default-web-browser"]).await
+    } else {
+        run("xdg-mime", &["query", "default", entry.1]).await
+    };
+    let ok = got.trim() == desktop_id;
+    format!(r#"{{"ok":{},"applied":"{}"}}"#, ok, esc(got.trim()))
+}
+
 #[tauri::command] async fn open_mime_settings() -> String {
     run("xdg-open", &["settings://filetypes"]).await;
     // Fallback: open KDE systemsettings
@@ -2757,8 +3688,16 @@ fn lockscreen_source() -> Option<String> {
     run("kwriteconfig6",&["--file","kcminputrc","--group","Mouse","--key","cursorSize",&s]).await;
     // Also write to kdeglobals (used by some apps) and notify cursor change via KGlobalSettings
     run("kwriteconfig6",&["--file","kdeglobals","--group","KDE","--key","CursorSize",&s]).await;
-    // Set XCURSOR_SIZE for new processes via env (won't affect running ones)
-    run("dbus-send",&["--session","--dest=org.kde.KWin","--type=method_call","/KWin","org.kde.KWin.reconfigure"]).await;
+    // Apply live: re-run the cursor-theme kcm init (reloads cursor at the new size
+    // without a relogin) and reconfigure KWin. kcminit is the piece that actually
+    // pushes the new size to the running Wayland/X cursor.
+    run("kcminit",&["kcm_cursortheme"]).await;
+    let r = run("qdbus6",&["org.kde.KWin","/KWin","reconfigure"]).await;
+    if r.contains("not found") || r.is_empty() {
+        run("dbus-send",&["--session","--dest=org.kde.KWin","--type=method_call","/KWin","org.kde.KWin.reconfigure"]).await;
+    }
+    // Nudge GTK/XSettings consumers too.
+    run("dbus-send",&["--session","--type=signal","/KGlobalSettings","org.kde.KGlobalSettings.notifyChange","int32:5","int32:0"]).await;
     r#"{"ok":true}"#.into()
 }
 
@@ -3014,25 +3953,91 @@ fn lockscreen_source() -> Option<String> {
     r#"{"ok":false}"#.into()
 }
 
-// ── WiFi network details (IP, gateway, DNS, MAC) ─────────────────────────
-#[tauri::command] async fn get_wifi_details(_ssid: String) -> String {
-    let dev_out = run("nmcli",&["-t","-f","DEVICE,TYPE,STATE","device"]).await;
-    let iface = dev_out
-        .lines()
-        .find(|l| l.contains(":wifi:") && l.contains("connected"))
-        .and_then(|l| l.split(':').next().map(|s| s.to_string()))
-        .unwrap_or_else(|| "wlan0".to_string());
-    let info = run("nmcli",&["-t","-f","IP4.ADDRESS,IP4.GATEWAY,IP4.DNS[1],GENERAL.HWADDR","device","show",&iface]).await;
-    let mut ip = String::new(); let mut gateway = String::new();
-    let mut dns = String::new(); let mut mac = String::new();
+// ── Connection details (IP, gateway, DNS, MAC, speed…) ───────────────────
+// Shared by WiFi and Ethernet. `kind` = "wifi" | "ethernet".
+// nmcli -t escapes ':' inside values as '\:' and returns DNS/ADDRESS with
+// indexed keys (IP4.DNS[1], IP4.ADDRESS[1]) regardless of the -f filter, so we
+// must match by prefix, not exact key, and unescape.
+fn nm_unescape(s: &str) -> String { s.replace("\\:", ":").replace("\\\\", "\\") }
+
+async fn connection_details_for_iface(iface: &str) -> (String,String,String,String,String,String,String,String) {
+    // ip(v4), ip6, gateway, dns (joined), mac, mtu, prefix, state
+    let info = run("nmcli",&["-t","-e","yes","-f",
+        "IP4.ADDRESS,IP4.GATEWAY,IP4.DNS,IP6.ADDRESS,GENERAL.HWADDR,GENERAL.MTU,GENERAL.STATE",
+        "device","show",iface]).await;
+    let mut ip = String::new(); let mut ip6 = String::new(); let mut gateway = String::new();
+    let mut dns_list: Vec<String> = Vec::new(); let mut mac = String::new();
+    let mut mtu = String::new(); let mut prefix = String::new(); let mut state = String::new();
     for line in info.lines() {
-        if let Some(v) = line.strip_prefix("IP4.ADDRESS[1]:") { ip = v.split('/').next().unwrap_or("").to_string(); }
-        else if let Some(v) = line.strip_prefix("IP4.GATEWAY:") { gateway = v.to_string(); }
-        else if let Some(v) = line.strip_prefix("IP4.DNS[1]:") { dns = v.to_string(); }
-        else if let Some(v) = line.strip_prefix("GENERAL.HWADDR:") { mac = v.to_string(); }
+        let (key, val) = match line.split_once(':') { Some(kv) => kv, None => continue };
+        let val = nm_unescape(val.trim());
+        if key.starts_with("IP4.ADDRESS") {
+            let mut parts = val.splitn(2,'/');
+            ip = parts.next().unwrap_or("").to_string();
+            prefix = parts.next().unwrap_or("").to_string();
+        } else if key == "IP4.GATEWAY" { gateway = val; }
+        else if key.starts_with("IP4.DNS") { if !val.is_empty() { dns_list.push(val); } }
+        else if key.starts_with("IP6.ADDRESS") && ip6.is_empty() { ip6 = val.split('/').next().unwrap_or("").to_string(); }
+        else if key == "GENERAL.HWADDR" { mac = val; }
+        else if key == "GENERAL.MTU" { mtu = val; }
+        else if key == "GENERAL.STATE" { state = val; }
     }
-    format!(r#"{{"ip":"{}","gateway":"{}","dns":"{}","mac":"{}","iface":"{}"}}"#,
-        esc(&ip),esc(&gateway),esc(&dns),esc(&mac),esc(&iface))
+    (ip, ip6, gateway, dns_list.join(", "), mac, mtu, prefix, state)
+}
+
+// Find the active interface of a given type ("wifi" | "ethernet").
+async fn active_iface_of(kind: &str) -> String {
+    let dev_out = run("nmcli",&["-t","-f","DEVICE,TYPE,STATE","device"]).await;
+    let needle = format!(":{}:", kind);
+    dev_out.lines()
+        .find(|l| l.contains(&needle) && l.contains("connected"))
+        .and_then(|l| l.split(':').next().map(|s| s.to_string()))
+        .unwrap_or_default()
+}
+
+#[tauri::command] async fn get_wifi_details(_ssid: String) -> String {
+    let iface = {
+        let i = active_iface_of("wifi").await;
+        if i.is_empty() { "wlan0".to_string() } else { i }
+    };
+    let (ip, ip6, gateway, dns, mac, mtu, prefix, state) = connection_details_for_iface(&iface).await;
+    // Link speed / rate (bitrate) for WiFi
+    let rate = run("nmcli",&["-t","-f","GENERAL.CONNECTION","device","show",&iface]).await;
+    let _ = rate; // connection name not needed here
+    format!(r#"{{"ip":"{}","ip6":"{}","gateway":"{}","dns":"{}","mac":"{}","mtu":"{}","prefix":"{}","state":"{}","iface":"{}"}}"#,
+        esc(&ip),esc(&ip6),esc(&gateway),esc(&dns),esc(&mac),esc(&mtu),esc(&prefix),esc(&state),esc(&iface))
+}
+
+// ── Ethernet (wired) ─────────────────────────────────────────────────────
+#[tauri::command] async fn get_ethernet_status() -> String {
+    let dev_out = run("nmcli",&["-t","-f","DEVICE,TYPE,STATE,CONNECTION","device"]).await;
+    for line in dev_out.lines() {
+        let p: Vec<&str> = line.splitn(4,':').collect();
+        if p.len() >= 3 && p.get(1) == Some(&"ethernet") {
+            let connected = p.get(2).map(|s| s.contains("connected") && !s.contains("disconnected")).unwrap_or(false);
+            let name = p.get(3).map(|s| nm_unescape(s)).unwrap_or_default();
+            return format!(r#"{{"present":true,"connected":{},"iface":"{}","connection":"{}"}}"#,
+                connected, esc(p.first().unwrap_or(&"")), esc(&name));
+        }
+    }
+    r#"{"present":false,"connected":false,"iface":"","connection":""}"#.into()
+}
+
+#[tauri::command] async fn get_ethernet_details() -> String {
+    let iface = active_iface_of("ethernet").await;
+    if iface.is_empty() {
+        // Fall back to first ethernet device even if not "connected"
+        let dev_out = run("nmcli",&["-t","-f","DEVICE,TYPE","device"]).await;
+        let fb = dev_out.lines().find(|l| l.contains(":ethernet"))
+            .and_then(|l| l.split(':').next().map(|s| s.to_string())).unwrap_or_default();
+        if fb.is_empty() { return r#"{"present":false}"#.into(); }
+        let (ip,ip6,gw,dns,mac,mtu,prefix,state)=connection_details_for_iface(&fb).await;
+        return format!(r#"{{"present":true,"ip":"{}","ip6":"{}","gateway":"{}","dns":"{}","mac":"{}","mtu":"{}","prefix":"{}","state":"{}","iface":"{}"}}"#,
+            esc(&ip),esc(&ip6),esc(&gw),esc(&dns),esc(&mac),esc(&mtu),esc(&prefix),esc(&state),esc(&fb));
+    }
+    let (ip,ip6,gw,dns,mac,mtu,prefix,state)=connection_details_for_iface(&iface).await;
+    format!(r#"{{"present":true,"ip":"{}","ip6":"{}","gateway":"{}","dns":"{}","mac":"{}","mtu":"{}","prefix":"{}","state":"{}","iface":"{}"}}"#,
+        esc(&ip),esc(&ip6),esc(&gw),esc(&dns),esc(&mac),esc(&mtu),esc(&prefix),esc(&state),esc(&iface))
 }
 
 // ── Get WiFi saved password (tries without sudo, then with sudo) ──────────
@@ -3196,20 +4201,55 @@ fn lockscreen_source() -> Option<String> {
     run("pactl",&["set-sink-input-volume",&index.to_string(),&format!("{}%",volume)]).await;
     r#"{"ok":true}"#.into()
 }
+// Map an ugly PipeWire/ALSA description + active port into a friendly,
+// human label. Falls back to the raw description if nothing matches.
+fn friendly_audio_name(desc: &str, port: &str, lang_es: bool) -> String {
+    let p = port.to_lowercase();
+    let d = desc.to_lowercase();
+    let pick = |es: &str, en: &str| if lang_es { es.to_string() } else { en.to_string() };
+    // Bluetooth devices already have a clean name (the device name) — keep desc.
+    if d.contains("bluez") || p.contains("bluetooth") { return desc.to_string(); }
+    if p.contains("headphone") || d.contains("headphone") { return pick("Auriculares", "Headphones"); }
+    if p.contains("headset")   || d.contains("headset")   { return pick("Auriculares con micrófono", "Headset"); }
+    if p.contains("speaker")   || p.contains("internal")  { return pick("Altavoces internos", "Internal speakers"); }
+    if p.contains("hdmi")      || p.contains("displayport") || d.contains("hdmi") { return pick("Salida HDMI / DisplayPort", "HDMI / DisplayPort"); }
+    if p.contains("usb")       || d.contains("usb")       { return pick("Dispositivo USB", "USB device"); }
+    if p.contains("mic")       || d.contains("microphone") { return pick("Micrófono interno", "Internal microphone"); }
+    // Generic onboard codec names → "Audio interno"
+    if d.contains("hd audio") || d.contains("hda ") || d.contains("alc") || d.contains("sof") || d.contains("controller") {
+        return pick("Audio interno", "Built-in audio");
+    }
+    desc.to_string()
+}
+
 #[tauri::command] async fn get_sink_descriptions() -> String {
     let out = run("pactl",&["list","sinks"]).await;
+    let lang_es = std::env::var("LANG").unwrap_or_default().starts_with("es");
     let mut map: Vec<serde_json::Value> = Vec::new();
     let mut cur_name = String::new();
+    let mut cur_desc = String::new();
+    let mut cur_port = String::new();
+    let flush = |map: &mut Vec<serde_json::Value>, name: &str, desc: &str, port: &str| {
+        if !name.is_empty() && !desc.is_empty() {
+            let friendly = friendly_audio_name(desc, port, lang_es);
+            map.push(serde_json::json!({"name":name,"desc":desc,"friendly":friendly}));
+        }
+    };
     for line in out.lines() {
         let t = line.trim();
-        if let Some(n) = t.strip_prefix("Name:") { cur_name = n.trim().to_string(); }
-        else if let Some(d) = t.strip_prefix("Description:") {
-            if !cur_name.is_empty() {
-                map.push(serde_json::json!({"name":cur_name,"desc":d.trim()}));
-                cur_name = String::new();
-            }
+        if let Some(n) = t.strip_prefix("Name:") {
+            // New sink block starts — flush the previous one.
+            flush(&mut map, &cur_name, &cur_desc, &cur_port);
+            cur_name = n.trim().to_string();
+            cur_desc = String::new();
+            cur_port = String::new();
+        } else if let Some(d) = t.strip_prefix("Description:") {
+            cur_desc = d.trim().to_string();
+        } else if let Some(ap) = t.strip_prefix("Active Port:") {
+            cur_port = ap.trim().to_string();
         }
     }
+    flush(&mut map, &cur_name, &cur_desc, &cur_port);
     serde_json::to_string(&map).unwrap_or_else(|_| "[]".into())
 }
 // ── Autostart apps ───────────────────────────────────────────────────────
@@ -3333,6 +4373,23 @@ fn get_startup_page() -> String {
     String::new()
 }
 
+/// Opens the Software Updates page: drops the page hint where both a running
+/// instance (polled via check_navigation_request) and a fresh launch
+/// (get_startup_page) will pick it up, then launches/focuses the app.
+fn open_updates_page() {
+    let _ = std::fs::write("/tmp/bookos-start-page", "actualizacion");
+    // Try to launch the desktop entry (focuses existing window via single-instance,
+    // or starts a new one). Fall back to the binary with --page.
+    let launched = StdCommand::new("gtk-launch")
+        .arg("bookos-settings.desktop")
+        .spawn().is_ok();
+    if !launched {
+        let _ = StdCommand::new("bookos-settings")
+            .args(["--page", "actualizacion"])
+            .spawn();
+    }
+}
+
 /// Checks if another process has requested a page navigation (single-instance signal).
 /// Called periodically by the running instance. Reads and deletes /tmp/bookos-start-page.
 #[tauri::command]
@@ -3423,7 +4480,9 @@ fn save_bookos_settings(v: &serde_json::Value) {
         let mgr = detect_pkg_mgr();
         let sys_cmd = match mgr {
             "pacman"      => "checkupdates 2>/dev/null | wc -l",
-            "dnf5"|"dnf"  => "dnf check-update -q 2>/dev/null | grep -cE '^[a-zA-Z0-9]'",
+            // sed '/^$/q' stops at the first blank line, dropping the trailing
+            // "Obsoleting Packages" section so it isn't counted as an update.
+            "dnf5"|"dnf"  => "dnf check-update -q 2>/dev/null | sed '/^$/q' | grep -cE '^[a-zA-Z0-9]'",
             "apt"         => "apt list --upgradable 2>/dev/null | grep -c '/'",
             "zypper"      => "zypper -q list-updates 2>/dev/null | grep -c '^v '",
             _             => "echo 0",
@@ -3436,9 +4495,19 @@ fn save_bookos_settings(v: &serde_json::Value) {
         // Icon: prefer hicolor bookos-settings, fall back to system theme.
         let exec = format!(
 "/bin/sh -c '\
+CFG=\"$HOME/.config/bookos/settings.json\"; \
+if [ -f \"$CFG\" ] && grep -q \"\\\"UpdateNotifications\\\"[[:space:]]*:[[:space:]]*\\\"false\\\"\" \"$CFG\"; then exit 0; fi; \
 LANG_PREFIX=$(echo \"${{LANG:-en}}\" | cut -c1-2); \
 ICON=software-update-available; \
 [ -f /usr/share/icons/hicolor/scalable/apps/bookos-settings.svg ] && ICON=bookos-settings; \
+[ \"$LANG_PREFIX\" = \"es\" ] && OPENLBL=Abrir || OPENLBL=Open; \
+nclick() {{ \
+  ACT=$(notify-send -u normal --icon=$ICON -a \"BookOS\" -c \"system.software-update\" -h string:desktop-entry:bookos-settings --wait -A \"default=$OPENLBL\" -A \"open=$OPENLBL\" \"$1\" \"$2\"); \
+  if [ \"$ACT\" = default ] || [ \"$ACT\" = open ]; then \
+    echo actualizacion > /tmp/bookos-start-page; \
+    gtk-launch bookos-settings.desktop >/dev/null 2>&1 || bookos-settings --page actualizacion >/dev/null 2>&1 & \
+  fi; \
+}}; \
 # ── BookOS release check ─────────────────────────────────
 if [ -f /etc/bookos-release ]; then \
   REL_VER=$(grep -m1 ^VERSION= /etc/bookos-release | cut -d= -f2-); \
@@ -3452,7 +4521,7 @@ if [ -f /etc/bookos-release ]; then \
       T_TITLE=\"New BookOS version\"; \
       T_BODY=\"$REL_NAME is available. Open Settings to install.\"; \
     fi; \
-    notify-send -u normal --icon=$ICON -a \"BookOS Settings\" \"$T_TITLE\" \"$T_BODY\"; \
+    nclick \"$T_TITLE\" \"$T_BODY\"; \
   fi; \
 fi; \
 # ── Package updates ───────────────────────────────────────
@@ -3465,7 +4534,7 @@ if [ \"$TOTAL\" -gt 0 ]; then \
     [ \"$TOTAL\" = \"1\" ] && U_TITLE=\"1 update available\" || U_TITLE=\"$TOTAL updates available\"; \
     U_BODY=\"Open BookOS Settings to review and install.\"; \
   fi; \
-  notify-send -u normal --icon=$ICON -a \"BookOS Settings\" \"$U_TITLE\" \"$U_BODY\"; \
+  nclick \"$U_TITLE\" \"$U_BODY\"; \
 fi'",
             sys_cmd = sys_cmd, flat_cmd = flat_cmd
         );
@@ -3505,6 +4574,171 @@ fi'",
         return format!(r#"{{"percentage":"{}","found":true}}"#, esc(&pct));
     }
     r#"{"percentage":"","found":false}"#.into()
+}
+
+// ── Earbud detection daemon ─────────────────────────────────────────────
+// Polls connected Bluetooth audio devices; when a new pair of earbuds/headset
+// connects, fires a desktop notification with the battery levels (Galaxy Buds
+// Client style). Runs in the background for the lifetime of the app.
+
+// Is this bluez "Icon" value an audio/earbud device?
+fn bt_icon_is_audio(icon: &str) -> bool {
+    let i = icon.to_lowercase();
+    i.contains("headphone") || i.contains("headset") || i.contains("earbud")
+        || i.contains("audio-card") || i == "audio-headphones" || i == "audio-headset"
+}
+
+// List currently-connected audio devices: Vec<(mac, name)>.
+async fn connected_audio_devices() -> Vec<(String, String)> {
+    let connected = run_timeout("bluetoothctl", &["devices", "Connected"], 3_000).await;
+    let mut out = Vec::new();
+    for line in connected.lines() {
+        let l = line.trim().trim_start_matches(|c: char| c=='[' || c==']' || c=='#' || c.is_whitespace());
+        let idx = match l.find("Device ") { Some(i) => i, None => continue };
+        let rest = &l[idx + "Device ".len()..];
+        let (mac, name) = match rest.split_once(' ') { Some(p) => p, None => continue };
+        if mac.len()!=17 || mac.matches(':').count()!=5 { continue; }
+        let info = run_timeout("bluetoothctl", &["info", mac], 2_000).await;
+        let icon = info.lines().find(|l| l.trim_start().starts_with("Icon:"))
+            .and_then(|l| l.split(':').nth(1)).map(|s| s.trim().to_string()).unwrap_or_default();
+        if bt_icon_is_audio(&icon) {
+            out.push((mac.to_string(), name.trim().to_string()));
+        }
+    }
+    out
+}
+
+// Is this device a Samsung Galaxy Buds (by BT name)?
+fn name_is_galaxy_buds(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.contains("buds") || n.contains("galaxy buds")
+}
+
+// Read native L/R/case battery from an already-open BudsConn in BudsState.
+// Returns (left, right, case) if connected to this mac.
+fn native_buds_battery(state: &buds::BudsState) -> Option<(u8, u8, u8, String)> {
+    let guard = state.0.lock().ok()?;
+    let conn = guard.as_ref()?;
+    // Ask for a fresh extended-status; the reader thread updates conn.status.
+    let s = conn.status.lock().ok()?.clone();
+    if !s.connected { return None; }
+    Some((s.battery_l, s.battery_r, s.battery_case, s.model.clone()))
+}
+
+// Background loop: detect newly-connected Galaxy Buds, connect natively over the
+// Samsung SPP protocol (no GalaxyBudsClient needed), read L/R/case battery and
+// fire a desktop notification — Quick-Share style native integration.
+async fn earbud_watch_loop(app: tauri::AppHandle) {
+    use std::collections::HashSet;
+    let mut known: HashSet<String> = HashSet::new();
+    let mut first_pass = true;
+    loop {
+        // Cheap gate: when the adapter is powered off there's nothing to watch —
+        // skip device enumeration entirely and back off (saves constant spawns).
+        let show = run_timeout("bluetoothctl", &["show"], 2_000).await;
+        if show.contains("Powered: no") || show.is_empty() {
+            known.clear();   // forget state so a reconnect after power-on notifies again
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            continue;
+        }
+        let devs = connected_audio_devices().await;
+        let current: HashSet<String> = devs.iter().map(|(m, _)| m.clone()).collect();
+        known.retain(|m| current.contains(m));
+        for (mac, name) in &devs {
+            if known.insert(mac.clone()) && !first_pass && name_is_galaxy_buds(name) {
+                handle_buds_appeared(&app, mac, name).await;
+            }
+        }
+        first_pass = false;
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    }
+}
+
+// Themed icon installed by the package (line-art earbuds) used in buds notifications.
+// Minimal percent-encoder for query values (name/mac → popup URL).
+fn pct_encode(s: &str) -> String {
+    s.bytes().map(|b| match b {
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+        _ => format!("%{:02X}", b),
+    }).collect()
+}
+
+// Create (or replace) the frameless Buds popup window, top-right of the primary
+// monitor. `state` is "connect" (Conectar/Descartar prompt) or "connected"
+// (battery rings). Must run on the main thread — see spawn via run_on_main_thread.
+fn create_buds_popup(app: &tauri::AppHandle, state: &str, name: &str, mac: &str, l: u8, r: u8, c: u8) {
+    use tauri::{Manager, WebviewWindowBuilder, WebviewUrl, PhysicalPosition, PhysicalSize};
+    // Replace any existing popup so data is always fresh.
+    if let Some(w) = app.get_webview_window("buds-popup") { let _ = w.close(); }
+
+    let url = format!(
+        "buds-popup.html?state={}&name={}&mac={}&l={}&r={}&c={}",
+        state, pct_encode(name), pct_encode(mac), l, r, c
+    );
+    let built = WebviewWindowBuilder::new(app, "buds-popup", WebviewUrl::App(url.into()))
+        .title("BookOS Buds")
+        .inner_size(400.0, 330.0)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .focused(false)
+        .shadow(false)
+        .visible(false)
+        .build();
+
+    let win = match built { Ok(w) => w, Err(e) => { eprintln!("[buds/popup] build failed: {e}"); return; } };
+    // Anchor top-right with a small margin.
+    if let Ok(Some(mon)) = win.primary_monitor() {
+        let sz = mon.size();
+        let outer = win.outer_size().unwrap_or(PhysicalSize::new(400, 330));
+        let margin = 24i32;
+        let x = (sz.width as i32 - outer.width as i32 - margin).max(0);
+        let y = 52i32;
+        let _ = win.set_position(PhysicalPosition::new(x, y));
+    }
+    let _ = win.show();
+
+    // Buds already linked → bring the full app up too (not just the popup).
+    if state == "connected" { show_main_window(app); }
+}
+
+// Bring the main window to the foreground (used on buds connect + from the popup).
+fn show_main_window(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(mw) = app.get_webview_window("main") {
+        let _ = mw.unminimize();
+        let _ = mw.set_skip_taskbar(false);
+        let _ = mw.show();
+        let _ = mw.set_focus();
+    }
+}
+
+#[tauri::command]
+fn open_main_window(app: tauri::AppHandle) {
+    show_main_window(&app);
+}
+
+// React to a freshly-detected pair of Galaxy Buds:
+//   • already linked (quick reconnect)  → battery-rings popup straight away
+//   • not linked yet                    → Conectar / Descartar popup; the popup's
+//                                          Connect button opens the native SPP link
+//                                          (buds_connect) and swaps to battery rings.
+// Window creation is dispatched to the main thread.
+async fn handle_buds_appeared(app: &tauri::AppHandle, mac: &str, name: &str) {
+    use tauri::Manager;
+    let (state, l, r, c) = match native_buds_battery(&app.state::<buds::BudsState>()) {
+        Some((l, r, c, _)) => ("connected", l, r, c),
+        None => ("connect", 0u8, 0u8, 0u8),
+    };
+    let app2 = app.clone();
+    let name2 = name.to_string();
+    let mac2 = mac.to_string();
+    let state2 = state.to_string();
+    let _ = app.run_on_main_thread(move || {
+        create_buds_popup(&app2, &state2, &name2, &mac2, l, r, c);
+    });
 }
 
 // Returns KDE Connect paired devices (phone battery etc.)
@@ -3675,8 +4909,36 @@ fn main() {
         .manage(buds::BudsState::default())
         .manage(quickshare::QsState::default())
         .manage(p2p::P2PState::default())
+        // Close-to-background: hiding the main window (instead of quitting) keeps the
+        // earbud-detection daemon + routines alive so the popup works "with the app
+        // closed". The popup window closes normally.
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    let _ = window.set_skip_taskbar(true);
+                }
+            }
+        })
         .setup(move |app| {
             use tauri::Manager;
+            // Routines/automation only work while this process is alive, so
+            // ensure the hidden autostart entry exists — unless the user
+            // explicitly disabled it (opt-out marker from the settings toggle).
+            {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let desktop_path = format!("{}/.config/autostart/bookos-settings.desktop", home);
+                if !std::path::Path::new(&autostart_optout_path()).exists()
+                    && !std::path::Path::new(&desktop_path).exists() {
+                    let _ = std::fs::create_dir_all(format!("{}/.config/autostart", home));
+                    let _ = std::fs::write(&desktop_path, AUTOSTART_DESKTOP);
+                }
+            }
+            // Background earbud-detection daemon: notifies on new buds/headset connect.
+            // Use Tauri's async runtime (a tokio runtime isn't active inside setup()).
+            let buds_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move { earbud_watch_loop(buds_app).await; });
             if let Some(window) = app.get_webview_window("main") {
                 if is_hidden || toggle_only {
                     let _ = window.set_skip_taskbar(true);
@@ -3863,7 +5125,27 @@ fn main() {
             });
 
             // ── Automatic Update Daemon ──────────────────────────────
-            std::thread::spawn(|| {
+            // Tray badge: hidden by default, shown by the update daemon when
+            // updates are pending. Click opens the updates page.
+            {
+                use tauri::tray::TrayIconBuilder;
+                let mut builder = TrayIconBuilder::with_id("updates")
+                    .tooltip("BookOS Settings")
+                    .on_tray_icon_event(|_tray, event| {
+                        if let tauri::tray::TrayIconEvent::Click { .. } = event {
+                            open_updates_page();
+                        }
+                    });
+                if let Some(icon) = app.default_window_icon() {
+                    builder = builder.icon(icon.clone());
+                }
+                if let Ok(tray) = builder.build(app.handle()) {
+                    let _ = tray.set_visible(false);
+                }
+            }
+
+            let upd_handle = app.handle().clone();
+            std::thread::spawn(move || {
                 // Wait 5 minutes after start to not saturate CPU
                 std::thread::sleep(std::time::Duration::from_secs(300));
                 loop {
@@ -3871,16 +5153,108 @@ fn main() {
                     let auto_upd = cfg.get("AutoUpdate").and_then(|v| v.as_str()).unwrap_or("false") == "true";
                     
                     if auto_upd {
-                        // Check updates (sync)
-                        let _ = StdCommand::new("pacman").arg("-Sy").output();
-                        let pac_out = StdCommand::new("pacman").arg("-Qu").output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
-                        let aur_out = StdCommand::new("paru").arg("-Qua").output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
-                        let total = pac_out.lines().count() + aur_out.lines().count();
-                        
-                        if total > 0 {
-                            let _ = StdCommand::new("notify-send")
-                                .args(["-u", "normal", "-i", "software-update-available", "Actualizaciones disponibles", &format!("Hay {} paquetes nuevos para instalar.", total)])
-                                .spawn();
+                        // Count pending updates, cross-distro.
+                        let total = match detect_pkg_mgr() {
+                            "pacman" => {
+                                // `pacman -Sy` needs root and silently failed here,
+                                // leaving stale DBs. checkupdates (pacman-contrib)
+                                // refreshes a private temp DB without root.
+                                let pac = StdCommand::new("checkupdates").output()
+                                    .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
+                                    .unwrap_or_else(|_| StdCommand::new("pacman").arg("-Qu").output()
+                                        .map(|o| String::from_utf8_lossy(&o.stdout).lines().count()).unwrap_or(0));
+                                let aur = StdCommand::new("paru").arg("-Qua").output().map(|o| String::from_utf8_lossy(&o.stdout).lines().count()).unwrap_or(0);
+                                pac + aur
+                            }
+                            "dnf5" | "dnf" => {
+                                let mgr = detect_pkg_mgr();
+                                StdCommand::new(mgr).args(["check-update","--quiet"]).output()
+                                    .map(|o| String::from_utf8_lossy(&o.stdout).lines()
+                                        .filter(|l| !l.is_empty() && !l.starts_with("Last") && !l.starts_with("Obsoleting")).count())
+                                    .unwrap_or(0)
+                            }
+                            "apt" => {
+                                let _ = StdCommand::new("apt").args(["update","-qq"]).output();
+                                StdCommand::new("apt").args(["list","--upgradable"]).output()
+                                    .map(|o| String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.contains('/')).count())
+                                    .unwrap_or(0)
+                            }
+                            "zypper" => {
+                                StdCommand::new("zypper").args(["--non-interactive","list-updates"]).output()
+                                    .map(|o| String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.starts_with("v ")||l.starts_with("| ")).count())
+                                    .unwrap_or(0)
+                            }
+                            _ => 0,
+                        };
+
+                        // Tray badge: persistent reminder, unlike the notification
+                        if let Some(tray) = upd_handle.tray_by_id("updates") {
+                            if total > 0 {
+                                let lang_t = std::env::var("LANG").unwrap_or_default();
+                                let tip = if lang_t.starts_with("es") {
+                                    if total == 1 { "1 actualización disponible".to_string() }
+                                    else { format!("{} actualizaciones disponibles", total) }
+                                } else {
+                                    if total == 1 { "1 update available".to_string() }
+                                    else { format!("{} updates available", total) }
+                                };
+                                let _ = tray.set_tooltip(Some(&tip));
+                                let _ = tray.set_title(Some(&total.to_string()));
+                                let _ = tray.set_visible(true);
+                            } else {
+                                let _ = tray.set_visible(false);
+                            }
+                        }
+                        // UpdateNotifications=false silences the popup (tray badge stays).
+                        let notify_on = load_bookos_settings().get("UpdateNotifications")
+                            .and_then(|v| v.as_str()).unwrap_or("true") != "false";
+                        if total > 0 && notify_on {
+                            // Pretty, branded notification — matches the timer notification.
+                            let icon = if std::path::Path::new("/usr/share/icons/hicolor/scalable/apps/bookos-settings.svg").exists()
+                                { "bookos-settings" } else { "software-update-available" };
+                            let lang = std::env::var("LANG").unwrap_or_default();
+                            let is_es = lang.starts_with("es");
+                            let (title, body) = if is_es {
+                                let t = if total == 1 { "1 actualización disponible".to_string() }
+                                        else { format!("{} actualizaciones disponibles", total) };
+                                (t, "Abre BookOS Settings para revisar e instalar.".to_string())
+                            } else {
+                                let t = if total == 1 { "1 update available".to_string() }
+                                        else { format!("{} updates available", total) };
+                                (t, "Open BookOS Settings to review and install.".to_string())
+                            };
+                            let action_label = if is_es { "Abrir" } else { "Open" };
+                            // Clickable notification: notify-send --wait blocks until the
+                            // user clicks the action (or the body). When it returns the
+                            // action key, open the Updates page. Run in its own thread so
+                            // the 6h check loop isn't blocked waiting for interaction.
+                            let icon_s = icon.to_string();
+                            let (t_s, b_s, act_s) = (title.clone(), body.clone(), action_label.to_string());
+                            std::thread::spawn(move || {
+                                let out = StdCommand::new("notify-send")
+                                    .args([
+                                        "-u", "normal",
+                                        "-a", "BookOS",
+                                        "-i", &icon_s,
+                                        "-c", "system.software-update",
+                                        "-h", "string:desktop-entry:bookos-settings",
+                                        "--wait",
+                                        "-A", &format!("default={}", act_s),
+                                        "-A", &format!("open={}", act_s),
+                                        &t_s, &b_s,
+                                    ])
+                                    .output();
+                                // If the user activated the notification, notify-send prints
+                                // the action key ("default" / "open") on stdout.
+                                let activated = out.as_ref().map(|o| {
+                                    let s = String::from_utf8_lossy(&o.stdout);
+                                    let s = s.trim();
+                                    s == "default" || s == "open"
+                                }).unwrap_or(false);
+                                if activated {
+                                    open_updates_page();
+                                }
+                            });
                         }
                     }
                     // Wait 6 hours for next check
@@ -3891,21 +5265,23 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            get_user_info,set_display_name,set_hostname,get_system_info,get_bookos_release,refresh_bookos_release,get_update_channel,set_update_channel,apply_bookos_release,
+            open_main_window,
+            get_user_info,set_display_name,set_hostname,get_system_info,get_default_hostname,get_bookos_release,refresh_bookos_release,get_update_channel,set_update_channel,apply_bookos_release,list_bookos_snapshots,rollback_bookos_snapshot,get_snapshot_support,get_bookos_repo_status,set_bookos_repo,
             check_hw_features,set_performance_mode,set_charge_limit,set_background_throttle,predict_battery_runtime,
             get_wifi_status,toggle_wifi,get_wifi_list,connect_wifi,wifi_rescan,
             get_bluetooth_status,toggle_bluetooth,get_bluetooth_devices,connect_bluetooth,disconnect_bluetooth,bluetooth_scan,
             get_airplane_mode,toggle_airplane_mode,
             get_brightness,set_brightness,get_kbd_brightness,set_kbd_brightness,
-            get_nightlight,set_nightlight,
+            get_nightlight,set_nightlight,set_nightlight_schedule,
             get_volume,set_volume,toggle_mute,set_balance,get_balance,
             get_battery_status,get_battery_sysfs,get_battery_history,get_battery_csv_data,get_adaptive_predictions,set_adaptive_charging,
             get_display_info,set_resolution,set_vrr_policy,
-            get_current_theme,get_available_themes,set_color_scheme,get_theme_schedule,set_theme_schedule,
+            get_current_theme,get_available_themes,set_color_scheme,get_theme_schedule,set_theme_schedule,set_icon_style,
             get_kde_light_dark_themes,apply_kde_theme,
             get_dnd_status,toggle_dnd,
             get_lock_timeout,set_lock_timeout,set_lock_grace,get_lock_grace,check_fingerprint,enroll_fingerprint,verify_password,verify_fingerprint,
             get_locale_info,get_available_locales,set_locale,get_available_keymaps,set_keymap,
+            get_datetime_info,list_timezones,set_timezone,set_ntp,
             check_system_updates,check_aur_updates,check_flatpak_updates,run_system_update,run_pacman_update_silent,get_update_progress,cancel_update,run_flatpak_update,run_aur_update,get_pkg_mgr,has_flatpak,logout_session,
             get_app_power_usage,get_sddm_themes,set_sddm_theme,get_sddm_config,set_sddm_config,preview_sddm,
             is_lockscreen_theme_installed,install_lockscreen_theme,uninstall_lockscreen_theme,
@@ -3916,9 +5292,9 @@ fn main() {
             get_autostart_bookos,toggle_autostart_bookos,get_autostart_apps,toggle_autostart_app,setup_polkit_rules,export_settings,import_settings,
             get_accessibility_settings,set_font_scale,set_display_scale,toggle_invert_colors,set_cursor_size,
             change_password,set_avatar,create_user,delete_user,get_autologin_status,set_autologin,get_labs_settings,set_lab_setting,
-            forget_wifi,get_wifi_details,get_wifi_password,log_app_usage,track_active_app,
-            get_wallpapers,get_current_wallpaper,set_wallpaper,
-            get_default_apps,open_mime_settings,
+            forget_wifi,get_wifi_details,get_ethernet_status,get_ethernet_details,get_wifi_password,log_app_usage,track_active_app,
+            get_wallpapers,add_wallpapers,get_current_wallpaper,set_wallpaper,
+            get_default_apps,list_apps_for_role,set_default_app,open_mime_settings,
             get_bookos_setting,set_bookos_setting,get_settings_batch,configure_auto_update,restore_startup_settings,get_startup_page,check_navigation_request,write_ipc_state,read_ipc_state,
             get_available_kvantum_themes,get_available_plasma_themes,get_style_themes,set_style_themes,
             get_bt_device_battery,get_kdeconnect_devices,

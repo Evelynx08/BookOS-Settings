@@ -1,1379 +1,43 @@
-import{tauriInvoke,getAssetUrl}from'../tauri-api.js';
-import{t}from'./i18n.js';
-
-// ── Settings cache — optimistic in-memory store, updated on every write ──
-// Prevents toggle state from "resetting" when navigating back to a page before
-// the disk write completes or before get_bookos_setting returns.
-const _sc=new Map();
-async function getSetting(key,def=''){
-    if(_sc.has(key))return _sc.get(key);
-    try{const v=JSON.parse(await tauriInvoke('get_bookos_setting',{key,defaultVal:def})).value;_sc.set(key,v);return v;}
-    catch(e){console.error('[getSetting]',key,e);return def;}
-}
-function setSetting(key,value){
-    _sc.set(key,String(value)); // update cache synchronously — UI reads this next time
-    return tauriInvoke('set_bookos_setting',{key,value:String(value)}).catch(()=>{});
-}
-
-// ── Invoke result cache — avoids re-running slow shell commands on back-navigation ──
-// TTLs are conservative: hardware rarely changes in <30s of normal use.
-const _ic=new Map();
-const _IC_TTL={
-    check_hw_features:30000,   // powerprofilesctl, sysfs reads
-    get_display_info:30000,    // kscreen-doctor
-    get_sink_descriptions:60000, // pactl list sinks - descriptive, static
-    get_audio_devices:10000,   // pactl short lists
-    get_system_info:120000,    // uname, lscpu — never changes
-    get_available_themes:120000,
-    get_kde_light_dark_themes:30000,
-    get_style_themes:30000,
-    get_kwin_effects:30000,
-    get_battery_history:20000, // upower history
-    get_battery_sysfs:3000,    // fast, but no need to re-read more than 3s
-    get_current_theme:5000,    // color scheme — changes only on user action
-    get_style_themes:30000,    // kvantum theme list
-    get_app_power_usage:15000, // ps aux
-};
-async function ci(cmd,args){
-    const ttl=_IC_TTL[cmd];
-    if(!ttl)return tauriInvoke(cmd,args);
-    const key=cmd+(args?JSON.stringify(args):'');
-    const hit=_ic.get(key);
-    if(hit&&Date.now()-hit.ts<ttl)return hit.v;
-    const v=await tauriInvoke(cmd,args);
-    _ic.set(key,{v,ts:Date.now()});
-    return v;
-}
-// Invalidate a cache entry when we know it changed (e.g. after setting a mode)
-function _icInvalidate(cmd){for(const k of _ic.keys())if(k.startsWith(cmd))_ic.delete(k);}
-
-// ── Hardware state cache (5s TTL) — avoids blocking page loads on kscreen-doctor ──
-const _hwCache={data:null,ts:0};
-async function getCachedHwState(){
-    const now=Date.now();
-    if(_hwCache.data&&now-_hwCache.ts<5000)return _hwCache.data;
-    try{
-        const d=await tauriInvoke('obtener_estado_pantalla');
-        _hwCache.data=d;_hwCache.ts=Date.now();return d;
-    }catch{return null;}
-}
-export function invalidateHwCache(){_hwCache.data=null;_hwCache.ts=0;}
-
-// ── HTML Escape (prevents XSS from WiFi SSIDs, BT names, pkg names) ──
-function esc(s){
-    const d=document.createElement('div');
-    d.textContent=s;
-    return d.innerHTML;
-}
-
-// ── Auto-refresh helper — registers interval in _pageIntervals, cleaned up on navigation.
-// Skips firing while the document is hidden (window minimized / sidebar collapsed away),
-// which keeps CPU near 0 when the user isn't watching.
-function addInterval(fn, ms){
-    if(!window._pageIntervals)window._pageIntervals=[];
-    const id=setInterval(()=>{ if(!document.hidden) fn(); },ms);
-    window._pageIntervals.push(id);
-    return id;
-}
-
-// ── Toast notification system ──
-let toastContainer=null;
-// Map legacy emoji icons -> inline SVG for clean visual style. Falls back to the
-// passed string if no mapping (so old toast('msg','✓') still works).
-const _TOAST_ICONS = {
-    '✓':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
-    '✕':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
-    '❌':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
-    '✅':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
-    '⚠':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
-    '⚠️':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
-    '⚡':'<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
-    '🔋':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="6" width="18" height="12" rx="2" ry="2"/><line x1="23" y1="13" x2="23" y2="11"/></svg>',
-    '🔒':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
-    '🔔':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>',
-    '🔊':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>',
-    '🔁':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>',
-    '🔗':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>',
-    '🎧':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>',
-    '🎙️':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>',
-    '📷':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>',
-    '📋':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>',
-    '🌙':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>',
-    '🛡':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
-    '🛡️':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
-    '🗑️':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
-    '🧹':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19.36 2.72 9.21 12.87a2 2 0 0 0-.55 1.05L7 22l8.09-1.66a2 2 0 0 0 1.05-.55L26.28 9.64a2 2 0 0 0 0-2.83l-4.09-4.09a2 2 0 0 0-2.83 0z" transform="scale(0.85) translate(-2 -2)"/></svg>',
-    '🔑':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>',
-    '⬇':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>',
-    '↩':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg>',
-    '✋':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-4 0v5"/><path d="M14 10V4a2 2 0 0 0-4 0v6"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg>',
-    '🎯':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>',
-    '🎉':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5.8 11.3 2 22l10.7-3.79"/><path d="M4 3h.01M22 8h.01M15 2h.01M22 20h.01"/><path d="m22 2-2.24.75a2.9 2.9 0 0 0-1.96 3.12c.1.86-.57 1.63-1.45 1.63h-.38c-.86 0-1.6.6-1.76 1.44L14 10"/></svg>',
-    '📶':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>',
-    '📍':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>',
-    '🚪':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>',
-    '♻️':'<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 4 7 4 7 8"/><path d="M3 11v6a2 2 0 0 0 2 2h6"/><polyline points="21 20 17 20 17 16"/><path d="M21 13V7a2 2 0 0 0-2-2h-6"/></svg>',
-    '...':'',
-};
-// Runtime ES->EN dict for toast messages. Lets us keep call-site strings short
-// without converting every toast to i18n keys. Patterns can use $1/$2 for params.
-const _TOAST_TR_EN = {
-    'Contraseña incorrecta':'Wrong password',
-    'Contraseña incorrecta o error':'Wrong password or error',
-    'Huella verificada — pero esta acción aún requiere contraseña':'Fingerprint verified — this action still requires password',
-    'Conectando...':'Connecting...',
-    'Error al conectar':'Connection failed',
-    'Error':'Error',
-    'Red olvidada':'Network forgotten',
-    'Error al olvidar la red':'Failed to forget network',
-    'Estilo guardado':'Style saved',
-    'Horario guardado':'Schedule saved',
-    'Perfil automático activado':'Automatic profile enabled',
-    'Balance centrado':'Balance centered',
-    'Volumen cambiado':'Volume changed',
-    'Carga ilimitada':'Unlimited charge',
-    'Error al aplicar límite de carga':'Failed to apply charge limit',
-    'Carga adaptativa activada':'Adaptive charging on',
-    'Carga adaptativa desactivada':'Adaptive charging off',
-    'Abriendo historial':'Opening history',
-    'Permiso denegado':'Permission denied',
-    'Periodo de gracia actualizado':'Grace period updated',
-    'Historial borrado':'History cleared',
-    'Huella registrada':'Fingerprint registered',
-    'Pantalla de inicio actualizada':'Login screen updated',
-    'Error al guardar configuración SDDM':'Failed to save SDDM settings',
-    'Error al seleccionar imagen':'Failed to select image',
-    'Tema aplicado':'Theme applied',
-    'Modo oscuro activado':'Dark mode enabled',
-    'Modo claro activado':'Light mode enabled',
-    'Sonidos activados':'Sounds enabled',
-    'Sonidos desactivados':'Sounds disabled',
-    'AOD activado':'AOD enabled',
-    'AOD desactivado':'AOD disabled',
-    'Book Bar activada':'Book Bar enabled',
-    'Book Bar desactivada':'Book Bar disabled',
-    'Limpieza completada':'Cleanup complete',
-    'Programado para esta noche':'Scheduled for tonight',
-    'Tema lockscreen activado':'Lockscreen theme enabled',
-    'Tema lockscreen desactivado':'Lockscreen theme disabled',
-    'Tema SDDM activado':'SDDM theme enabled',
-    'Tema SDDM desactivado':'SDDM theme disabled',
-    'Reconexión automática activada':'Auto-reconnect enabled',
-    'Reconexión automática desactivada':'Auto-reconnect disabled',
-    'Conexión fácil activada':'Easy pairing enabled',
-    'Conexión fácil desactivada':'Easy pairing disabled',
-    'Próximamente':'Coming soon',
-    'Cortafuegos activado':'Firewall enabled',
-    'Cortafuegos desactivado':'Firewall disabled',
-    'Cámara activada':'Camera enabled',
-    'Cámara bloqueada':'Camera blocked',
-    'Micrófono activo':'Microphone active',
-    'Micrófono silenciado':'Microphone muted',
-    'Historial activado':'History enabled',
-    'Historial desactivado':'History disabled',
-    'Movimiento reducido':'Motion reduced',
-    'Animaciones normales':'Animations normal',
-    'Tamaño del cursor actualizado':'Cursor size updated',
-    'Tamaño actualizado — cierra sesión para aplicar':'Size updated — log out to apply',
-    'Colores invertidos':'Colors inverted',
-    'Colores normales':'Colors normal',
-    'Latencia del cursor optimizada':'Cursor latency optimized',
-    'Latencia restablecida a valores por defecto':'Latency reset to default',
-    'Gestos táctiles activados':'Touch gestures enabled',
-    'Gestos táctiles desactivados':'Touch gestures disabled',
-    'Paleta de colores activada':'Color palette enabled',
-    'Paleta desactivada':'Color palette disabled',
-    'Atenuación activada':'Dimming enabled',
-    'Atenuación desactivada':'Dimming disabled',
-    'Error EQ':'EQ error',
-    'Centro':'Center',
-};
-
-function _toastTr(msg){
-    if(!msg) return msg;
-    const lang = (typeof localStorage!=='undefined' ? localStorage.getItem('bookos_lang') : null) || 'es';
-    if (lang === 'es') return msg;
-    if (_TOAST_TR_EN[msg]) return _TOAST_TR_EN[msg];
-    // Try prefix matches like "EQ: Dinámico"
-    for (const k in _TOAST_TR_EN) {
-        if (msg.startsWith(k + ':') || msg.startsWith(k + ' ')) {
-            return _TOAST_TR_EN[k] + msg.slice(k.length);
-        }
-    }
-    return msg;
-}
-
-function toast(msg, icon='✓'){
-    if(!toastContainer){
-        toastContainer=document.createElement('div');
-        toastContainer.className='toast-container';
-        document.body.appendChild(toastContainer);
-    }
-    const t=document.createElement('div');
-    t.className='toast';
-    // Map known emoji icons to inline SVG so toasts look uniform; arbitrary HTML icons pass through.
-    const svgIcon = _TOAST_ICONS[icon] !== undefined ? _TOAST_ICONS[icon] : icon;
-    t.innerHTML=`<span class="toast-icon">${svgIcon}</span>${esc(_toastTr(msg))}`;
-    toastContainer.appendChild(t);
-    setTimeout(()=>t.remove(),3000);
-}
-// Expose globally so other modules / event listeners can show toasts
-if(typeof window!=='undefined'){
-    window.toast=toast;
-    // Lazy export — promptAuth is defined later in this file. Use a getter
-    // so the global picks up the live binding once the module finishes loading.
-    Object.defineProperty(window,'promptAuth',{configurable:true,get(){return promptAuth;}});
-}
-
-// ── Dialog (replaces browser confirm()) ──
-function showDialog(title,msg,{confirmText='Confirmar',confirmClass='confirm',cancelText='Cancelar',onConfirm,onCancel}={}){
-    const ov=document.createElement('div');
-    ov.className='bk-overlay';
-    ov.innerHTML=`<div class="bk-dialog">
-        <div class="bk-dialog-title">${title}</div>
-        ${msg?`<div class="bk-dialog-msg">${msg}</div>`:''}
-        <div class="bk-dialog-btns">
-            <button class="bk-dbtn cancel" id="d-cancel">${cancelText}</button>
-            ${confirmText!=null?`<button class="bk-dbtn ${confirmClass}" id="d-ok">${confirmText}</button>`:''}
-        </div>
-    </div>`;
-    document.body.appendChild(ov);
-    const close=()=>ov.remove();
-    ov.querySelector('#d-cancel').onclick=()=>{close();onCancel?.();};
-    ov.querySelector('#d-ok')?.addEventListener('click',()=>{close();onConfirm?.();});
-    ov.addEventListener('click',e=>{if(e.target===ov){close();onCancel?.();}});
-}
-
-// ── Root password prompt — thin wrapper over promptAuth() (defined later).
-// Returns Promise<string|null>. Fingerprint matches resolve with empty string
-// (callers that need the literal password should switch to promptAuth directly).
-function showRootAuth(title,desc=''){
-    return promptAuth({
-        title,
-        description:desc,
-        confirmLabel:'Autorizar',
-        verifyPassword:false,
-        allowFingerprint:true,
-    }).then(r=>{
-        if(!r)return null;
-        if(r.method==='fingerprint')return '';   // signal: use cached sudo / skip pw arg
-        return r.password||null;
-    });
-}
-
-// ── Generic Sudo action: shows prompt, runs command ──
-async function promptSudo(actionName, cmd, args) {
-    const pwd=await showRootAuth('Permisos requeridos',`Para ${actionName}, introduce la contraseña del equipo.`);
-    if(pwd===null)return false;
-    const res=JSON.parse(await tauriInvoke('run_sudo_command',{cmd,args,password:pwd}));
-    if(res.ok)return true;
-    toast('Contraseña incorrecta o error','❌');
-    return false;
-}
-
-/**
- * Invoke a backend command that may return `{ok:false, needs_auth:true}`.
- * If so, opens promptAuth() and re-invokes with the password injected as `password`.
- *
- * @param {string} cmd        Tauri command name
- * @param {object} args       Args dict
- * @param {object} authOpts   Forwarded to promptAuth
- * @returns parsed JSON response or null if user cancelled
- */
-async function invokeWithAuth(cmd, args={}, authOpts={}){
-    let r=JSON.parse(await tauriInvoke(cmd, args));
-    if(r.ok)return r;
-    if(!r.needs_auth)return r;
-    const auth=await promptAuth({
-        title:'Se requiere autorización',
-        description:'Esta acción modifica configuración del sistema. Confirma tu identidad para continuar.',
-        ...authOpts,
-    });
-    if(!auth)return null;
-    if(auth.method==='fingerprint'){
-        // No password to forward; backend will retry. Most backends still need a real
-        // sudo token though, so fingerprint alone won't satisfy them — fall through.
-        toast('Huella verificada — pero esta acción aún requiere contraseña','ℹ');
-        return null;
-    }
-    r=JSON.parse(await tauriInvoke(cmd, {...args, password:auth.password}));
-    if(!r.ok && r.error)toast('Error: '+r.error,'❌');
-    return r;
-}
-
-// ── Skeleton Loaders ──
-function renderSkeleton(rows=3){
-    const widths=['w80','w60','w100','w40'];
-    let html='<div class="skeleton">';
-    html+='<div class="skeleton-line thick w60"></div>';
-    for(let i=0;i<rows;i++) html+=`<div class="skeleton-line ${widths[i%widths.length]}"></div>`;
-    html+='</div>';
-    return html;
-}
-function renderSkeletonChart(){
-    let html='<div class="skeleton"><div class="skeleton-line w40"></div><div class="skeleton-bar-row">';
-    for(let i=0;i<24;i++) html+=`<div class="skeleton-bar" style="height:${20+Math.random()*60}%"></div>`;
-    html+='</div></div>';
-    return html;
-}
-
-// ── Readable UI Helpers ──
-function renderLoading(msg='Cargando...'){
-    return `<div class="loading"><div class="spinner"></div>${msg}</div>`;
-}
-function renderCard(items){
-    return `<div class="detail-card">${items.join('')}</div>`;
-}
-function renderInfoItem(title, subtitle=''){
-    return `<div class="detail-item"><span class="dt">${title}</span>${subtitle?`<span class="ds">${subtitle}</span>`:''}</div>`;
-}
-// Runtime ES->EN dict for all UI labels (rows, sections, headers).
-// Auto-translates any string that contains a known ES phrase when bookos_lang=en.
-const _UI_TR_EN = {
-    // Display page
-    'Ajustes del modo Oscuro':'Dark mode settings',
-    'Ajustes del modo Claro':'Light mode settings',
-    'Brillo':'Brightness',
-    'Fluidez de movimientos':'Motion smoothness',
-    'Protección de la vista':'Eye comfort',
-    'Modo de pantalla':'Screen mode',
-    'Tiempo de espera de pantalla':'Screen timeout',
-    'Tiempo de espera':'Timeout',
-    'Vision Booster':'Vision Booster',
-    'Brillo máximo · Gama amplia P3':'Max brightness · Wide P3 gamut',
-    'HDR10 nativo · Gama dinámica alta':'Native HDR10 · High dynamic range',
-    'Ahorro de pantalla':'Display saver',
-    '90 Hz · GPU en reposo · Brillo al 40%':'90 Hz · GPU idle · 40% brightness',
-    'Brillo de pantalla':'Screen brightness',
-    'Brillo del teclado':'Keyboard brightness',
-    'Automático':'Automatic',
-    'Activado':'On','Desactivado':'Off',
-    'Activada':'Enabled','Desactivada':'Disabled',
-    'Activar':'Enable','Desactivar':'Disable',
-    'Activar (90Hz)':'Enable (90Hz)','Desactivar (120Hz)':'Disable (120Hz)',
-    // Common labels
-    'Aplicaciones':'Applications',
-    'Batería':'Battery',
-    'Bluetooth':'Bluetooth',
-    'Conexiones':'Connections',
-    'Cuentas':'Accounts',
-    'Pantalla':'Display',
-    'Pantalla Inicio':'Home screen',
-    'Pantalla de bloqueo':'Lock screen',
-    'Sonidos y vibración':'Sound & vibration',
-    'Notificaciones':'Notifications',
-    'Modos y rutinas':'Modes & routines',
-    'Dispositivos conectados':'Connected devices',
-    'Seguridad y privacidad':'Security & privacy',
-    'Accesibilidad':'Accessibility',
-    'Funciones avanzadas':'Advanced features',
-    'Administración general':'General management',
-    'Actualización de software':'Software update',
-    'Acerca del portátil':'About this laptop',
-    'Temas':'Themes',
-    // Security/lock
-    'Tipo de bloqueo':'Lock type',
-    'Contraseña del sistema':'System password',
-    'Configurar huella':'Set up fingerprint',
-    'Huella registrada':'Fingerprint enrolled',
-    'Contraseña huella digital':'Fingerprint password',
-    'AOD':'AOD',
-    'Muestra información cuando la pantalla está apagada':'Show info when the screen is off',
-    'Mostrar Book Bar':'Show Book Bar',
-    'Pastilla dinámica con música, rutinas y batería':'Dynamic pill with music, routines and battery',
-    // Sound
-    'Volumen del sistema':'System volume',
-    'Silenciar':'Mute',
-    'Balance de audio':'Audio balance',
-    'Balance L/R':'L/R balance',
-    'Centrar':'Center',
-    'Centro':'Center',
-    'Izda':'L','Dcha':'R',
-    'Sonidos de notificación':'Notification sounds',
-    'Reproduce sonido al recibir notificaciones':'Play sound when receiving notifications',
-    'Sonidos de interfaz':'Interface sounds',
-    'Sonidos al hacer clic, navegar y otras acciones':'Sounds when clicking, navigating and other actions',
-    // Battery
-    'Ahorro de energía':'Power saver',
-    'Limita CPU y procesos en segundo plano':'Limits CPU and background processes',
-    'Carga adaptativa':'Adaptive charging',
-    'Inactiva':'Inactive',
-    'Activa':'Active',
-    'Protección de la batería':'Battery protection',
-    'Hasta el 80%':'Up to 80%',
-    'min para carga completa':'min until fully charged',
-    'para completar la carga':'to fully charge',
-    'min':'min',
-    'disponible':'available',
-    // Notifications page
-    'General':'General',
-    'No molestar':'Do not disturb',
-    'Permite notificaciones':'Allows notifications',
-    'Mostrar en pantalla bloqueada':'Show on lock screen',
-    'Ver notificaciones al bloquear':'See notifications when locked',
-    'Mostrar todas las notificaciones':'Show all notifications',
-    'Desactiva para ver sólo críticas':'Disable to see only critical',
-    'Audio':'Audio',
-    'Historial':'History',
-    'Historial de notificaciones':'Notification history',
-    'Abre el historial de Plasma':'Opens Plasma history',
-    'Abrir':'Open',
-    // Security
-    'Cortafuegos':'Firewall',
-    'Cortafuegos (UFW)':'Firewall (UFW)',
-    'Bloquear al reanudar de suspensión':'Lock when resuming from suspend',
-    'Pide contraseña al despertar':'Ask for password on wake',
-    'Bloqueo automático':'Auto-lock',
-    'Periodo de gracia':'Grace period',
-    'Tiempo sin pedir contraseña al despertar':'Time without prompting password on wake',
-    'Inmediatamente':'Immediately',
-    'Cámara y micrófono':'Camera & microphone',
-    'Cámara':'Camera',
-    'Micrófono':'Microphone',
-    'Silenciado en todo el sistema':'Muted system-wide',
-    'Privacidad':'Privacy',
-    'Historial de actividades':'Activity history',
-    'Plasma registra tus archivos y apps recientes':'Plasma tracks your recent files and apps',
-    'Borrar historial de actividades':'Clear activity history',
-    // Wallpaper / theme picker
-    'Oscuro':'Dark',
-    'Claro':'Light',
-    'Fondo':'Background',
-    'Paleta':'Palette',
-    'Cambiar fondo de pantalla':'Change wallpaper',
-    'Paleta de colores':'Color palette',
-    'Ajusta colores según el fondo':'Adjusts colors based on wallpaper',
-    'Atenuar fondo de pantalla':'Dim wallpaper',
-    'Atenúa en modo oscuro':'Dims in dark mode',
-    'Fondos disponibles':'Available wallpapers',
-    // Accounts
-    'Crear usuario':'Create user',
-    'Eliminar usuario':'Delete user',
-    'Inicio de sesión automático':'Automatic login',
-    'Cambiar avatar':'Change avatar',
-    'Cambiar contraseña':'Change password',
-    'Nombre completo':'Full name',
-    // Pantalla Inicio
-    'Escritorio':'Desktop',
-    'Iconos en el escritorio':'Desktop icons',
-    'Muestra iconos de archivos y apps de fondo':'Show file and background app icons',
-    'Rejilla de alineacion':'Alignment grid',
-    'Ajusta los iconos automáticamente a la cuadricula':'Auto-align icons to grid',
-    'Etiquetas de iconos':'Icon labels',
-    'Muestra el nombre debajo de cada icono':'Show the name below each icon',
-    'Tamaño de iconos':'Icon size',
-    'Cambia el tamaño de los iconos en el escritorio':'Change the size of desktop icons',
-    'Pequeño':'Small','Mediano':'Medium','Grande':'Large',
-    'Posición de la barra de tareas':'Taskbar position',
-    'Abajo':'Bottom','Izquierda':'Left','Derecha':'Right','Arriba':'Top',
-    'Accesos directos':'Shortcuts',
-    'Atajos de teclado':'Keyboard shortcuts',
-    'Atajos del sistema':'System shortcuts',
-    'Asigna teclas a acciones de KDE Plasma':'Assign keys to KDE Plasma actions',
-    'Atajos personalizados':'Custom shortcuts',
-    'Crea atajos para lanzar apps':'Create shortcuts to launch apps',
-    // Admin general
-    'Idioma de la aplicación':'Application language',
-    'Idioma / Language':'Language',
-    'Idiomas y entrada':'Languages & input',
-    'Idioma del sistema':'System language',
-    'Distribución del teclado':'Keyboard layout',
-    'Comportamiento de la aplicación':'Application behavior',
-    'Lanzar al iniciar sesión':'Launch at login',
-    'Abre BookOS Settings en segundo plano al encender':'Opens BookOS Settings in background at startup',
-    'Inicio automático':'Autostart',
-    // Buds
-    'Calidad y efectos de sonido':'Sound quality & effects',
-    'Controles de auriculares':'Earbud controls',
-    'Controles de voz':'Voice controls',
-    'Administrar conexiones':'Manage connections',
-    'Buscar mis auriculares':'Find my earbuds',
-    'Diagnóstico':'Diagnostics',
-    'Acerca de los auriculares':'About earbuds',
-    'Adaptar a tus oídos':'Adapt to your ears',
-    'Reconexión automática':'Auto-reconnect',
-    'Conexta los buds cuando estén cerca y encendidos':'Connect buds when nearby and powered on',
-    'Conexión fácil con auriculares':'Easy pairing',
-    'Cambia entre dispositivos cercanos sin desemparejar':'Switch between nearby devices without re-pairing',
-    'Cambio automático a sonido ambiente':'Auto switch to ambient sound',
-    'Estado guardado':'Saved state',
-    'Ecualizador':'Equalizer',
-    'Dinámico':'Dynamic',
-    'Estándar':'Standard',
-    'Plano':'Flat',
-    'Suave':'Soft',
-    // Buds EQ "Claro" preset — same Spanish word as "Light", but JS object keys must be unique.
-    // Keep theme mapping (Claro→Light) and translate Buds preset inline at call site instead.
-    'Realce de graves':'Bass Boost',
-    'Realce de agudos':'Treble Boost',
-    'Sonido Ambiente':'Ambient Sound',
-    'Sonido ambiente':'Ambient sound',
-    'Cancelación activa de ruido':'Active noise cancelling',
-    'Adaptable':'Adaptive',
-    'Touchpad':'Touchpad',
-    'Bloqueado':'Locked',
-    'Activo':'Active',
-    'Auricular izquierdo':'Left earbud',
-    'Auricular derecho':'Right earbud',
-    'Número de serie':'Serial number',
-    'Batería Izquierda':'Left battery',
-    'Batería Derecha':'Right battery',
-    'Batería Estuche':'Case battery',
-    'Cliente':'Client',
-    'Galaxy Buds nativo (BookOS)':'Galaxy Buds native (BookOS)',
-    // Fit test
-    'Coloca los auriculares en tus oídos. El test reproducirá un tono y medirá el sello.':'Place the earbuds in your ears. The test will play a tone and measure the seal.',
-    'Iniciar prueba':'Start test',
-    'Probando…':'Testing…',
-    'Repetir prueba':'Repeat test',
-    'Buen ajuste':'Good fit',
-    'Ajuste flojo':'Loose fit',
-    'Mal ajuste':'Poor fit',
-    'Izquierdo':'Left','Derecho':'Right',
-    // Generic
-    'Sí':'Yes','No':'No',
-    'Reiniciar':'Restart',
-    'Cerrar':'Close',
-    'Aceptar':'Accept','Confirmar':'Confirm',
-    'Guardar':'Save','Aplicar':'Apply',
-    'Cerrar sesión':'Log out',
-    'Más tarde':'Later',
-    // Sidebar nav (sidebar items localized via i18n already, plus aliases here)
-    'WiFi · Bluetooth · Modo Avión':'WiFi · Bluetooth · Airplane',
-    'Share · Buds':'Share · Buds',
-    'Modos · Rutinas':'Modes · Routines',
-    'Volumen · Melodía':'Volume · Ringtone',
-    'Brillo · Resolución · Protector vista':'Brightness · Resolution · Eye care',
-    'Energía · Carga':'Power · Charging',
-    'Bloqueo · Biometría · AOD':'Lock · Biometrics · AOD',
-    'Diseño · Apps':'Layout · Apps',
-    'Fondos · Paleta':'Wallpapers · Palette',
-    'Temas · Modo oscuro':'Themes · Dark mode',
-    'Asistente de escritura · notas':'Writing assistant · notes',
-    // Battery page extras
-    'Cargando hasta el':'Charging up to',
-    'Consumo':'Consumption',
-    'min para completar la carga':'min to fully charge',
-    'Activa — carga completa':'Active — fully charged',
-    'Ahorra batería':'Save battery',
-    'Modo ahorro':'Saver mode',
-    'Modo ahorro activado':'Saver mode on',
-    'Modo ahorro desactivado':'Saver mode off',
-    'Ahorro de batería':'Battery saver',
-    'Ahorro extremo':'Extreme saver',
-    'Ahorro extremo (5W)':'Extreme saver (5W)',
-    'Avisar al alcanzar el límite':'Notify when limit reached',
-    'Batería baja (<20%)':'Low battery (<20%)',
-    'Batería casi agotada':'Battery nearly empty',
-    'Atenuar pantalla automáticamente':'Auto-dim screen',
-    'Atenúa cuando la batería es baja':'Dim when battery is low',
-    'Atenúa en modo oscuro':'Dims in dark mode',
-    // Connections
-    'Activa Bluetooth para ver tus Buds':'Enable Bluetooth to see your Buds',
-    'Activa el modo vinculación en el otro dispositivo':'Enable pairing mode on the other device',
-    'Bluetooth activado':'Bluetooth enabled',
-    'Bluetooth desactivado':'Bluetooth disabled',
-    'WiFi activado':'WiFi enabled',
-    'WiFi desactivado':'WiFi disabled',
-    'Modo Avión':'Airplane mode',
-    'Modo avión activado':'Airplane mode on',
-    'Modo avión desactivado':'Airplane mode off',
-    'Sin conexión activa':'No active connection',
-    'Selecciona una red abajo':'Select a network below',
-    'Conectar':'Connect',
-    'Desconectar':'Disconnect',
-    'Conectado a':'Connected to',
-    'Olvidar':'Forget',
-    'Red abierta':'Open network',
-    'Protegida':'Secured',
-    'Buscando redes':'Searching networks',
-    // Notifications
-    'No molestar':'Do not disturb',
-    'Permite notificaciones':'Allows notifications',
-    'Mostrar en pantalla bloqueada':'Show on lock screen',
-    'Ver notificaciones al bloquear':'See notifications when locked',
-    'Mostrar todas las notificaciones':'Show all notifications',
-    'Desactiva para ver sólo críticas':'Disable to see only critical',
-    // Common adjectives/verbs
-    'Apagado':'Off',
-    'Encendido':'On',
-    'Ninguno':'None',
-    'Personalizado':'Custom',
-    'Recomendado':'Recommended',
-    'Avanzado':'Advanced',
-    'Predeterminado':'Default',
-    'Sin configurar':'Not configured',
-    'Sin asignar':'Unassigned',
-    'No disponible':'Unavailable',
-    'Cargando':'Loading',
-    'Cargando…':'Loading…',
-    'Iniciando':'Starting',
-    'Iniciando…':'Starting…',
-    'Procesando':'Processing',
-    'Listo':'Ready',
-    'Hecho':'Done',
-    'Pendiente':'Pending',
-    'Error':'Error',
-    'Cancelar':'Cancel',
-    'Atrás':'Back',
-    'Siguiente':'Next',
-    'Anterior':'Previous',
-    'Buscar':'Search',
-    'Editar':'Edit',
-    'Borrar':'Delete',
-    'Eliminar':'Remove',
-    'Añadir':'Add',
-    'Renombrar':'Rename',
-    'Exportar':'Export',
-    'Importar':'Import',
-    'Restablecer':'Reset',
-    'Restaurar':'Restore',
-    'Predeterminados':'Defaults',
-    // Themes
-    'Modo oscuro':'Dark mode',
-    'Modo claro':'Light mode',
-    'Pantalla de inicio oscura o clara':'Dark or light home screen',
-    'Programar tema':'Schedule theme',
-    'Cambiar automáticamente por hora':'Switch automatically by time',
-    'Claro desde':'Light from',
-    'Oscuro desde':'Dark from',
-    'Tema claro':'Light theme',
-    'Tema oscuro':'Dark theme',
-    'Tema aplicado':'Theme applied',
-    // Updates extras
-    'Cancelando':'Cancelling',
-    'Cancelado':'Cancelled',
-    'Actualización cancelada':'Update cancelled',
-    'Descargando e instalando actualizaciones...':'Downloading and installing updates...',
-    'Sin paquetes pendientes':'No pending packages',
-    'Actualizar todo ahora':'Update all now',
-    'Actualizar por la noche':'Update tonight',
-    'Actualizar ahora':'Update now',
-    'Programado para esta noche':'Scheduled for tonight',
-    'Fuente':'Source',
-    'Instalado':'Installed',
-    'Disponible':'Available',
-    'Sistema':'System',
-    'Kernel':'Kernel',
-    // Performance modes
-    'Optimizado':'Balanced',
-    'Equilibrado':'Balanced',
-    'Silencioso':'Quiet',
-    'Rendimiento':'Performance',
-    'Máximo poder':'Max power',
-    'Mínimo consumo':'Min consumption',
-    // Buds extras
-    'Galaxy Buds':'Galaxy Buds',
-    'Coloca tu dedo en el lector':'Place your finger on the reader',
-    'o usa tu huella dactilar':'or use your fingerprint',
-    'Coloca el dedo en el sensor':'Place your finger on the sensor',
-    'Bloqueo de mayúsculas activado':'Caps Lock enabled',
-    'Reposo':'Sleep',
-    'Cambiar usuario':'Switch user',
-    // Lockscreen install toggles
-    'Tema BookOS — Pantalla de bloqueo':'BookOS theme — Lock screen',
-    'Reemplaza el lockscreen de Plasma':'Replaces the Plasma lockscreen',
-    'Tema BookOS — SDDM (login)':'BookOS theme — SDDM (login)',
-    'Activa el tema BookOS al iniciar sesión':'Enable BookOS theme at login',
-    // Sound additional
-    'Salida':'Output',
-    'Entrada':'Input',
-    'Dispositivo de salida':'Output device',
-    'Dispositivo de entrada':'Input device',
-    'Volumen por aplicación':'Per-app volume',
-    'Sin aplicaciones reproduciendo':'No apps playing',
-    // Confirm/dialog
-    'Borrar historial':'Clear history',
-    'Se eliminará el historial':'History will be deleted',
-    'No se pueden recuperar':'Cannot be recovered',
-    // Network
-    'Contraseña':'Password',
-    'Mostrar contraseña':'Show password',
-    'Recordar':'Remember',
-    'Conectarse a esta red automáticamente':'Connect to this network automatically',
-
-    // ── Bulk extras — full coverage pass ──
-    'A una hora específica':'At a specific time',
-    'Abierta':'Open',
-    'Abre BookOS Settings en segundo plano al encender':'Opens BookOS Settings in the background at startup',
-    'Abre Nearby Share en el S22 Ultra':'Open Nearby Share on the S22 Ultra',
-    'Abriendo configuración MIME':'Opening MIME settings',
-    'Abriendo previsualización…':'Opening preview…',
-    'Aceptando…':'Accepting…',
-    'Activa — carga completa':'Active — fully charged',
-    'Activa Quick Share primero':'Enable Quick Share first',
-    'activar el cortafuegos':'enable firewall',
-    'desactivar el cortafuegos':'disable firewall',
-    'Activar carga adaptativa':'Enable adaptive charging',
-    'Activar inicio automático':'Enable autostart',
-    'Activar modo enfoque':'Enable focus mode',
-    'Activo — buscando dispositivos':'Active — searching devices',
-    'Activo — Wi-Fi Direct conectado':'Active — Wi-Fi Direct connected',
-    'Actualización cancelada':'Update cancelled',
-    'Actualizando ':'Updating ',
-    'Adobe RGB':'Adobe RGB',
-    'Agudos':'Treble',
-    'Ahora':'Now',
-    'Ahorra batería':'Save battery',
-    'Ahorro activado · procesos en segundo plano limitados':'Saver on · background processes limited',
-    'Ajusta KWin para menor latencia de entrada':'Adjusts KWin for lower input latency',
-    'Ajustes del modo ':'Mode settings ',
-    'Ajustes exportados a ':'Settings exported to ',
-    'Ajustes importados':'Settings imported',
-    'Al activar Bluetooth':'When enabling Bluetooth',
-    'Al activar el WiFi':'When enabling WiFi',
-    'Al conectar el cargador':'When charger connects',
-    'Al desactivar Bluetooth':'When disabling Bluetooth',
-    'Al desactivar el WiFi':'When disabling WiFi',
-    'Al desconectar el cargador':'When charger disconnects',
-    'Alta precisión':'High precision',
-    'Animación al minimizar ventanas':'Animation when minimizing windows',
-    'Animaciones reducidas':'Reduced motion',
-    'Animaciones reducidas activadas':'Reduced motion enabled',
-    'Animaciones restauradas':'Animations restored',
-    'Añade imágenes a ~/Imágenes o /usr/share/wallpapers':'Add images to ~/Pictures or /usr/share/wallpapers',
-    'Añade reglas polkit para obviar contraseñas en control':'Add polkit rules to skip passwords in control',
-    'Añadir acción':'Add action',
-    'Añadir condición':'Add condition',
-    'Archivo':'File',
-    'Asegúrate de que Quick Share esté activo en el otro equipo':'Make sure Quick Share is active on the other device',
-    'Asistente de voz':'Voice assistant',
-    'Atenuación activada':'Dimming enabled',
-    'Atenuación automática activada':'Auto-dim enabled',
-    'Atenuación automática desactivada':'Auto-dim disabled',
-    'Atenuación desactivada':'Dimming disabled',
-    'AUR actualizado':'AUR updated',
-    'Auto / Auto-detect':'Auto / Auto-detect',
-    'Autorizar':'Authorize',
-    'Avisar al alcanzar el límite':'Notify when limit reached',
-    'Avisos de objetivo activados':'Goal alerts enabled',
-    'Bajar volumen':'Volume down',
-    'Subir volumen':'Volume up',
-    'Barra de estado extendida':'Extended status bar',
-    'Barra extendida activada (recarga para ver)':'Extended bar on (reload to see)',
-    'Barra extendida desactivada':'Extended bar off',
-    'Bloqueada a nivel del kernel':'Blocked at kernel level',
-    'Bloquear toques':'Lock touches',
-    'Bloqueo al reanudar activado':'Lock on resume enabled',
-    'Borra caché de thumbnails':'Clear thumbnail cache',
-    'Buds':'Buds',
-    'Buscando…':'Searching…',
-    'Buscar mis auriculares':'Find my earbuds',
-    'Buscar redes':'Search networks',
-    'Buscar dispositivos':'Search devices',
-    'Cambiar fondo de pantalla':'Change wallpaper',
-    'Cambiar avatar':'Change avatar',
-    'Cambiar nombre':'Change name',
-    'Cambiar contraseña':'Change password',
-    'Cambiar usuario':'Switch user',
-    'Cancelado':'Cancelled',
-    'Cancelando':'Cancelling',
-    'Cancelando…':'Cancelling…',
-    'Cancelar':'Cancel',
-    'Capturas de pantalla':'Screenshots',
-    'Carga ilimitada':'Unlimited charge',
-    'Cargar al 80%':'Charge to 80%',
-    'Cargar al 100%':'Charge to 100%',
-    'Cargando…':'Loading…',
-    'Cargando hasta el':'Charging up to',
-    'Centrar':'Center',
-    'Centro':'Center',
-    'Cerrando…':'Closing…',
-    'Cerrar':'Close',
-    'Cerrar sesión':'Log out',
-    'Cifrado':'Encrypted',
-    'Coincidencias':'Matches',
-    'Coloca el dedo en el sensor':'Place your finger on the sensor',
-    'Coloca tu dedo en el lector':'Place your finger on the reader',
-    'Coloca tu dedo repetidamente en el sensor...':'Place your finger on the sensor repeatedly...',
-    'Color':'Color',
-    'Comprobando…':'Checking…',
-    'Conectando':'Connecting',
-    'Conectando...':'Connecting...',
-    'Conectado':'Connected',
-    'Confirmar':'Confirm',
-    'Confirmar contraseña':'Confirm password',
-    'Conmutar':'Toggle',
-    'Consumo':'Consumption',
-    'Consumo actual':'Current consumption',
-    'Contraseña':'Password',
-    'Contraseña incorrecta':'Wrong password',
-    'Contraseña incorrecta o error':'Wrong password or error',
-    'Contraseña actual':'Current password',
-    'Contraseña nueva':'New password',
-    'Continuar':'Continue',
-    'Controles de auriculares':'Earbud controls',
-    'Controles de voz':'Voice controls',
-    'Controles táctiles':'Touch controls',
-    'Copiado al portapapeles':'Copied to clipboard',
-    'Copiar':'Copy',
-    'Copiar enlace':'Copy link',
-    'Cortafuegos activado':'Firewall enabled',
-    'Cortafuegos desactivado':'Firewall disabled',
-    'Crear':'Create',
-    'Crear cuenta':'Create account',
-    'Crear usuario':'Create user',
-    'Cuenta creada':'Account created',
-    'Cuenta eliminada':'Account deleted',
-    'Datos':'Data',
-    'Datos móviles':'Mobile data',
-    'De camino al trabajo':'On the way to work',
-    'Deja que BookOS gestione la carga':'Let BookOS manage charging',
-    'Desactivado':'Disabled',
-    'Desactivar':'Disable',
-    'Desconectado':'Disconnected',
-    'Desconectando…':'Disconnecting…',
-    'Descripción':'Description',
-    'Desenfoque de fondo':'Background blur',
-    'Desfase':'Offset',
-    'Despertar pantalla':'Wake screen',
-    'Detalles':'Details',
-    'Detalles avanzados':'Advanced details',
-    'Detectados':'Detected',
-    'Detectando…':'Detecting…',
-    'Detener':'Stop',
-    'Diagnóstico':'Diagnostics',
-    'Días':'Days',
-    'Diariamente':'Daily',
-    'Dirección':'Address',
-    'Dirección IP':'IP address',
-    'Dirección MAC':'MAC address',
-    'Disco':'Disk',
-    'Dispositivo':'Device',
-    'Dispositivo desconocido':'Unknown device',
-    'Dispositivos cercanos':'Nearby devices',
-    'Dispositivos emparejados':'Paired devices',
-    'Distribución del teclado':'Keyboard layout',
-    'Documentos':'Documents',
-    'Domingo':'Sunday',
-    'DPI':'DPI',
-    'Duración':'Duration',
-    'Editar':'Edit',
-    'Efecto lámpara mágica':'Magic lamp effect',
-    'Ejecutar':'Run',
-    'Eliminar':'Delete',
-    'Eliminar usuario':'Delete user',
-    'Empezando…':'Starting…',
-    'Empezar':'Start',
-    'En espera':'Standby',
-    'En modo oscuro':'In dark mode',
-    'En reposo':'Idle',
-    'En uso':'In use',
-    'Enero':'January','Febrero':'February','Marzo':'March','Abril':'April',
-    'Mayo':'May','Junio':'June','Julio':'July','Agosto':'August',
-    'Septiembre':'September','Octubre':'October','Noviembre':'November','Diciembre':'December',
-    'Lunes':'Monday','Martes':'Tuesday','Miércoles':'Wednesday','Jueves':'Thursday','Viernes':'Friday','Sábado':'Saturday',
-    'Energía':'Power',
-    'Energía · Carga':'Power · Charging',
-    'Entradas y salidas':'Inputs & outputs',
-    'Equilibrado':'Balanced',
-    'Error al conectar':'Connection failed',
-    'Error al guardar':'Failed to save',
-    'Error al seleccionar imagen':'Failed to select image',
-    'Error al aplicar':'Failed to apply',
-    'Error al olvidar la red':'Failed to forget network',
-    'Es muy útil para ver vídeos':'Very useful for watching videos',
-    'Escaneando…':'Scanning…',
-    'Escribir':'Write',
-    'Escritorio':'Desktop',
-    'Espacio en disco':'Disk space',
-    'Espacio libre':'Free space',
-    'Esperando':'Waiting',
-    'Establecer como predeterminado':'Set as default',
-    'Estado':'Status',
-    'Estado actual':'Current status',
-    'Estilo guardado':'Style saved',
-    'Estuche':'Case',
-    'Excelente':'Excellent',
-    'Exportar ajustes':'Export settings',
-    'Fallido':'Failed',
-    'Falta poco':'Almost done',
-    'Falta':'Missing',
-    'Faltan':'Missing',
-    'Familia':'Family',
-    'Fecha':'Date',
-    'Fecha y hora':'Date & time',
-    'Filtros':'Filters',
-    'Finalizado':'Finished',
-    'Fluidez de movimientos':'Motion smoothness',
-    'Fondo de pantalla y estilo':'Wallpaper & style',
-    'Formato del reloj':'Clock format',
-    'Frecuencia':'Frequency',
-    'Frecuencia de actualización':'Refresh rate',
-    'Funciones avanzadas':'Advanced features',
-    'Galería':'Gallery',
-    'Gama dinámica alta':'High dynamic range',
-    'GPU en reposo':'GPU idle',
-    'Grabar pantalla':'Record screen',
-    'Graves':'Bass',
-    'Guardando…':'Saving…',
-    'Guardar':'Save',
-    'Hardware':'Hardware',
-    'Hasta el':'Up to',
-    'Hecho':'Done',
-    'Hora':'Time',
-    'Hora de fin':'End time',
-    'Hora de inicio':'Start time',
-    'Horario':'Schedule',
-    'Horario guardado':'Schedule saved',
-    'HDR':'HDR',
-    'HDR10 nativo · Gama dinámica alta':'Native HDR10 · High dynamic range',
-    'Iconos del escritorio':'Desktop icons',
-    'Idioma':'Language',
-    'Idioma de la app':'App language',
-    'Idioma del sistema':'System language',
-    'Idioma cambiado':'Language changed',
-    'Importar ajustes':'Import settings',
-    'Imágenes':'Pictures',
-    'Inactiva':'Inactive',
-    'Inactivo':'Idle',
-    'Iniciar prueba':'Start test',
-    'Iniciando':'Starting',
-    'Iniciando…':'Starting…',
-    'Inicio automático':'Autostart',
-    'Inicio de sesión':'Login',
-    'Instalado':'Installed',
-    'Instalando':'Installing',
-    'Intensidad':'Intensity',
-    'Invertir':'Invert',
-    'Izda':'L','Izda %1':'L %1',
-    'Lanzar al iniciar sesión':'Launch at login',
-    'Limpiar caché':'Clear cache',
-    'Limpieza completada':'Cleanup complete',
-    'Listo':'Ready',
-    'Llamadas':'Calls',
-    'Localización':'Location',
-    'Marca':'Brand',
-    'Más opciones':'More options',
-    'Mejor experiencia':'Best experience',
-    'Memoria':'Memory',
-    'Mensajes':'Messages',
-    'Micrófono activo':'Microphone active',
-    'Micrófono silenciado':'Microphone muted',
-    'Mínimo consumo':'Min consumption',
-    'Mismo día':'Same day',
-    'Modelo':'Model',
-    'Modo':'Mode',
-    'Modo Ahorro':'Saver mode',
-    'Modo ahorro activado':'Saver mode on',
-    'Modo ahorro desactivado':'Saver mode off',
-    'Modo gaming':'Gaming mode',
-    'Modo trabajo':'Work mode',
-    'Modo viaje':'Travel mode',
-    'Modo enfoque':'Focus mode',
-    'Modo silencio':'Silent mode',
-    'Modos y rutinas':'Modes & routines',
-    'Mostrar':'Show',
-    'Mostrar siempre':'Always show',
-    'Movimiento reducido':'Motion reduced',
-    'Música':'Music',
-    'Música pausada':'Music paused',
-    'Música reanudada':'Music resumed',
-    'Necesita reinicio':'Reboot required',
-    'Ningún dispositivo emparejado':'No paired devices',
-    'Ningún resultado':'No results',
-    'Nombre':'Name',
-    'Nombre Bluetooth':'Bluetooth name',
-    'Nombre completo':'Full name',
-    'Nombre de usuario':'Username',
-    'Nota':'Note',
-    'Nuevo':'New',
-    'Número':'Number',
-    'Número de serie':'Serial number',
-    'OK':'OK',
-    'Olvidar':'Forget',
-    'Online':'Online',
-    'Opciones':'Options',
-    'Operativa':'Operational',
-    'Optimizar':'Optimize',
-    'Optimizar latencia del cursor':'Optimize cursor latency',
-    'Otros':'Others',
-    'Paleta de colores':'Color palette',
-    'Paleta desactivada':'Palette disabled',
-    'Pantalla':'Display',
-    'Pantalla apagada':'Screen off',
-    'Pantalla bloqueada':'Screen locked',
-    'Pantalla de bloqueo':'Lock screen',
-    'Pantalla de inicio':'Home screen',
-    'Pantalla principal':'Main display',
-    'Pantalla secundaria':'Secondary display',
-    'Pantalla Inicio':'Home screen',
-    'Paquetes':'Packages',
-    'Pausada':'Paused',
-    'Pausado':'Paused',
-    'Periodo de gracia':'Grace period',
-    'Periodo de gracia actualizado':'Grace period updated',
-    'Pequeño':'Small','Mediano':'Medium','Grande':'Large',
-    'Permiso denegado':'Permission denied',
-    'Personalizar':'Customize',
-    'Por defecto':'Default',
-    'Porcentaje':'Percentage',
-    'Posición':'Position',
-    'Posición de la barra de tareas':'Taskbar position',
-    'Predeterminados':'Defaults',
-    'Predicción':'Prediction',
-    'Preparando…':'Preparing…',
-    'Preparando...':'Preparing...',
-    'Privacidad':'Privacy',
-    'Procesador':'Processor',
-    'Probando…':'Testing…',
-    'Procesando':'Processing',
-    'Procesando…':'Processing…',
-    'Programado para esta noche':'Scheduled for tonight',
-    'Protección de batería':'Battery protection',
-    'Protección de la batería':'Battery protection',
-    'Protección de la vista':'Eye comfort',
-    'Punto de acceso':'Hotspot',
-    'Quitar':'Remove',
-    'Realce de graves':'Bass Boost',
-    'Realce de agudos':'Treble Boost',
-    'Reciente':'Recent',
-    'Recientes':'Recent',
-    'Reconectar':'Reconnect',
-    'Reconexión automática':'Auto-reconnect',
-    'Recordar':'Remember',
-    'Recursos':'Resources',
-    'Red':'Network',
-    'Red abierta':'Open network',
-    'Red olvidada':'Network forgotten',
-    'Redes':'Networks',
-    'Redes disponibles':'Available networks',
-    'Reducir movimiento':'Reduce motion',
-    'Reiniciar':'Restart',
-    'Reiniciar compositor':'Restart compositor',
-    'Reiniciando…':'Restarting…',
-    'Repetir prueba':'Repeat test',
-    'Reposo':'Sleep',
-    'Reproducir':'Play',
-    'Reproductor':'Player',
-    'Resolución':'Resolution',
-    'Resolución de pantalla':'Screen resolution',
-    'Restablecer':'Reset',
-    'Restablecido':'Reset',
-    'Restaurar':'Restore',
-    'Resultados':'Results',
-    'Rutinas':'Routines',
-    'Rutina creada':'Routine created',
-    'Rutina eliminada':'Routine deleted',
-    'Salida':'Output',
-    'Salida de audio':'Audio output',
-    'Samsung Display':'Samsung Display',
-    'sb_lab_extended_battery':'Extended battery',
-    'Seguridad':'Security',
-    'Seguridad y privacidad':'Security & privacy',
-    'Seleccionar':'Select',
-    'Seleccionar imagen':'Select image',
-    'Seleccionar archivo':'Select file',
-    'Selecciona una red abajo':'Select a network below',
-    'Sensor de presencia':'Presence sensor',
-    'Servidor DNS':'DNS server',
-    'Si no funciona, abre Ajustes del Sistema → Atajos':'If it doesn\'t work, open System Settings → Shortcuts',
-    'Siguiente':'Next',
-    'Siguiente pista':'Next track',
-    'Silenciado en todo el sistema':'Muted system-wide',
-    'Silencio activado':'Silent on',
-    'Silencio desactivado':'Silent off',
-    'Sin auriculares conectados':'No earbuds connected',
-    'Sin caja':'No case',
-    'Sin conexión':'No connection',
-    'Sin datos':'No data',
-    'Sin dispositivos':'No devices',
-    'Sin huella':'No fingerprint',
-    'Sin imagen':'No image',
-    'Sin resultados':'No results',
-    'Sistema':'System',
-    'Solo administradores':'Admins only',
-    'Solo notificaciones críticas':'Only critical notifications',
-    'Sólido':'Solid',
-    'Sonido':'Sound',
-    'Sonidos y vibración':'Sound & vibration',
-    'Sonidos del sistema':'System sounds',
-    'Subir':'Upload',
-    'Subir archivo':'Upload file',
-    'Suspender':'Suspend',
-    'Tamaño':'Size',
-    'Tamaño de texto':'Text size',
-    'Tamaño del cursor':'Cursor size',
-    'Tarea':'Task',
-    'Tareas':'Tasks',
-    'Teclado':'Keyboard',
-    'Tema aplicado':'Theme applied',
-    'Tema global':'Global theme',
-    'Tema BookOS':'BookOS theme',
-    'Tema lockscreen activado':'Lockscreen theme enabled',
-    'Tema lockscreen desactivado':'Lockscreen theme disabled',
-    'Tema SDDM activado':'SDDM theme enabled',
-    'Tema SDDM desactivado':'SDDM theme disabled',
-    'Temas':'Themes',
-    'Temporizador':'Timer',
-    'Texto':'Text',
-    'Tiempo':'Time',
-    'Tiempo de bloqueo':'Lock time',
-    'Tipo':'Type',
-    'Tipo de bloqueo':'Lock type',
-    'Tipo de cuenta':'Account type',
-    'Tipografía':'Font',
-    'Tipografía del reloj':'Clock font',
-    'Toca para activar':'Tap to enable',
-    'Toca para desactivar':'Tap to disable',
-    'Touchpad':'Touchpad',
-    'Tu equipo está actualizado':'Your system is up to date',
-    'Última comprobación':'Last checked',
-    'Última comprobación: ahora mismo':'Last checked: just now',
-    'Última conexión':'Last connection',
-    'Última sincronización':'Last sync',
-    'Único':'Once',
-    'Unidades':'Units',
-    'Usuario':'User',
-    'Usuario actual':'Current user',
-    'Usuarios':'Users',
-    'Valor':'Value',
-    'Velocidad':'Speed',
-    'Ventana':'Window',
-    'Ventanas elásticas':'Wobbly windows',
-    'Ver':'View',
-    'Ver detalles':'View details',
-    'Ver historial':'View history',
-    'Ver más':'See more',
-    'Ver menos':'See less',
-    'Verificar':'Verify',
-    'Verificado':'Verified',
-    'Verificando…':'Verifying…',
-    'Versión':'Version',
-    'Vibración':'Vibration',
-    'Vídeos':'Videos',
-    'Visible':'Visible',
-    'Volumen':'Volume',
-    'Volumen cambiado':'Volume changed',
-    'Volumen máximo':'Max volume',
-    'Volumen mínimo':'Min volume',
-    'WiFi':'WiFi','Wi-Fi':'Wi-Fi',
-    'Wi-Fi Direct':'Wi-Fi Direct',
-    'Wifi · Bluetooth · Modo Avión':'WiFi · Bluetooth · Airplane',
-    'Salud':'Health',
-    'Capacidad':'Capacity',
-    'Nivel de la batería':'Battery level',
-    'Cargando':'Charging',
-    'Completa':'Full',
-    'Hoy':'Today',
-    'En uso':'In use',
-    'Uso de la batería':'Battery usage',
-    'Vista previa de texto':'Text preview',
-    'El texto del sistema se verá así':'System text will look like this',
-    'Sin sonido':'No sound',
-    'Tamaño de texto':'Text size',
-    'Tamaño del cursor':'Cursor size',
-    'Colores invertidos':'Inverted colors',
-    'Invierte los colores (KWin)':'Inverts colors (KWin)',
-    'Minimiza animaciones del compositor':'Minimize compositor animations',
-    'Servicios de ubicación':'Location services',
-    'Desactivados':'Disabled',
-    'Alta precisión':'High precision',
-    'GPS, WiFi y redes móviles':'GPS, WiFi and mobile networks',
-    'Solo WiFi y redes':'WiFi and networks only',
-    'Solo dispositivo':'Device only',
-    'Sin conexión a internet':'No internet connection',
-    'Siempre':'Always',
-    'Preguntar':'Ask',
-    'Privacidad de ubicación':'Location privacy',
-    'La ubicación exacta solo se usa para funciones que la requieran. Nunca se envía sin permiso.':'Exact location is only used for features that need it. Never sent without permission.',
-    'Nombre visible':'Display name',
-    'Nombre del equipo':'Device name',
-    'Administrador de BookOS':'BookOS administrator',
-    'Cambia la contraseña de tu cuenta':'Change your account password',
-    'Omite la pantalla de inicio de sesión al encender':'Skip login screen on startup',
-    'No hay otros usuarios en este equipo.':'No other users on this device.',
-    'Crear cuenta nueva':'Create new account',
-    'Limpiar Flatpak':'Clean Flatpak',
-    'Elimina aplicaciones sin uso':'Remove unused applications',
-    'Limpiar':'Clean',
-    'Limpiar caché de paquetes':'Clean package cache',
-    'Limpia archivos de Paru/Pacman':'Clean Paru/Pacman files',
-    'Miniaturas temporales':'Temporary thumbnails',
-    'Clear thumbnail cache':'Clear thumbnail cache',
-    'Permisos de Hardware':'Hardware permissions',
-    'Configurar':'Configure',
-    'Exportar a JSON':'Export to JSON',
-    'Exportar configuración de BookOS':'Export BookOS settings',
-    'Exportar':'Export',
-    'Importar JSON':'Import JSON',
-    'Importar configuración (requiere elegir archivo)':'Import settings (requires file selection)',
-    'Importar':'Import',
-    'Borrar':'Delete',
-    'Fondo desenfocado bajo ventanas translúcidas':'Blurred background under translucent windows',
-    'Efecto de movimiento suave al arrastrar':'Smooth motion effect when dragging',
-    'Animación al minimizar ventanas':'Animation when minimizing windows',
-    'Optimizar latencia del cursor':'Optimize cursor latency',
-    'Ajusta KWin para menor latencia de entrada':'Adjusts KWin for lower input latency',
-    'Reiniciar compositor':'Restart compositor',
-    'Útil si hay artefactos gráficos':'Useful if there are graphical artifacts',
-    'Reiniciar':'Restart',
-    'Funciones experimentales. Pueden cambiar o desaparecer en futuras versiones.':'Experimental features. May change or disappear in future versions.',
-    'Laboratorio':'Lab',
-    'Menos movimiento en la interfaz':'Less interface motion',
-    'Muestra más datos en la barra lateral':'Show more data in the sidebar',
-    'En desarrollo':'In development',
-    'Panel de productividad':'Productivity panel',
-    'Vista rápida de tareas y notas':'Quick view of tasks and notes',
-    'Gestos avanzados':'Advanced gestures',
-    'Gestos táctiles personalizados':'Custom touch gestures',
-    'Sync de ajustes':'Settings sync',
-    'Copia de seguridad en la nube':'Cloud backup',
-    'IA contextual':'Contextual AI',
-    'Sugerencias según tu uso':'Suggestions based on your usage',
-    'Sin datos de uso aún':'No usage data yet',
-    'El uso se registra cuando actives el seguimiento':'Usage is recorded when you enable tracking',
-    'Límite diario':'Daily limit',
-    'Notificación cuando se supere el objetivo':'Notification when goal is exceeded',
-    'No molestar al activar enfoque':'Do not disturb when focus is on',
-    'Silencia notificaciones en modo enfoque':'Silence notifications in focus mode',
-    'Minimiza distracciones':'Minimize distractions',
-    'Uso del dispositivo':'Device usage',
-    'Monitoriza cuánto tiempo usas cada aplicación.':'Monitor how long you use each application.',
-    'Cambiar':'Change',
-    'Sin datos':'No data',
-    'No hay datos':'No data',
-    'No hay otros usuarios':'No other users',
-    'Atajos del sistema':'System shortcuts',
-    'Asigna teclas a acciones de KDE Plasma':'Assign keys to KDE Plasma actions',
-    'Atajos personalizados':'Custom shortcuts',
-    'Crea atajos para lanzar apps':'Create shortcuts to launch apps',
-    'Guardar':'Save',
-    'Una vez completada la descarga, la instalación tardará aproximadamente 10 minutos.':'Once the download is complete, installation will take about 10 minutes.',
-    'Canal de actualizaciones':'Update channel',
-    'Estable':'Stable',
-    'Beta':'Beta',
-    'Developer':'Developer',
-    'Versiones probadas y recomendadas':'Tested and recommended versions',
-    'Nuevas funciones en pruebas':'New features in testing',
-    'Actualizaciones más recientes, inestables':'Most recent updates, unstable',
-    'Canal cambiado a':'Channel changed to',
-    'Elige qué tan recientes quieres las actualizaciones de BookOS.':'Choose how recent you want BookOS updates.',
-    'Actual':'Current',
-    'Aplicar':'Apply',
-};
-
-function _tr(str){
-    if (!str || typeof str !== 'string') return str;
-    const lang = (typeof localStorage!=='undefined' ? localStorage.getItem('bookos_lang') : null) || 'es';
-    if (lang === 'es') return str;
-    if (_UI_TR_EN[str]) return _UI_TR_EN[str];
-    return str;
-}
-
-function renderRowItem(title, subtitle, rightContent){
-    return `<div class="detail-item detail-item-row"><div class="detail-texts"><span class="dt">${_tr(title)}</span>${subtitle?`<span class="ds">${_tr(subtitle)}</span>`:''}</div>${rightContent}</div>`;
-}
-function renderToggle(id, active=false){
-    return `<div class="toggle-switch ${active?'active':''}" data-toggle="${id}"></div>`;
-}
-function renderSlider(id, value=50, min=0, max=100){
-    const fill=((value-min)/(max-min))*100;
-    return `<div class="slider-container"><input type="range" class="filled" id="${id}" min="${min}" max="${max}" value="${value}" style="--fill:${fill}%"><span class="slider-label" id="${id}-l">${value}%</span></div>`;
-}
-function renderHeader(title, rightActions=''){
-    return `<div class="detail-header"><button class="back-btn" onclick="window.goBack()">←</button><h2 class="detail-title">${_tr(title)}</h2>${rightActions?`<div class="detail-header-actions">${rightActions}</div>`:''}</div>`;
-}
-function renderSection(title){
-    return `<p class="section-header">${_tr(title)}</p>`;
-}
-
-
-// ── Toggle & Slider setup (no setTimeout hack — uses MutationObserver-safe approach) ──
-function themeColor(name, isDark) {
-    const n = name.toLowerCase();
-    if(n.includes('bookos')&&n.includes('dark')) return 'linear-gradient(135deg,#000000,#1c1c1e)';
-    if(n.includes('bookos')&&n.includes('light')) return 'linear-gradient(135deg,#f2f2f7,#ffffff)';
-    if(n.includes('bookos')) return isDark?'linear-gradient(135deg,#000000,#1c1c1e)':'linear-gradient(135deg,#f2f2f7,#ffffff)';
-    if(n.includes('catppuccin')&&n.includes('mocha')) return isDark?'linear-gradient(135deg,#1e1e2e,#313244)':'linear-gradient(135deg,#eff1f5,#ccd0da)';
-    if(n.includes('catppuccin')&&n.includes('frappe')) return 'linear-gradient(135deg,#303446,#414559)';
-    if(n.includes('catppuccin')) return isDark?'linear-gradient(135deg,#24273a,#363a4f)':'linear-gradient(135deg,#eff1f5,#dce0e8)';
-    if(n.includes('nord')) return isDark?'linear-gradient(135deg,#2e3440,#3b4252)':'linear-gradient(135deg,#eceff4,#d8dee9)';
-    if(n.includes('emerald')&&n.includes('smooth')) return 'linear-gradient(135deg,#1a3a2a,#2d5a3f)';
-    if(n.includes('emerald')) return isDark?'linear-gradient(135deg,#1a3a2a,#2d5a3f)':'linear-gradient(135deg,#e8f5e9,#c8e6c9)';
-    if(n.includes('iridescent')) return isDark?'linear-gradient(135deg,#1a1a2e,#2d2d5a)':'linear-gradient(135deg,#e8e8f5,#d0d0e8)';
-    if(n.includes('heimdal')) return 'linear-gradient(135deg,#1a2940,#2a4060)';
-    if(n.includes('kvadapta')||n.includes('adapta')) return isDark?'linear-gradient(135deg,#263238,#37474f)':'linear-gradient(135deg,#fafafa,#eceff1)';
-    if(n.includes('breeze')&&n.includes('classic')) return isDark?'linear-gradient(135deg,#31363b,#4d4d4d)':'linear-gradient(135deg,#eff0f1,#bdc3c7)';
-    if(n.includes('breeze')) return isDark?'linear-gradient(135deg,#232629,#31363b)':'linear-gradient(135deg,#eff0f1,#fcfcfc)';
-    if(n.includes('cachyos')) return isDark?'linear-gradient(135deg,#0d1117,#1a2332)':'linear-gradient(135deg,#e6f0ff,#cce0ff)';
-    // Fallback: hash the name for a unique color
-    let hash=0;for(let i=0;i<name.length;i++)hash=name.charCodeAt(i)+((hash<<5)-hash);
-    const hue=Math.abs(hash)%360;
-    return isDark?`linear-gradient(135deg,hsl(${hue},25%,12%),hsl(${hue},20%,18%))`:`linear-gradient(135deg,hsl(${hue},30%,92%),hsl(${hue},25%,85%))`;
-}
-function setupToggle(id, callback){
-    requestAnimationFrame(()=>{
-        const el=document.querySelector(`[data-toggle="${id}"]`);
-        if(!el)return;
-        el.addEventListener('click',function(){
-            this.classList.toggle('active');
-            const active=this.classList.contains('active');
-            const sub=this.closest('.detail-item-row')?.querySelector('.ds');
-            if(sub&&!sub.querySelector('span')&&!sub.dataset.custom) sub.textContent=active?t('enabled'):t('disabled');
-            callback(active);
-        });
-    });
-}
-function setupSlider(id, callback, showPercent=true, liveCallback=null){
-    requestAnimationFrame(()=>{
-        const slider=document.getElementById(id), label=document.getElementById(id+'-l');
-        if(!slider)return;
-        const update=()=>{
-            const pct=((slider.value-slider.min)/(slider.max-slider.min))*100;
-            slider.style.setProperty('--fill',pct+'%');
-            if(label) label.textContent=showPercent?slider.value+'%':slider.value;
-            if(liveCallback)liveCallback(slider.value);
-        };
-        slider.addEventListener('input',update);
-        slider.addEventListener('change',()=>callback(slider.value));
-    });
-}
-
-// ════════════════════════════════════════════════════════════════════════
-// ── Conexiones ──────────────────────────────────────────────────────────
-// ════════════════════════════════════════════════════════════════════════
-function wifiIcon(band,active){
-    const col=active?'#0a84ff':'var(--tx2)';
-    return `<div class="conn-net-icon">
-        <svg viewBox="0 0 24 24" width="26" height="26" fill="none">
-            <path d="M1.42 9a16 16 0 0 1 21.16 0" stroke="${col}" stroke-width="2" stroke-linecap="round" opacity="${active?1:.45}"/>
-            <path d="M5 12.55a11 11 0 0 1 14.08 0" stroke="${col}" stroke-width="2" stroke-linecap="round" opacity="${active?1:.7}"/>
-            <path d="M8.53 16.11a6 6 0 0 1 6.95 0" stroke="${col}" stroke-width="2" stroke-linecap="round"/>
-            <circle cx="12" cy="20" r="1.5" fill="${col}"/>
-        </svg>
-        ${band?`<span class="wifi-band-badge" style="color:${col}">${esc(band)}</span>`:''}
-    </div>`;
-}
-function btIcon(hint,name){
-    const n=name.toLowerCase();
-    const hp=hint==='audio-headphones'||['buds','headphone','pod','earphone','airpod'].some(k=>n.includes(k));
-    const lp=hint==='computer'||['book','laptop','computer'].some(k=>n.includes(k));
-    const pc=!lp&&n.includes('pc');
-    const ph=hint==='phone'||['phone','galaxy s','iphone'].some(k=>n.includes(k));
-    const wt=hint==='watch'||['watch','band'].some(k=>n.includes(k));
-    const s='var(--tx)',w='1.8',r='round';
-    if(hp)return`<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="${s}" stroke-width="${w}" stroke-linecap="${r}"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z"/><path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>`;
-    if(lp||pc)return`<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="${s}" stroke-width="${w}" stroke-linecap="${r}"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M0 21h24"/></svg>`;
-    if(ph)return`<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="${s}" stroke-width="${w}" stroke-linecap="${r}"><rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="18" r="1" fill="${s}"/></svg>`;
-    if(wt)return`<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="${s}" stroke-width="${w}" stroke-linecap="${r}"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M7 9l-2-4h10M7 15l-2 4h10"/></svg>`;
-    return`<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="${s}" stroke-width="${w}" stroke-linecap="${r}"><rect x="4" y="6" width="16" height="12" rx="2"/><path d="M8 6V4M16 6V4M8 18v2M16 18v2"/></svg>`;
-}
-function chevron(){return`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--tx2)" stroke-width="2" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg>`;}
-function lockIcon(){return`<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="var(--tx2)" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`;}
+import{
+    tauriInvoke,getAssetUrl,t,
+    getSetting,setSetting,primeSetting,ci,_icInvalidate,getCachedHwState,invalidateHwCache,
+    esc,addInterval,toast,showDialog,showRootAuth,promptSudo,invokeWithAuth,
+    renderSkeleton,renderSkeletonChart,renderLoading,renderCard,renderInfoItem,
+    _tr,renderRowItem,renderToggle,renderSlider,renderHeader,renderSection,
+    popoverSelect,themeColor,setupToggle,setupSlider,wifiIcon,btIcon,chevron,lockIcon
+}from'./pages/_common.js';
+// Routines engine lives in its own light module (loaded by main.js at startup);
+// the page renderers below consume it for the Modos/automation UI.
+import{getRoutines,saveRoutines,getRoutineSnapshot,deleteRoutineSnapshot,saveRoutineSnapshot,executeRoutine,snapshotForRoutine,restoreSnapshot,_getSnap,_deleteSnap}from'./routines-engine.js';
+// Re-export shared helpers so existing importers of pages.js keep working.
+export{invalidateHwCache};
+export{getRoutines,saveRoutines,getRoutineSnapshot,deleteRoutineSnapshot,saveRoutineSnapshot,executeRoutine,snapshotForRoutine,restoreSnapshot};
 
 // ── Conexiones main page ──
 export async function renderConexiones(c){
     c.innerHTML=renderHeader(t('hdr_connections'))+renderSkeleton(3);
-    let w={enabled:false,ssid:''},bt={enabled:false},air={enabled:false};
-    try{[w,bt,air]=await Promise.all([
+    let w={enabled:false,ssid:''},bt={enabled:false},air={enabled:false},eth={present:false,connected:false};
+    try{[w,bt,air,eth]=await Promise.all([
         tauriInvoke('get_wifi_status').then(JSON.parse).catch(()=>({enabled:false,ssid:''})),
         tauriInvoke('get_bluetooth_status').then(JSON.parse).catch(()=>({enabled:false})),
-        tauriInvoke('get_airplane_mode').then(JSON.parse).catch(()=>({enabled:false}))
+        tauriInvoke('get_airplane_mode').then(JSON.parse).catch(()=>({enabled:false})),
+        tauriInvoke('get_ethernet_status').then(JSON.parse).catch(()=>({present:false,connected:false}))
     ]);}catch(e){}
 
     let h=renderHeader(t('hdr_connections'));
+    // Ethernet (wired) — only shown when an interface exists
+    const ethCard = eth.present ? `
+        <div class="conn-main-row">
+            <div class="conn-main-clickable" id="go-eth">
+                <div class="conn-main-left">
+                    <span class="conn-main-title">${_tr('Cable')}</span>
+                    <span class="conn-main-sub ${eth.connected?'conn-sub-active':''}" id="conn-eth-sub">${eth.connected?(eth.connection?esc(eth.connection):_tr('Conectado')):_tr('Desconectado')}</span>
+                </div>
+                ${chevron()}
+            </div>
+        </div>` : '';
     h+=`<div class="detail-card">
+        ${ethCard}
         <div class="conn-main-row">
             <div class="conn-main-clickable" id="go-wifi">
                 <div class="conn-main-left">
@@ -1400,6 +64,7 @@ export async function renderConexiones(c){
 
     document.getElementById('go-wifi')?.addEventListener('click',()=>{if(window.pushSubNav)window.pushSubNav(()=>renderConexiones(c));window.clearPageIntervals?.();renderWifiPage(c);});
     document.getElementById('go-bt')?.addEventListener('click',()=>{if(window.pushSubNav)window.pushSubNav(()=>renderConexiones(c));window.clearPageIntervals?.();renderBTPage(c);});
+    document.getElementById('go-eth')?.addEventListener('click',()=>{if(window.pushSubNav)window.pushSubNav(()=>renderConexiones(c));window.clearPageIntervals?.();renderEthernetDetailPage(c);});
 
     setupToggle('wifi',async a=>{
         try{await tauriInvoke('toggle_wifi',{enable:a});}catch(e){}
@@ -1440,17 +105,79 @@ export async function renderConexiones(c){
                 const at=document.querySelector('[data-toggle="air"]');
                 if(at)at.classList.toggle('active',!!air2.enabled);
             }
+            const esub=document.getElementById('conn-eth-sub');
+            if(esub){
+                try{
+                    const e2=JSON.parse(await tauriInvoke('get_ethernet_status'));
+                    esub.textContent=e2.connected?(e2.connection||_tr('Conectado')):_tr('Desconectado');
+                    esub.classList.toggle('conn-sub-active',!!e2.connected);
+                }catch(e){}
+            }
         }catch(e){}
     },5000);
 }
 
+// ── Ethernet (wired) detail subpage ──
+async function renderEthernetDetailPage(c){
+    window.clearPageIntervals?.();
+    if(window.pushSubNav)window.pushSubNav(()=>renderConexiones(c));
+    const wireIcon=`<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="9" width="20" height="11" rx="2"/><path d="M6 9V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v3"/><path d="M7 13h.01M11 13h.01M15 13h.01"/></svg>`;
+    c.innerHTML=renderHeader(_tr('Conexión por cable'))+
+        `<div class="wifi-detail-hero">
+            <div class="wifi-detail-icon">${wireIcon}</div>
+            <div class="wifi-detail-ssid" id="eth-title">Ethernet</div>
+            <div class="wifi-detail-status" id="eth-status">${_tr('Comprobando...')}</div>
+        </div>`+
+        `<div class="detail-card" id="eth-details">${renderLoading(_tr('Obteniendo detalles...'))}</div>`;
+
+    const load=async()=>{
+        let d;
+        try{ d=JSON.parse(await tauriInvoke('get_ethernet_details')); }
+        catch(e){ document.getElementById('eth-details').innerHTML=renderInfoItem(_tr('No se pudieron cargar los detalles')); return; }
+        const statusEl=document.getElementById('eth-status');
+        if(!d.present){
+            if(statusEl){statusEl.textContent=_tr('Sin cable conectado');statusEl.style.color='var(--tx2)';}
+            document.getElementById('eth-details').innerHTML=renderInfoItem(_tr('No hay ninguna interfaz de cable disponible'));
+            return;
+        }
+        const connected = (d.state||'').includes('connected') && !(d.state||'').includes('disconnected') || !!d.ip;
+        if(statusEl){statusEl.textContent=connected?_tr('Conectado'):_tr('Desconectado');statusEl.style.color=connected?'var(--blue)':'var(--tx2)';}
+        const titleEl=document.getElementById('eth-title');
+        if(titleEl&&d.iface)titleEl.textContent=`Ethernet (${d.iface})`;
+        const ipFull=d.ip?(d.prefix?`${d.ip}/${d.prefix}`:d.ip):'';
+        const rows=[
+            ['Interfaz', d.iface||'—', false],
+            ['Dirección IP', ipFull||'—', !!ipFull],
+            ['Puerta de enlace', d.gateway||'—', !!d.gateway],
+            ['DNS', d.dns||'—', !!d.dns],
+            ['IPv6', d.ip6||'—', !!d.ip6],
+            ['MTU', d.mtu||'—', false],
+            ['Dirección MAC', d.mac||'—', !!d.mac],
+        ];
+        document.getElementById('eth-details').innerHTML=rows.map(([l,v,copyable])=>
+            `<div class="wifi-detail-row"${copyable?` data-copy="${esc(v)}" title="${_tr('Copiar')}"`:''}>
+                <span class="wifi-detail-label">${_tr(l)}</span>
+                <span class="wifi-detail-val"><span class="wd-val-txt">${esc(v)}</span>${copyable?'<svg class="wd-copy-hint" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>':''}</span>
+            </div>`
+        ).join('');
+        document.querySelectorAll('#eth-details .wifi-detail-row[data-copy]').forEach(r=>{
+            r.addEventListener('click',()=>{
+                const v=r.getAttribute('data-copy');
+                navigator.clipboard?.writeText(v).then(()=>toast(_tr('Copiado'),'📋')).catch(()=>{});
+            });
+        });
+    };
+    await load();
+    addInterval(()=>{if(!document.getElementById('eth-details'))return;load();},5000);
+}
+
 // ── Wi-Fi subpage ──
 async function renderWifiPage(c){
-    c.innerHTML=renderHeader(t('hdr_wifi'),'conexiones')+renderSkeleton(2);
+    c.innerHTML=renderHeader(t('hdr_wifi'))+renderSkeleton(2);
     let w={enabled:false,ssid:''};
     try{w=JSON.parse(await tauriInvoke('get_wifi_status'));}catch(e){}
 
-    let h=renderHeader(t('hdr_wifi'),'conexiones');
+    let h=renderHeader(t('hdr_wifi'));
     // Toggle card
     h+=`<div class="detail-card">
         <div class="conn-main-row">
@@ -1493,11 +220,11 @@ async function renderWifiPage(c){
 
 // ── Bluetooth subpage ──
 async function renderBTPage(c){
-    c.innerHTML=renderHeader(t('hdr_bluetooth'),'conexiones')+renderSkeleton(2);
+    c.innerHTML=renderHeader(t('hdr_bluetooth'))+renderSkeleton(2);
     let bt={enabled:false};
     try{bt=JSON.parse(await tauriInvoke('get_bluetooth_status'));}catch(e){}
 
-    let h=renderHeader(t('hdr_bluetooth'),'conexiones');
+    let h=renderHeader(t('hdr_bluetooth'));
     h+=`<div class="detail-card">
         <div class="conn-main-row">
             <span class="conn-main-title" style="font-size:17px;font-weight:700;color:${bt.enabled?'var(--blue)':'var(--tx2)'}">${bt.enabled?t('enabled'):t('disabled')}</span>
@@ -1628,57 +355,90 @@ async function renderWifiDetailPage(c,{ssid,security,band}){
         `<div class="wifi-detail-hero">
             <div class="wifi-detail-icon">${bigIcon}</div>
             <div class="wifi-detail-ssid">${esc(ssid)}</div>
-            <div class="wifi-detail-status">Conectado</div>
+            <div class="wifi-detail-status" id="wd-status">${_tr('Conectado')}</div>
         </div>`+
-        `<div class="detail-card" id="wd-details">${renderLoading('Obteniendo detalles...')}</div>`+
+        `<div class="detail-card" id="wd-details">${renderLoading(_tr('Obteniendo detalles...'))}</div>`+
         `<div class="detail-card" id="wd-pw-card">
-            <div class="wifi-pw-row">
-                <span class="wifi-detail-label">Contraseña</span>
-                <div style="display:flex;align-items:center;gap:4px">
+            <div class="wifi-detail-row wifi-pw-row">
+                <span class="wifi-detail-label">${_tr('Contraseña')}</span>
+                <div class="wifi-pw-actions">
                     <span class="wifi-pw-val" id="wd-pw">••••••••</span>
-                    <button class="wifi-eye-btn" id="wd-eye" title="Mostrar contraseña">
+                    <button class="wifi-eye-btn" id="wd-eye" title="${_tr('Mostrar contraseña')}">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                    </button>
+                    <button class="wifi-eye-btn" id="wd-copy-pw" title="${_tr('Copiar')}" style="display:none">
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                     </button>
                 </div>
             </div>
         </div>`+
-        `<div style="padding:0 0 16px"><button class="btn-forget" id="wd-forget">Olvidar red</button></div>`;
+        `<div style="padding:0 0 16px"><button class="btn-forget" id="wd-forget">${_tr('Olvidar red')}</button></div>`;
 
     // Load network details
     try{
         const d=JSON.parse(await tauriInvoke('get_wifi_details',{ssid}));
+        const ipFull = d.ip ? (d.prefix ? `${d.ip}/${d.prefix}` : d.ip) : '';
         const rows=[
-            ['Seguridad', security||'Abierta'],
-            ['Frecuencia', band||'—'],
-            ['Dirección IP', d.ip||'—'],
-            ['Puerta de enlace', d.gateway||'—'],
-            ['DNS', d.dns||'—'],
-            ['Dirección MAC', d.mac||'—'],
+            ['Seguridad', security||_tr('Abierta'), false],
+            ['Frecuencia', band||'—', false],
+            ['Dirección IP', ipFull||'—', !!ipFull],
+            ['Puerta de enlace', d.gateway||'—', !!d.gateway],
+            ['DNS', d.dns||'—', !!d.dns],
+            ['IPv6', d.ip6||'—', !!d.ip6],
+            ['MTU', d.mtu||'—', false],
+            ['Dirección MAC', d.mac||'—', !!d.mac],
         ];
-        document.getElementById('wd-details').innerHTML=rows.map(([l,v])=>
-            `<div class="wifi-detail-row"><span class="wifi-detail-label">${l}</span><span class="wifi-detail-val">${esc(v)}</span></div>`
+        document.getElementById('wd-details').innerHTML=rows.map(([l,v,copyable])=>
+            `<div class="wifi-detail-row"${copyable?` data-copy="${esc(v)}" title="${_tr('Copiar')}"`:''}>
+                <span class="wifi-detail-label">${_tr(l)}</span>
+                <span class="wifi-detail-val"><span class="wd-val-txt">${esc(v)}</span>${copyable?'<svg class="wd-copy-hint" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>':''}</span>
+            </div>`
         ).join('');
+        // Click-to-copy on rows with data-copy
+        document.querySelectorAll('#wd-details .wifi-detail-row[data-copy]').forEach(r=>{
+            r.addEventListener('click',()=>{
+                const v=r.getAttribute('data-copy');
+                navigator.clipboard?.writeText(v).then(()=>toast(_tr('Copiado'),'📋')).catch(()=>{});
+            });
+        });
     }catch(e){
-        document.getElementById('wd-details').innerHTML=renderInfoItem('No se pudieron cargar los detalles');
+        document.getElementById('wd-details').innerHTML=renderInfoItem(_tr('No se pudieron cargar los detalles'));
     }
 
     // Password reveal — try without sudo first, then ask
     let _pw=null;
+    const _showPw=()=>{
+        const el=document.getElementById('wd-pw');
+        const cpy=document.getElementById('wd-copy-pw');
+        if(el){el.textContent=_pw;el.classList.add('revealed');}
+        if(cpy)cpy.style.display='flex';
+    };
     document.getElementById('wd-eye')?.addEventListener('click',async()=>{
         const el=document.getElementById('wd-pw');
+        const cpy=document.getElementById('wd-copy-pw');
         if(!el)return;
-        if(_pw!==null){el.textContent=el.textContent==='••••••••'?_pw:'••••••••';return;}
+        if(_pw!==null){
+            const hidden=el.textContent==='••••••••';
+            el.textContent=hidden?_pw:'••••••••';
+            el.classList.toggle('revealed',hidden);
+            if(cpy)cpy.style.display=hidden?'flex':'none';
+            return;
+        }
         // Try without sudo
         let res=JSON.parse(await tauriInvoke('get_wifi_password',{ssid,sudoPassword:''}));
-        if(res.ok&&res.password){_pw=res.password;el.textContent=_pw;return;}
+        if(res.ok&&res.password){_pw=res.password;_showPw();return;}
         if(!res.needs_auth){el.textContent='—';return;}
         // Needs sudo
-        const pwd=await showRootAuth('Contraseña requerida',`Para ver la contraseña de "${esc(ssid)}", introduce la contraseña del equipo.`);
+        const pwd=await showRootAuth(_tr('Contraseña requerida'),`${_tr('Para ver la contraseña de')} "${esc(ssid)}", ${_tr('introduce la contraseña del equipo.')}`);
         if(!pwd)return;
         res=JSON.parse(await tauriInvoke('get_wifi_password',{ssid,sudoPassword:pwd}));
-        if(res.ok&&res.password){_pw=res.password;el.textContent=_pw;}
+        if(res.ok&&res.password){_pw=res.password;_showPw();}
         else if(res.error==='wrong_password')toast('Contraseña incorrecta','❌');
         else el.textContent='—';
+    });
+    document.getElementById('wd-copy-pw')?.addEventListener('click',()=>{
+        if(_pw==null)return;
+        navigator.clipboard?.writeText(_pw).then(()=>toast(_tr('Copiado'),'📋')).catch(()=>{});
     });
 
     // Forget network
@@ -1797,18 +557,18 @@ export async function renderPantalla(c){
     </div>`);
     dispRows.push(`<div class="detail-item" style="cursor:pointer" id="btn-nightlight">
         <span class="dt">${_tr('Protección de la vista')}</span>
-        <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px">${nlLabel}</span>${chevron()}</div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px" id="lbl-nightlight">${nlLabel}</span>${chevron()}</div>
     </div>`);
     if(hasHwDisplayFeatures){
         dispRows.push(`<div class="detail-item" style="cursor:pointer" id="btn-display-mode">
             <span class="dt">${_tr('Modo de pantalla')}</span>
-            <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px">${curIccName}</span>${chevron()}</div>
+            <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px" id="lbl-displaymode">${curIccName}</span>${chevron()}</div>
         </div>`);
     }
     if(displays.length){
         dispRows.push(`<div class="detail-item" style="cursor:pointer" id="btn-resolution">
             <span class="dt">${_tr('Resolución de la pantalla')}</span>
-            <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px">${curRes}</span>${chevron()}</div>
+            <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px" id="lbl-resolution">${curRes}</span>${chevron()}</div>
         </div>`);
     }
     h+=renderCard(dispRows);
@@ -1816,7 +576,7 @@ export async function renderPantalla(c){
     // ④ Timeout card
     h+=renderCard([`<div class="detail-item" style="cursor:pointer" id="btn-timeout">
         <span class="dt">${_tr('Tiempo de espera de pantalla')}</span>
-        <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px">${toLabel}</span>${chevron()}</div>
+        <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px" id="lbl-timeout">${toLabel}</span>${chevron()}</div>
     </div>`]);
 
     // ⑤ Samsung Display extras (if hw)
@@ -1878,29 +638,108 @@ export async function renderPantalla(c){
         const isDark=document.documentElement.classList.contains('dark-mode');
         _pantallaSubDarkMode(c,isDark,styleThemes);
     });
-    document.getElementById('btn-fluidez')?.addEventListener('click',()=>{
-        window.pushSubNav?.(()=>renderPantalla(c));
-        _pantallaSubFluidez(c,savedRR,displays);
+    // ── Quick anchored popovers (no sub-page navigation) ──
+    // Mutable selection state so reopening a popover marks the fresh choice.
+    const _sel={rr:savedRR,icc:effectiveIcc,res:(displays[0]?.current||'').split('@')[0].trim(),to:lockTimeout,nl:nl.active};
+    const _setLbl=(id,txt)=>{const el=document.getElementById(id);if(el)el.textContent=txt;};
+
+    document.getElementById('btn-fluidez')?.addEventListener('click',e=>{
+        popoverSelect(e.currentTarget,{
+            title:_tr('Fluidez de movimientos'),
+            options:[
+                {val:'120',label:_tr('Fluido'),right:'120 Hz',sub:_tr('Animaciones más suaves. Mayor consumo.')},
+                {val:'60', label:_tr('Estándar'),right:'60 Hz',sub:_tr('Menor consumo de batería.')},
+            ],
+            current:_sel.rr,
+            onSelect:async mode=>{
+                _sel.rr=mode;
+                setSetting('RefreshRate',mode);
+                if(displays.length){
+                    const disp=displays[0];
+                    const curResOnly=(disp.current||'').split('@')[0].trim();
+                    const targetHz=parseInt(mode);
+                    const matches=(disp.modes||[]).filter(m=>m.startsWith(curResOnly)&&Math.abs(parseInt(m.split('@')[1]||'0')-targetHz)<=2);
+                    const targetMode=matches.sort((a,b)=>parseFloat(b.split('@')[1])-parseFloat(a.split('@')[1]))[0];
+                    if(targetMode){try{await tauriInvoke('set_resolution',{output:disp.name,resolution:targetMode});disp.current=targetMode;}catch(e){}}
+                    await tauriInvoke('set_vrr_policy',{output:disp.name,policy:mode==='120'?'Automatic':'Never'}).catch(()=>{});
+                }
+                _setLbl('lbl-fluidez',mode+' Hz');
+                toast(mode==='120'?'Modo fluido activado (120 Hz · VRR)':'Modo estándar activado (60 Hz)');
+            },
+        });
     });
-    document.getElementById('btn-nightlight')?.addEventListener('click',()=>{
-        window.pushSubNav?.(()=>renderPantalla(c));
-        _pantallaSubNightLight(c,nl,nlFrom,nlTo);
+    document.getElementById('btn-nightlight')?.addEventListener('click',e=>{
+        popoverSelect(e.currentTarget,{
+            title:_tr('Protección de la vista'),
+            options:[
+                {val:'on', label:_tr('Activada'), sub:_tr('Tonos cálidos que reducen la fatiga visual')},
+                {val:'off',label:_tr('Desactivada')},
+            ],
+            current:_sel.nl?'on':'off',
+            onSelect:async v=>{
+                _sel.nl=v==='on';
+                try{await tauriInvoke('set_nightlight',{active:_sel.nl,temperature:null});}catch(e){}
+                _setLbl('lbl-nightlight',_sel.nl?_tr('Activada'):_tr('Desactivada'));
+                toast(_sel.nl?'Protección de la vista activada':'Protección de la vista desactivada');
+            },
+            footer:{label:_tr('Programación y temperatura…'),onClick:()=>{
+                window.pushSubNav?.(()=>renderPantalla(c));
+                _pantallaSubNightLight(c,{...nl,active:_sel.nl},nlFrom,nlTo);
+            }},
+        });
     });
     if(hasHwDisplayFeatures){
-        document.getElementById('btn-display-mode')?.addEventListener('click',()=>{
-            window.pushSubNav?.(()=>renderPantalla(c));
-            _pantallaSubDisplayMode(c,iccProfiles,effectiveIcc);
+        document.getElementById('btn-display-mode')?.addEventListener('click',e=>{
+            popoverSelect(e.currentTarget,{
+                title:_tr('Modo de pantalla'),
+                options:iccProfiles.map(p=>({val:p.file,label:p.name,color:p.color})),
+                current:_sel.icc,
+                onSelect:async file=>{
+                    _sel.icc=file;
+                    const p=iccProfiles.find(x=>x.file===file);
+                    if(file==='auto'){setSetting('IccAdaptive','true');toast('Perfil automático activado');}
+                    else{setSetting('IccAdaptive','false');try{toast(await tauriInvoke('aplicar_perfil_color',{nombreArchivo:file}));setSetting('IccProfile',file);}catch(e){toast(String(e),'❌');}}
+                    _setLbl('lbl-displaymode',p?.name||file);
+                },
+            });
         });
     }
     if(displays.length){
-        document.getElementById('btn-resolution')?.addEventListener('click',()=>{
-            window.pushSubNav?.(()=>renderPantalla(c));
-            _pantallaSubResolution(c,displays);
+        document.getElementById('btn-resolution')?.addEventListener('click',e=>{
+            const d=displays[0];
+            const uniqueRes=[...new Set((d.modes||[]).map(m=>m.split('@')[0].trim()))];
+            const resMap={"2880x1800":"WQXGA+","1920x1200":"WUXGA","1440x900":"WXGA+","1280x800":"WXGA","2560x1600":"WQXGA","1920x1080":"FHD"};
+            popoverSelect(e.currentTarget,{
+                title:_tr('Resolución de la pantalla'),
+                options:uniqueRes.map(r=>({val:r,label:resMap[r]||r,right:r})),
+                current:_sel.res,
+                onSelect:async res=>{
+                    _sel.res=res;
+                    const curHzNow=(d.current||'').split('@')[1]||'60';
+                    const targetMode=(d.modes||[]).find(m=>m.startsWith(res+'@'+curHzNow))||(d.modes||[]).find(m=>m.startsWith(res))||res;
+                    try{await tauriInvoke('set_resolution',{output:d.name,resolution:targetMode});d.current=targetMode;}catch(e){}
+                    _setLbl('lbl-resolution',resMap[res]||res);
+                    toast('Resolución: '+(resMap[res]||res));
+                },
+            });
         });
     }
-    document.getElementById('btn-timeout')?.addEventListener('click',()=>{
-        window.pushSubNav?.(()=>renderPantalla(c));
-        _pantallaSubTimeout(c,lockTimeout);
+    document.getElementById('btn-timeout')?.addEventListener('click',e=>{
+        const opts=[{mins:1,label:'1 minuto'},{mins:2,label:'2 minutos'},{mins:5,label:'5 minutos'},
+                    {mins:10,label:'10 minutos'},{mins:15,label:'15 minutos'},{mins:30,label:'30 minutos'}];
+        popoverSelect(e.currentTarget,{
+            title:_tr('Tiempo de espera de pantalla'),
+            options:opts.map(o=>({val:o.mins,label:_tr(o.label)})),
+            current:_sel.to,
+            onSelect:async v=>{
+                const mins=parseInt(v);
+                _sel.to=mins;
+                try{await tauriInvoke('set_lock_timeout',{minutes:mins});}catch(e){}
+                const lbl=opts.find(o=>o.mins===mins)?.label||mins+' min';
+                _setLbl('lbl-timeout',_tr(lbl));
+                toast('Tiempo de espera: '+_tr(lbl));
+            },
+        });
     });
 }
 
@@ -2016,11 +855,8 @@ async function _pantallaSubNightLight(c,nl,nlFrom,nlTo){
         const from=document.getElementById('nl-from')?.value||'22:00';
         const to=document.getElementById('nl-to')?.value||'07:00';
         setSetting('NightLightFrom',from);setSetting('NightLightTo',to);
-        const toHHMM=t=>t.replace(':','');
         try{
-            await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','kwinrc','--group','NightColor','--key','Mode','1']});
-            await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','kwinrc','--group','NightColor','--key','EveningBeginFixed',toHHMM(from)]});
-            await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','kwinrc','--group','NightColor','--key','MorningBeginFixed',toHHMM(to)]});
+            await tauriInvoke('set_nightlight_schedule',{scheduled:true,evening:from,morning:to,temperature:null});
         }catch(e){}
         toast('Horario guardado');
     };
@@ -2112,7 +948,7 @@ export async function renderSonido(c){
         tauriInvoke('get_balance').then(JSON.parse).catch(()=>({balance:0})),
     ]);}catch(e){vol=50;muted=false;notifSnd=true;uiSnd=true;balance=0;}
 
-    const descMap=Object.fromEntries(descs.map(d=>[d.name,d.desc]));
+    const descMap=Object.fromEntries(descs.map(d=>[d.name,d.friendly||d.desc]));
     const sinkLabel=(name)=>descMap[name]||name.split('.').slice(-2).join(' ')||name;
     const srcLabel=(name)=>descMap[name]||name.split('.').slice(-2).join(' ')||name;
 
@@ -2331,6 +1167,18 @@ function _emitIpcState(profile,chargeLimit){
 export async function renderBateria(c){
     c.innerHTML=renderHeader(t('hdr_battery'))+renderSkeleton(2)+renderSkeletonChart();
     await _renderBateriaContent(c);
+    // Re-render on window resize so the chart re-fits its bar count when the
+    // window is resized / un-maximized. Debounced; self-removes when the page
+    // is no longer mounted.
+    let _rzT;
+    const _onResize=()=>{
+        clearTimeout(_rzT);
+        _rzT=setTimeout(()=>{
+            if(!document.querySelector('.bat-chart')){window.removeEventListener('resize',_onResize);return;}
+            _renderBateriaContent(c);
+        },200);
+    };
+    window.addEventListener('resize',_onResize);
     // Auto-refresh every 5s — updates live data and syncs state with the battery applet
     let _lastIpcTs=0;
     addInterval(async()=>{
@@ -2347,6 +1195,8 @@ export async function renderBateria(c){
             const pct=parseInt(bat.percentage)||0;
             const states={'charging':'⚡ Cargando','discharging':'En uso','fully-charged':'✓ Completa','not charging':'No cargando','unknown':''};
             const effectiveLimit=bprot2?savedLimit2:100;
+            // At the protection limit, "not charging" really means full
+            if(bat.state==='not charging'&&pct>=effectiveLimit-1)bat.state='fully-charged';
             const timeText=_batTimeText(bat,{charge_limit:String(effectiveLimit)});
             const bigEl=document.querySelector('.bat-time-big');
             const subEl=document.querySelector('.bat-sub');
@@ -2409,7 +1259,11 @@ export async function renderBateria(c){
     },5000);
 }
 
-async function _renderBateriaContent(c){
+// Two-phase render: phase 1 paints immediately with the cheap reads (status,
+// settings, history); the heavy statistics (CSV charts, app usage, thermal,
+// ML prediction — seconds of Python/CSV work) load in the background and the
+// page re-renders once they arrive. `heavy` carries phase-2 data on re-entry.
+async function _renderBateriaContent(c, heavy=null){
     let bat={percentage:'0',state:'unknown',time:'',energy_rate:'',energy_full:'',energy_full_design:''};
     let gb={perf_supported:false,charge_limit_supported:false,performance_mode:'balanced',charge_limit:''};
     let hist=[];
@@ -2421,22 +1275,41 @@ async function _renderBateriaContent(c){
     let thermalData={ok:false,rows:[]};
     let chargingInfo={ok:false};
     try{
-        const [settingsBatch, batRaw, gbRaw, histRaw, appRaw, csvRaw, predsRaw, thermRaw, chgRaw, mlPredRaw] = await Promise.all([
+        const _heavyFetch=()=>Promise.all([
+            tauriInvoke('get_app_power_usage').then(JSON.parse).catch(()=>[]),
+            tauriInvoke('get_adaptive_predictions').then(JSON.parse).catch(()=>({ok:false,predictions:[]})),
+            tauriInvoke('get_thermal_csv_data').then(JSON.parse).catch(()=>({ok:false,rows:[]})),
+            tauriInvoke('predict_battery_runtime').then(JSON.parse).catch(()=>({ok:false})),
+        ]);
+        // CSV chart data is a cheap file read — fetch it in phase 1 so the
+        // chart paints immediately instead of waiting for the heavy stats.
+        const [settingsBatch, batRaw, gbRaw, histRaw, chgRaw, csvRaw] = await Promise.all([
             tauriInvoke('get_settings_batch',{keys:['BatteryProtection','DimLowBattery','ShowBatteryPercent','PowerSaver','ChargeLimit','AdaptiveCharging']}).then(JSON.parse).catch(()=>({})),
             tauriInvoke('get_battery_status').then(JSON.parse).catch(()=>({percentage:'0',state:'unknown',time:'',energy_rate:'',energy_full:'',energy_full_design:''})),
             ci('check_hw_features').then(JSON.parse).catch(()=>({perf_supported:false,charge_limit_supported:false,performance_mode:'balanced',charge_limit:''})),
             ci('get_battery_history').then(JSON.parse).catch(()=>[]),
-            tauriInvoke('get_app_power_usage').then(JSON.parse).catch(()=>[]),
-            tauriInvoke('get_battery_csv_data').then(JSON.parse).catch(()=>({ok:false,rows:[]})),
-            tauriInvoke('get_adaptive_predictions').then(JSON.parse).catch(()=>({ok:false,predictions:[]})),
-            tauriInvoke('get_thermal_csv_data').then(JSON.parse).catch(()=>({ok:false,rows:[]})),
             tauriInvoke('get_charging_info').then(JSON.parse).catch(()=>({ok:false})),
-            tauriInvoke('predict_battery_runtime').then(JSON.parse).catch(()=>({ok:false})),
+            tauriInvoke('get_battery_csv_data').then(JSON.parse).catch(()=>({ok:false,rows:[]})),
         ]);
-        thermalData=thermRaw; chargingInfo=chgRaw;
-        // Stash ML prediction for hero/below-chart consumers
-        c.dataset.mlPred=JSON.stringify(mlPredRaw||{ok:false});
-        bat=batRaw; gb=gbRaw; hist=histRaw; appUsage=appRaw; csvData=csvRaw; adaptivePreds=predsRaw;
+        chargingInfo=chgRaw;
+        bat=batRaw; gb=gbRaw; hist=histRaw; csvData=csvRaw;
+        if(heavy){
+            const [appRaw, predsRaw, thermRaw, mlPredRaw]=heavy;
+            appUsage=appRaw; adaptivePreds=predsRaw; thermalData=thermRaw;
+            c.dataset.mlPred=JSON.stringify(mlPredRaw||{ok:false});
+        }else{
+            c.dataset.mlPred=JSON.stringify({ok:false});
+            // Load the heavy stats in the background and re-render in place when
+            // ready — unless the user already navigated away (epoch guard).
+            const _ep=window.navEpoch?window.navEpoch():0;
+            _heavyFetch().then(hv=>{
+                if(window.isStale&&window.isStale(_ep))return;
+                if(!document.getElementById('bat-stats-btn'))return;   // page swapped
+                const _scroller=document.querySelector('.detail-view')||c;
+                const _scroll=_scroller.scrollTop;
+                _renderBateriaContent(c,hv).then(()=>{_scroller.scrollTop=_scroll;});
+            }).catch(()=>{});
+        }
         const s=settingsBatch;
         bprot=(s.BatteryProtection??'false')==='true';
         dimlow=(s.DimLowBattery??'false')==='true';
@@ -2446,7 +1319,7 @@ async function _renderBateriaContent(c){
         adaptiveEnabled=(s.AdaptiveCharging??'false')==='true';
         if(adaptiveEnabled) bprot=false; // mutually exclusive — adaptive takes priority
         // Keep _sc in sync with batch results
-        Object.entries(s).forEach(([k,v])=>{if(v!=null)_sc.set(k,v);});
+        Object.entries(s).forEach(([k,v])=>{if(v!=null)primeSetting(k,v);});
     }catch(e){console.error('[Batería] Error:',e);}
 
     // Effective charge limit: prefer saved slider value (user's intent) over raw hardware value
@@ -2459,6 +1332,8 @@ async function _renderBateriaContent(c){
 
     const states={'charging':'⚡ Cargando','discharging':'En uso','fully-charged':'✓ Completa','not charging':'No cargando','unknown':''};
     const pct=parseInt(bat.percentage)||0;
+    // At the protection limit, "not charging" really means full
+    if(bat.state==='not charging'&&pct>=chargeLimit-1)bat.state='fully-charged';
     // Pass chargeLimit explicitly so text always uses the right target
     const timeText=_batTimeText(bat,{charge_limit:String(chargeLimit)})||'';
     const ef=parseFloat((bat.energy_full||'').replace(',','.'))||0;
@@ -2467,7 +1342,11 @@ async function _renderBateriaContent(c){
     const efd=efdRaw>0?Math.max(efdRaw,ef):ef||1;
     const capacityVal=parseFloat((bat.capacity||'').replace('%','').replace(',','.'))||(efd>0?Math.min(100,Math.round(ef/efd*100)):100);
     const health=Math.min(100,Math.round(capacityVal));
-    let h=renderHeader(t('hdr_battery'));
+    // Kebab (3-dot) menu in the header opens a stats popup instead of inline chips.
+    const _statsBtn=`<button class="icon-btn" id="bat-stats-btn" title="${_tr('Estadísticas de batería')}" aria-label="${_tr('Estadísticas de batería')}">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+    </button>`;
+    let h=renderHeader(t('hdr_battery'), _statsBtn);
     h+=`<div class="bat-page-wrap">`; // max-width wrapper — evita que el chart se estire en pantalla completa
 
     // Hero — número grande + label más pequeño en la misma línea
@@ -2516,32 +1395,37 @@ async function _renderBateriaContent(c){
             renderRowItem('Carga adaptativa',`<span style="color:var(--${adaptiveEnabled?'blue':'tx2'})">${adaptiveEnabled?(chargeLimit<100?`Activa — límite ${chargeLimit}%`:'Activa — carga completa'):'Inactiva'}</span>`,renderToggle('adaptive-charging',adaptiveEnabled)),
             renderRowItem('Protección de la batería',bprotDisabled?`<span style="color:var(--tx2);opacity:0.45">No disponible con carga adaptativa</span>`:(bprotLabel?`<span style="color:var(--blue)">${bprotLabel}</span>`:'Limita carga para alargar vida útil'),`<span style="opacity:${bprotDisabled?0.35:1};pointer-events:${bprotDisabled?'none':'auto'}">${renderToggle('bprot',bprot&&!bprotDisabled)}</span>`),
             `<div id="bprot-limit-section"${(bprot&&!bprotDisabled)?'':' style="display:none"'} style="padding:2px 20px 12px">${renderSlider('cl',savedChargeLimit,50,100)}</div>`,
+            renderRowItem('Atenuar pantalla automáticamente','Atenúa cuando la batería es baja',renderToggle('dim-low',dimlow)),
+            renderRowItem('Mostrar porcentaje batería','En el widget de batería',renderToggle('show-pct',showpct)),
         ]);
     }
 
-    // ── Today stats chips ──────────────────────────────────────────────────
-    {
+    // ── Stats for the popup (opened from the 3-dot header button) ───────────
+    const _statRows=(()=>{
         const _jsDayCSV2=(d)=>d===0?7:d;
         const _todayCSV2=_jsDayCSV2(new Date().getDay());
         const todayRows2=csvData.ok?csvData.rows.filter(r=>r.day===_todayCSV2):[];
         const healthColor=health>=80?'var(--green)':health>=60?'#ff9500':'var(--red)';
-        let chips=`<div class="bat-stat-chip"><span class="bat-stat-label">${_tr("Salud")}</span><span class="bat-stat-val" style="color:${healthColor}">${health}%</span></div>`;
+        const rows=[{label:_tr('Salud'),val:`${health}%`,color:healthColor}];
+        rows.push({label:_tr('Nivel actual'),val:`${pct}%`});
         if(todayRows2.length>1){
             const levels=todayRows2.map(r=>r.level);
-            const todayMin=Math.min(...levels),todayMax=Math.max(...levels);
-            chips+=`<div class="bat-stat-chip"><span class="bat-stat-label">${_tr("Hoy")}</span><span class="bat-stat-val">${todayMin}%–${todayMax}%</span></div>`;
-            // Time on battery: count discharge samples (case-insensitive) × 0.5 min (logger runs every 30s)
+            rows.push({label:_tr('Hoy'),val:`${Math.min(...levels)}%–${Math.max(...levels)}%`});
             const dischCount=todayRows2.filter(r=>(r.state||'').toLowerCase()==='discharging').length;
             const dischMin=Math.round(dischCount*0.5);
             if(dischMin>0){
                 const dh=Math.floor(dischMin/60),dm=dischMin%60;
-                const parts=[dh>0?`${dh}h`:'',dm>0?`${dm}m`:''].filter(Boolean).join(' ')||'0m';
-                chips+=`<div class="bat-stat-chip"><span class="bat-stat-label">${_tr("En uso")}</span><span class="bat-stat-val">${parts}</span></div>`;
+                rows.push({label:_tr('En uso'),val:[dh>0?`${dh}h`:'',dm>0?`${dm}m`:''].filter(Boolean).join(' ')||'0m'});
             }
         }
-        if(ef>0&&efd>0) chips+=`<div class="bat-stat-chip"><span class="bat-stat-label">${_tr("Capacidad")}</span><span class="bat-stat-val">${Math.min(ef,efd).toFixed(0)} Wh</span></div>`;
-        h+=`<div class="bat-stats-row">${chips}</div>`;
-    }
+        if(erate>0) rows.push({label:_tr('Consumo actual'),val:`${erate.toFixed(1)} W`});
+        if(ef>0&&efd>0){
+            rows.push({label:_tr('Capacidad'),val:`${Math.min(ef,efd).toFixed(0)} Wh`});
+            rows.push({label:_tr('Capacidad de diseño'),val:`${efd.toFixed(0)} Wh`});
+        }
+        return rows;
+    })();
+    c.dataset.batStats=JSON.stringify(_statRows);
 
     // Chart + app usage — combined block
     h+=`<div style="background:var(--card);border-radius:25px;overflow:hidden;margin-bottom:16px">`;
@@ -2549,7 +1433,14 @@ async function _renderBateriaContent(c){
     {
         const _jsDayToCSV=(d)=>d===0?7:d;
         const _todayCSV=_jsDayToCSV(new Date().getDay());
-        const todayRows=csvData.ok?csvData.rows.filter(r=>r.day===_todayCSV):[];
+        // Prefer timestamp filtering (new Android-style log format) — avoids
+        // mixing in week-old samples from the same weekday.
+        const _midnight=new Date();_midnight.setHours(0,0,0,0);
+        const _midnightTs=Math.floor(_midnight.getTime()/1000);
+        const _hasTs=csvData.ok&&csvData.rows.length>0&&(csvData.rows[csvData.rows.length-1].ts||0)>0;
+        const todayRows=csvData.ok?(_hasTs
+            ?csvData.rows.filter(r=>(r.ts||0)>=_midnightTs)
+            :csvData.rows.filter(r=>r.day===_todayCSV)):[];
 
         const _r=document.documentElement;
         const _dark=_r.classList.contains('dark-mode')||(!_r.classList.contains('light-mode')&&window.matchMedia('(prefers-color-scheme:dark)').matches);
@@ -2586,30 +1477,39 @@ async function _renderBateriaContent(c){
         const refLine=(minV,maxV)=>{
             if(80<=minV||80>=maxV)return'';
             const pos=Math.round((1-(80-minV)/(maxV-minV))*100);
-            // Label on the right only when far enough from top/bottom ticks (>12% gap)
-            const labelRight=pos>12&&pos<88
+            // Label on the right only when far enough from top/bottom ticks —
+            // 18% keeps the 10px labels from overlapping the min/max % ticks
+            const labelRight=pos>18&&pos<82
                 ?`<div style="position:absolute;right:0;top:${pos}%;transform:translateY(-50%);font-size:10px;color:${_c.label}">80%</div>`:'';
-            return`<div style="position:absolute;left:0;right:${labelRight?'28px':'0'};top:${pos}%;height:1.5px;background:${_c.line80};pointer-events:none"></div>${labelRight}`;
+            // Line always stops at the 28px right gutter so it never strikes
+            // through the min/max % tick labels.
+            return`<div style="position:absolute;left:0;right:28px;top:${pos}%;height:1.5px;background:${_c.line80};pointer-events:none"></div>${labelRight}`;
         };
 
         if(todayRows.length>0){
             // ── CSV chart (per-minute, normalized, wider bars) ──
-            const maxBars=50;
+            // Bar count adapts to the available width so the chart looks right
+            // both maximized and windowed (≈7px per bar, clamped).
+            const _chartW=(c&&c.clientWidth)||600;
+            const maxBars=Math.max(48,Math.min(160,Math.floor(_chartW/7)));
             const step=Math.max(1,Math.floor(todayRows.length/maxBars));
             const sampled=todayRows.filter((_,i)=>i%step===0||i===todayRows.length-1);
             const levels=sampled.map(r=>r.level);
             const minL=Math.max(0,Math.min(...levels)-3);
-            const maxL=Math.min(100,Math.max(...levels)+2);
+            const maxL=Math.min(100,Math.max(...levels));
             const norm=(v)=>Math.max(3,Math.round(((v-minL)/(maxL-minL||1))*96));
             let bars='';
             sampled.forEach((r,i)=>{
                 const s=r.state.toLowerCase();
                 const isLast=i===sampled.length-1;
-                const c=s==='charging'?_c.charge:s==='full'?_c.full:_c.discharge;
+                // With charge protection, "full" is the limit (e.g. 80%): plugged
+                // at/above the limit and not discharging counts as full.
+                const isFull=s==='full'||(r.level>=chargeLimit-1&&s!=='discharging');
+                const c=isFull?_c.full:s==='charging'?_c.charge:_c.discharge;
                 const hPct=norm(r.level);
                 const outline=isLast?`outline:2px solid ${c};outline-offset:2px;`:'';
                 const pW=r.power_uw?(r.power_uw/1e6).toFixed(1)+'W':'';
-                bars+=`<div class="bat-bar" style="flex:1;min-width:4px;max-width:20px;height:${hPct}%;background:${c};border-radius:5px 5px 2px 2px;${outline}" data-tip="${String(r.h).padStart(2,'0')}:${String(r.m).padStart(2,'0')} · ${r.level}%${r.state==='charging'?' ⚡':''}${pW?' · '+pW:''}"></div>`;
+                bars+=`<div class="bat-bar" style="flex:1;min-width:2px;max-width:7px;height:${hPct}%;background:${c};border-radius:3px 3px 1px 1px;${outline}" data-tip="${String(r.h).padStart(2,'0')}:${String(r.m).padStart(2,'0')} · ${r.level}%${r.state==='charging'?' ⚡':''}${pW?' · '+pW:''}"></div>`;
             });
             // x-axis: first, mid, last sample times
             const tFmt=(r)=>`${String(r.h).padStart(2,'0')}:${String(r.m).padStart(2,'0')}`;
@@ -2625,7 +1525,7 @@ async function _renderBateriaContent(c){
                     <span class="chart-title" style="color:${_c.tx}">Hoy · ${todayRows.length} registros</span>
                 </div>
                 <div style="position:relative;padding-right:28px">
-                    <div style="display:flex;align-items:flex-end;height:${CHART_H}px;gap:3px">${bars}</div>
+                    <div style="display:flex;align-items:flex-end;height:${CHART_H}px;gap:1.5px">${bars}</div>
                     ${tickTop}${tickBot}${refLine(minL,maxL)}
                 </div>
                 <div style="position:relative;height:18px;margin-top:4px;padding-right:28px">${xLabels}</div>
@@ -2670,7 +1570,7 @@ async function _renderBateriaContent(c){
             const avgs=buckets.map(b=>b.n>0?Math.min(100,b.pSum/b.n):null);
             const knownAvgs=avgs.filter(v=>v!==null);
             const minA=knownAvgs.length?Math.max(0,Math.min(...knownAvgs)-3):0;
-            const maxA=knownAvgs.length?Math.min(100,Math.max(...knownAvgs)+2):100;
+            const maxA=knownAvgs.length?Math.min(100,Math.round(Math.max(...knownAvgs))):100;
             const normH=(v)=>Math.max(3,Math.round(((v-minA)/(maxA-minA||1))*96));
             let barDivs='';
             buckets.forEach((b,i)=>{
@@ -2728,7 +1628,7 @@ async function _renderBateriaContent(c){
             const mkAppRow=(a)=>{
                 const cpu=parseFloat(a.cpu)||0;
                 const sharePct=Math.min(100,cpu/totalCpuAll*100);
-                const iconHtml=a.icon?`<img src="asset://localhost${a.icon}" width="32" height="32" style="border-radius:10px;object-fit:contain" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`:'';
+                const iconHtml=a.icon?`<img src="${getAssetUrl(a.icon)}" width="32" height="32" style="border-radius:10px;object-fit:contain" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`:'';
                 const fallbackHtml=`<span class="bat-app-icon-fallback" style="width:32px;height:32px;font-size:11px;${a.icon?'display:none':''}">${a.name.slice(0,2).toUpperCase()}</span>`;
                 const rightLabel=`${sharePct.toFixed(1).replace('.',',')}%`;
                 return`<div class="bat-app-item" style="padding:12px 20px">
@@ -2750,72 +1650,63 @@ async function _renderBateriaContent(c){
     }
     h+=`</div>`; // close chart+apps combined card
 
-    // Ajustes adicionales al fondo (atenuar + porcentaje)
-    h+=renderCard([
-        renderRowItem('Atenuar pantalla automáticamente','Atenúa cuando la batería es baja',renderToggle('dim-low',dimlow)),
-        renderRowItem('Mostrar porcentaje batería','En el widget de batería',renderToggle('show-pct',showpct)),
-    ]);
-
-    // ── USB-C charging speed indicator ──
+    // ── USB-C charging + adaptive-charging predictions → moved into the stats
+    // popup (header 3-dot button). We build the HTML here and stash it. ─────────
+    let _usbcHtml='';
     if(chargingInfo.ok && (chargingInfo.charging || chargingInfo.ac_online)){
         const pW=(chargingInfo.power_uw/1e6).toFixed(1);
         const vV=(chargingInfo.voltage_uv/1e6).toFixed(1);
         const iA=(chargingInfo.current_ua/1e6).toFixed(2);
-        // Adapter rating: prefer negotiated PDO (adapter_w), else session peak rounded up to nearest 5W.
         const peakW=(chargingInfo.peak_uw||0)/1e6;
-        const adapterW=chargingInfo.adapter_w>0
-            ? chargingInfo.adapter_w
-            : (peakW>0 ? Math.ceil(peakW/5)*5 : 0);
+        const adapterW=chargingInfo.adapter_w>0 ? chargingInfo.adapter_w : (peakW>0 ? Math.ceil(peakW/5)*5 : 0);
         const protocol=chargingInfo.protocol||'';
         const speedLabel=chargingInfo.charging
             ? `${pW} W · ${vV}V @ ${iA}A`
-            : (chargingInfo.ac_online ? 'Conectado · sin carga' : 'Desconectado');
+            : (chargingInfo.ac_online ? _tr('Conectado · sin carga') : _tr('Desconectado'));
         const speedColor=chargingInfo.power_uw>30e6?'var(--green)':
                          chargingInfo.power_uw>15e6?'var(--blue)':
                          chargingInfo.power_uw>0?'var(--orange)':'var(--tx2)';
-        h+=renderSection(t('sec_usbc'));
-        const protoLine=[protocol,adapterW>0?`Cargador ${adapterW} W`:''].filter(Boolean).join(' · ');
-        h+=renderCard([
-            `<div class="detail-item"><div class="detail-texts"><span class="dt">Potencia actual</span><span class="ds" style="color:${speedColor};font-weight:600">${speedLabel}</span></div></div>`,
-            protoLine?`<div class="detail-item"><div class="detail-texts"><span class="dt">Protocolo</span><span class="ds">${esc(protoLine)}</span></div></div>`:'',
-        ].filter(Boolean));
+        const protoLine=[protocol,adapterW>0?`${_tr('Cargador')} ${adapterW} W`:''].filter(Boolean).join(' · ');
+        let rows=`<div class="bat-stat-pop-row"><span class="bat-stat-pop-label">${_tr('Potencia actual')}</span><span class="bat-stat-pop-val" style="color:${speedColor}">${esc(speedLabel)}</span></div>`;
+        if(protoLine) rows+=`<div class="bat-stat-pop-row"><span class="bat-stat-pop-label">${_tr('Protocolo')}</span><span class="bat-stat-pop-val">${esc(protoLine)}</span></div>`;
+        _usbcHtml=`<div class="bat-pop-section-title">${_tr('Carga USB-C')}</div><div class="bat-stat-pop">${rows}</div>`;
     }
+    c.dataset.batUsbc=_usbcHtml;
 
-
-    // ── Carga adaptativa — predicciones por día ──
+    let _predHtml='';
     {
-        const days=['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'];
+        const days=[_tr('Lun'),_tr('Mar'),_tr('Mié'),_tr('Jue'),_tr('Vie'),_tr('Sáb'),_tr('Dom')];
         const jsDayToCSV=(d)=>d===0?7:d;
         const todayCSV=jsDayToCSV(new Date().getDay());
-
         if(adaptivePreds.ok&&adaptivePreds.predictions.length>0){
             const predsMap=new Map(adaptivePreds.predictions.map(p=>[p.day,p]));
             let predRows='';
             for(let d=1;d<=7;d++){
                 const p=predsMap.get(d);
                 const isToday=d===todayCSV;
-                const label=p?`${String(p.hour).padStart(2,'0')}:${String(p.minute).padStart(2,'0')} <span style="font-size:11px;color:var(--tx2)">(${p.samples} datos)</span>`:'<span style="color:var(--tx2)">Sin datos</span>';
-                predRows+=`<div class="detail-item" style="padding:10px 20px;display:flex;justify-content:space-between;align-items:center${isToday?';background:var(--hov)':''}">
-                    <span style="font-size:14px${isToday?';font-weight:600':''}">${days[d-1]}${isToday?' <span style="font-size:11px;color:var(--blue)">hoy</span>':''}</span>
-                    <span style="font-size:14px">${label}</span>
+                const time=p?`${String(p.hour).padStart(2,'0')}:${String(p.minute).padStart(2,'0')}`:`<span style="color:var(--tx2)">${_tr('Sin datos')}</span>`;
+                const samples=p?`<span class="bat-pred-samples">${p.samples} ${_tr('datos')}</span>`:'';
+                predRows+=`<div class="bat-pred-row${isToday?' today':''}">
+                    <span class="bat-pred-day">${days[d-1]}${isToday?` <span class="bat-pred-today">${_tr('hoy')}</span>`:''}</span>
+                    <span class="bat-pred-time">${time} ${samples}</span>
                 </div>`;
             }
-            h+=`<div style="font-size:12px;color:var(--tx2);margin:4px 0 6px;padding:0 4px">Hora predicha de desconexión por día</div>`;
-            h+=`<div class="detail-card">${predRows}</div>`;
+            _predHtml=`<div class="bat-pop-section-title">${_tr('Hora predicha de desconexión')}</div><div class="bat-pred-list">${predRows}</div>`;
         } else if(csvData.ok){
-            h+=`<div style="font-size:13px;color:var(--tx2);padding:8px 4px">Necesita más datos para predecir patrones (mínimo 1 desconexión por día).</div>`;
+            _predHtml=`<div class="bat-pop-section-title">${_tr('Hora predicha de desconexión')}</div><div class="bat-pop-empty">${_tr('Necesita más datos para predecir patrones.')}</div>`;
         }
     }
+    c.dataset.batPred=_predHtml;
 
     // Performance mode — shown when power-profiles-daemon is available (generic Linux)
     if(gb.perf_supported){
         const rawPm=gb.performance_mode||'balanced';
         // Samsung platform-profile values → internal card keys
-        const pm={'low-power':'ahorro','quiet':'power-saver','balanced':'balanced','performance':'performance'}[rawPm]||rawPm;
-        const perfIcons={'ahorro':'./assets/power-saver.svg','power-saver':'./assets/power-saver.svg','balanced':'./assets/optimized.svg','performance':'./assets/performance.svg'};
-        const perfNames={'ahorro':'Ahorro extremo','power-saver':'Silencioso','balanced':'Optimizado','performance':'Rendimiento'};
-        const perfDescs={'ahorro':'Mínimo consumo','power-saver':'Ahorra batería','balanced':'Equilibrado','performance':'Máximo poder'};
-        const modes=['ahorro','power-saver','balanced','performance'];
+        const pm={'low-power':'power-saver','quiet':'power-saver','balanced':'balanced','performance':'performance'}[rawPm]||rawPm;
+        const perfIcons={'power-saver':'./assets/power-saver.svg','balanced':'./assets/optimized.svg','performance':'./assets/performance.svg'};
+        const perfNames={'power-saver':'Silencioso','balanced':'Optimizado','performance':'Rendimiento'};
+        const perfDescs={'power-saver':'Ahorra batería','balanced':'Equilibrado','performance':'Máximo poder'};
+        const modes=['power-saver','balanced','performance'];
         h+=renderSection(t('sec_perf_mode'))+`<div class="perf-modes">${modes.map(m=>`<div class="perf-mode-card ${pm===m?'active':''}" data-mode="${m}"><div class="perf-mode-icon"><img src="${perfIcons[m]}" width="32" height="32" class="perf-icon-img"></div><div class="perf-mode-name">${perfNames[m]}</div><div class="perf-mode-desc">${perfDescs[m]}</div></div>`).join('')}</div>`;
     }
     h+=`</div>`; // cierre bat-page-wrap
@@ -2830,7 +1721,7 @@ async function _renderBateriaContent(c){
         const mkAppRow2=(a)=>{
             const cpu=parseFloat(a.cpu)||0;
             const sharePct2=Math.min(100,cpu/totalCpuAll2*100);
-            const iconHtml=a.icon?`<img src="asset://localhost${a.icon}" width="32" height="32" style="border-radius:10px;object-fit:contain" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`:'';
+            const iconHtml=a.icon?`<img src="${getAssetUrl(a.icon)}" width="32" height="32" style="border-radius:10px;object-fit:contain" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`:'';
             const fallbackHtml=`<span class="bat-app-icon-fallback" style="width:32px;height:32px;font-size:11px;${a.icon?'display:none':''}">${a.name.slice(0,2).toUpperCase()}</span>`;
             const rightLabel=`${sharePct2.toFixed(1).replace('.',',')}%`;
             return`<div class="bat-app-item" style="padding:12px 20px">
@@ -2990,30 +1881,45 @@ async function _renderBateriaContent(c){
         }
     });
     // ── Chart bar tooltip ────────────────────────────────────────────────
+    // Single shared tip + delegated listeners bound ONCE. Per-bar listeners
+    // died on every chart re-render (the bar under the cursor got replaced,
+    // so mouseleave never fired and the tip stayed stuck), and each render
+    // appended yet another tip div.
     {
-        const tip=document.createElement('div');
-        tip.className='bat-bar-tip';
-        document.body.appendChild(tip);
-        const showTip=(e)=>{
-            const bar=e.target.closest('.bat-bar');
-            if(!bar){tip.style.display='none';return;}
-            tip.textContent=bar.dataset.tip||'';
-            tip.style.display='block';
-            const r=bar.getBoundingClientRect();
-            const tx=r.left+r.width/2-tip.offsetWidth/2;
-            const ty=r.top-tip.offsetHeight-6+window.scrollY;
-            tip.style.left=Math.max(4,tx)+'px';
-            tip.style.top=ty+'px';
-        };
-        const hideTip=()=>{tip.style.display='none';};
-        document.querySelectorAll('.bat-bar').forEach(b=>{
-            b.addEventListener('mouseenter',showTip);
-            b.addEventListener('mouseleave',hideTip);
-        });
-        // Clean up tooltip when page changes
-        if(!window._pageIntervals)window._pageIntervals=[];
-        window._pageIntervals.push(setInterval(()=>{if(!document.querySelector('.bat-bar')){tip.remove();hideTip();}},2000));
+        let tip=document.querySelector('.bat-bar-tip');
+        if(!tip){
+            tip=document.createElement('div');
+            tip.className='bat-bar-tip';
+            document.body.appendChild(tip);
+            document.addEventListener('mouseover',e=>{
+                const bar=e.target instanceof Element?e.target.closest('.bat-bar'):null;
+                if(!bar||!document.contains(bar)){tip.style.display='none';return;}
+                tip.textContent=bar.dataset.tip||'';
+                tip.style.display='block';
+                const r=bar.getBoundingClientRect();
+                tip.style.left=Math.max(4,r.left+r.width/2-tip.offsetWidth/2)+'px';
+                tip.style.top=(r.top-tip.offsetHeight-6)+'px';
+            });
+            // Cursor leaving the window also hides it
+            document.documentElement.addEventListener('mouseleave',()=>{tip.style.display='none';});
+        }
+        tip.style.display='none';   // re-render: start hidden
     }
+
+    // ── Stats popup (opened from the header 3-dot button) ───────────────────
+    document.getElementById('bat-stats-btn')?.addEventListener('click',()=>{
+        let rows=[];
+        try{rows=JSON.parse(c.dataset.batStats||'[]');}catch(e){}
+        const statsRows=rows.map(r=>
+            `<div class="bat-stat-pop-row"><span class="bat-stat-pop-label">${r.label}</span><span class="bat-stat-pop-val"${r.color?` style="color:${r.color}"`:''}>${r.val}</span></div>`
+        ).join('')||`<div class="bat-stat-pop-row"><span class="bat-stat-pop-label">${_tr('Sin datos disponibles')}</span></div>`;
+        const statsSection=`<div class="bat-pop-section-title">${_tr('Estado')}</div><div class="bat-stat-pop">${statsRows}</div>`;
+        const usbc=c.dataset.batUsbc||'';
+        const pred=c.dataset.batPred||'';
+        const body=`<div class="bat-pop">${statsSection}${usbc}${pred}</div>`;
+        showDialog(_tr('Estadísticas de batería'), body,
+            {confirmText:null,cancelText:_tr('Cerrar'),onCancel:()=>{}});
+    });
 } // end _renderBateriaContent
 
 // ════════════════════════════════════════════════════════════════════════
@@ -3031,6 +1937,7 @@ export async function renderNotificaciones(c){
             tauriInvoke('run_command',{cmd:'kreadconfig6',args:['--file','plasmanotifyrc','--group','Notifications','--key','PopupCriticalOnly','--default','false']}).then(v=>v.trim()!=='true').catch(()=>true),
         ]);
     }catch(e){}
+    const updNotif=(await getSetting('UpdateNotifications','true'))!=='false';
 
     let h=renderHeader(t('hdr_notifications'));
     h+=renderSection(t('sec_general'));
@@ -3039,13 +1946,17 @@ export async function renderNotificaciones(c){
         renderRowItem('Mostrar en pantalla bloqueada','Ver notificaciones al bloquear',renderToggle('notif-lock',onLock)),
         renderRowItem('Mostrar todas las notificaciones','Desactiva para ver sólo críticas',renderToggle('notif-popups',popups)),
     ]);
+    h+=renderSection('BookOS');
+    h+=renderCard([
+        renderRowItem('Avisos de actualizaciones','Notificar cuando haya actualizaciones de BookOS o paquetes',renderToggle('notif-updates',updNotif)),
+    ]);
     h+=renderSection(t('sec_audio'));
     h+=renderCard([
         renderRowItem('Sonidos de notificación','Reproduce sonido al recibir notificaciones',renderToggle('notif-snd',snd)),
     ]);
     h+=renderSection(t('sec_history'));
     h+=renderCard([
-        renderRowItem('Historial de notificaciones','Abre el historial de Plasma',`<button class="btn btn-secondary btn-sm" id="notif-hist">Abrir</button>`),
+        renderRowItem('Ajustes de notificaciones','Configura el historial y el comportamiento en Plasma',`<button class="btn btn-secondary btn-sm" id="notif-hist">Abrir</button>`),
     ]);
 
     c.innerHTML=h;
@@ -3062,13 +1973,21 @@ export async function renderNotificaciones(c){
         try{await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','plasmanotifyrc','--group','Notifications','--key','PopupCriticalOnly',a?'false':'true']});}catch(e){}
         toast(a?'Todas las notificaciones visibles':'Sólo notificaciones críticas');
     });
+    setupToggle('notif-updates',async a=>{
+        setSetting('UpdateNotifications',a?'true':'false');
+        toast(a?'Avisos de actualizaciones activados':'Avisos de actualizaciones desactivados');
+    });
     setupToggle('notif-snd',async a=>{
         try{await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','plasmanotifyrc','--group','Notifications','--key','Sound',a?'true':'false']});}catch(e){}
         toast(a?'Sonidos activados':'Sonidos desactivados','🔔');
     });
-    document.getElementById('notif-hist')?.addEventListener('click',()=>{
-        try{tauriInvoke('run_command',{cmd:'plasmawindowed',args:['org.kde.plasma.notifications']}).catch(()=>{});}catch(e){}
-        toast('Abriendo historial','📋');
+    document.getElementById('notif-hist')?.addEventListener('click',async()=>{
+        // Open Plasma's notification settings KCM. plasmawindowed for the applet is
+        // unreliable on Plasma 6, so we open the real settings module instead.
+        let ok=false;
+        try{await tauriInvoke('run_command',{cmd:'kcmshell6',args:['kcm_notifications']});ok=true;}catch(e){}
+        if(!ok){try{await tauriInvoke('run_command',{cmd:'systemsettings',args:['kcm_notifications']});ok=true;}catch(e){}}
+        toast(ok?_tr('Abriendo ajustes de notificaciones'):_tr('No se pudo abrir'),'🔔');
     });
 }
 
@@ -3202,20 +2121,62 @@ export async function renderTemas(c){
         </div>`;
     };
 
-    c.innerHTML=renderHeader(t('hdr_themes'))+
-        renderCard([renderRowItem('Modo oscuro',theme.is_dark?t('enabled'):t('disabled'),renderToggle('dm',theme.is_dark))])+
-        renderSection(t('sec_scheduled_change'))+renderCard([
-            renderRowItem('Programar tema','Cambiar automáticamente por hora',renderToggle('sched',schedule.enabled)),
-            `<div class="detail-item" id="sched-opts" style="display:${schedule.enabled?'block':'none'}"><div style="display:flex;gap:10px;margin-top:8px"><div style="flex:1"><span class="ds">Claro desde</span><input type="time" id="sched-lt" value="${schedule.light_time}" class="sel" style="margin-top:4px"></div><div style="flex:1"><span class="ds">Oscuro desde</span><input type="time" id="sched-dt" value="${schedule.dark_time}" class="sel" style="margin-top:4px"></div></div><div style="display:flex;gap:10px;margin-top:8px"><div style="flex:1"><span class="ds">Tema claro</span><select id="sched-ltheme" class="sel" style="margin-top:4px">${light.map(t=>`<option value="${esc(t.name)}" ${t.name===schedule.light_theme?'selected':''}>${esc(t.name)}</option>`).join('')}</select></div><div style="flex:1"><span class="ds">Tema oscuro</span><select id="sched-dtheme" class="sel" style="margin-top:4px">${dark.map(t=>`<option value="${esc(t.name)}" ${t.name===schedule.dark_theme?'selected':''}>${esc(t.name)}</option>`).join('')}</select></div></div></div>`
-        ])+
-        renderSection(t('sec_theme'))+`<div class="theme-grid-duo">${themes.map(t=>mkCard(t,t.is_dark)).join('')}</div>`;
+    const isDk=theme.is_dark;
+    // Light / Dark mode chooser — two big swatches with a radio underneath.
+    const _modeSwatch=(mode,label,active)=>`
+        <div class="mode-swatch ${active?'active':''}" data-mode="${mode}">
+            <div class="mode-swatch-preview ${mode}"></div>
+            <span class="mode-swatch-label">${_tr(label)}</span>
+            <div class="mode-radio ${active?'on':''}"></div>
+        </div>`;
 
-    setupToggle('dm',async a=>{
-        const name=a?(kcsT.dark||dark[0]?.name||'BookOS Dark'):(kcsT.light||light[0]?.name||'BookOS Light');
+    // Icon style chooser: Light / Dark / Tinted terminal glyph.
+    // Fixed glyph colours (NOT green): Light #9EC8FF, Dark #244060, Tinted #659EC4.
+    // These only change once the user enters the tinted-icon settings sub-page.
+    const _termGlyph=(stroke)=>`<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="${stroke}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
+    const _savedIcon=localStorage.getItem('bookos_icon_style')||'light';
+    const _ICON_COLORS={light:'#9EC8FF',dark:'#244060',tinted:'#659EC4'};
+    const _iconSwatch=(mode,label,tileBg,glyphBg,active)=>`
+        <div class="icon-swatch ${active?'active':''}" data-icon="${mode}">
+            <div class="icon-swatch-tile" style="background:${tileBg}"><div class="icon-swatch-glyph" style="background:${glyphBg}">${_termGlyph('#ffffff')}</div></div>
+            <span class="icon-swatch-label">${_tr(label)}</span>
+            <div class="mode-radio ${active?'on':''}"></div>
+        </div>`;
+
+    c.innerHTML=renderHeader(t('hdr_themes'))+
+        // ── Light / Dark mode + schedule + (when tinted) tinted-icon settings ──
+        `<div class="theme-block">
+            <div class="mode-swatch-row">
+                ${_modeSwatch('light','Claro',!isDk)}
+                ${_modeSwatch('dark','Oscuro',isDk)}
+            </div>
+            <div class="theme-block-divider"></div>
+            ${renderRowItem('Programar modo oscuro','',renderToggle('sched',schedule.enabled))}
+        </div>`+
+        // ── Icon style + tinted settings (row appears only for "tinted") ──
+        `<div class="theme-block">
+            <div class="icon-swatch-row">
+                ${_iconSwatch('light','Claro','#ffffff',_ICON_COLORS.light,_savedIcon==='light')}
+                ${_iconSwatch('dark','Oscuro','#1c1c1e',_ICON_COLORS.dark,_savedIcon==='dark')}
+                ${_iconSwatch('tinted','Tintado',(isDk?'#1c1c1e':'#ffffff'),_ICON_COLORS.tinted,_savedIcon==='tinted')}
+            </div>
+            <div class="theme-block-divider" id="ti-row-div" style="display:${_savedIcon==='tinted'?'block':'none'}"></div>
+            <div class="ti-settings-row" id="ti-settings-open" style="display:${_savedIcon==='tinted'?'flex':'none'}">
+                <span class="dt">${_tr('Ajustes de los iconos tintados')}</span>
+                <span class="ti-chevron">›</span>
+            </div>
+        </div>`+
+        // ── BookOS color schemes ──
+        `<div class="theme-block">
+            <div class="theme-grid-duo">${themes.map(t=>mkCard(t,t.is_dark)).join('')}</div>
+        </div>`;
+
+    // Light / Dark mode swatches
+    const _applyMode=async dark_=>{
+        const name=dark_?(kcsT.dark||dark[0]?.name||'BookOS Dark'):(kcsT.light||light[0]?.name||'BookOS Light');
         try{await tauriInvoke('apply_kde_theme',{name,isGlobal:kcsT.is_global})}catch(e){}
-        document.documentElement.className=a?'dark-mode':'light-mode';
-        toast(a?'Modo oscuro activado':'Modo claro activado');
-        // Offer logout for full coherence across legacy apps. Skip if user dismissed previously this session.
+        document.documentElement.className=dark_?'dark-mode':'light-mode';
+        toast(dark_?'Modo oscuro activado':'Modo claro activado');
         if(!window.__dmLogoutAsked){
             window.__dmLogoutAsked=true;
             showDialog('Cerrar sesión','Algunas apps ya abiertas pueden quedar con el tema anterior. Cerrar sesión las pondrá todas en el nuevo tema.',{
@@ -3223,17 +2184,214 @@ export async function renderTemas(c){
                 onConfirm:async()=>{try{await tauriInvoke('logout_session');}catch(e){}}
             });
         }
+    };
+    document.querySelectorAll('.mode-swatch').forEach(sw=>sw.addEventListener('click',()=>{
+        document.querySelectorAll('.mode-swatch').forEach(x=>{x.classList.remove('active');x.querySelector('.mode-radio').classList.remove('on');});
+        sw.classList.add('active');sw.querySelector('.mode-radio').classList.add('on');
+        _applyMode(sw.dataset.mode==='dark');
+    }));
+    // Icon style swatches — persist choice, apply the icon theme, and show the
+    // tinted-settings row only for "tinted".
+    document.querySelectorAll('.icon-swatch').forEach(sw=>sw.addEventListener('click',async()=>{
+        document.querySelectorAll('.icon-swatch').forEach(x=>{x.classList.remove('active');x.querySelector('.mode-radio').classList.remove('on');});
+        sw.classList.add('active');sw.querySelector('.mode-radio').classList.add('on');
+        const m=sw.dataset.icon;
+        localStorage.setItem('bookos_icon_style',m);
+        const isTint=m==='tinted';
+        const row=document.getElementById('ti-settings-open');
+        const div=document.getElementById('ti-row-div');
+        if(row)row.style.display=isTint?'flex':'none';
+        if(div)div.style.display=isTint?'block':'none';
+        // Apply the real KDE icon theme. Tinted uses the variant matching the
+        // current system mode (dark/light) for the icon's base square.
+        const _dark=document.documentElement.classList.contains('dark-mode');
+        const _variant=_dark?'dark':'light';
+        const hue=parseInt(localStorage.getItem(`bookos_tint_${_variant}_hue`)||'210',10);
+        const strength=parseInt(localStorage.getItem(`bookos_tint_${_variant}_strength`)||'45',10);
+        toast(_tr('Aplicando iconos…'),'🔄');
+        try{
+            const r=JSON.parse(await tauriInvoke('set_icon_style',{mode:m,hue,strength,dark:_dark,
+                tintBase:localStorage.getItem('bookos_tint_base')!=='0',
+                tintLogo:localStorage.getItem('bookos_tint_logo')==='1',
+                logoHue:parseInt(localStorage.getItem(`bookos_tint_${_variant}_logohue`)||'210',10)}));
+            toast(r.ok?_tr('Iconos aplicados'):(_tr('Error')+': '+(r.error||'')), r.ok?'✅':'❌');
+        }catch(e){toast(_tr('No se pudieron aplicar los iconos'),'❌');}
+    }));
+    // "Ajustes de los iconos tintados" → opens its own sub-page.
+    document.getElementById('ti-settings-open')?.addEventListener('click',()=>{
+        if(window.pushSubNav)window.pushSubNav(()=>renderTemas(c));
+        renderTintedIcons(c);
     });
-    setupToggle('sched',async a=>{document.getElementById('sched-opts').style.display=a?'block':'none';saveSchedule(a);toast(a?'Programación activada':'Programación desactivada');});
+    // Toggle only flips enabled; preserve the saved times/themes from `schedule`.
+    setupToggle('sched',async a=>{saveSchedule(a,schedule);toast(a?'Programación activada':'Programación desactivada');});
     document.querySelectorAll('.theme-card-large').forEach(cd=>{cd.addEventListener('click',async()=>{try{await tauriInvoke('set_color_scheme',{scheme:cd.dataset.s})}catch(e){}document.documentElement.className=cd.dataset.s.toLowerCase().includes('dark')?'dark-mode':'light-mode';document.querySelectorAll('.theme-card-large').forEach(x=>{x.classList.remove('active');x.querySelector('.theme-check').textContent='';});cd.classList.add('active');cd.querySelector('.theme-check').textContent='✓';toast('Tema aplicado: '+cd.dataset.s);});});
+}
+// Save schedule. When `from` (a schedule object) is given, use its times/themes;
+// otherwise read them from the sub-page's inputs (with sane fallbacks).
+async function saveSchedule(enabled,from){
+    const lt=from?.light_time||document.getElementById('sched-lt')?.value||'07:00';
+    const dt=from?.dark_time||document.getElementById('sched-dt')?.value||'20:00';
+    const ltheme=from?.light_theme||document.getElementById('sched-ltheme')?.value||'BookOS Light';
+    const dtheme=from?.dark_theme||document.getElementById('sched-dtheme')?.value||'BookOS Dark';
+    try{await tauriInvoke('set_theme_schedule',{enabled,light_time:lt,dark_time:dt,light_theme:ltheme,dark_theme:dtheme});}catch(e){}
+}
+
+// ── Dark/Light mode settings sub-page (automatic schedule) ──
+export async function renderModeSettings(c){
+    c.innerHTML=renderHeader('Ajustes del modo Oscuro/Claro')+renderSkeleton(1);
+    let schedule={enabled:false,light_time:'07:00',dark_time:'20:00',light_theme:'BookOS Light',dark_theme:'BookOS Dark'};
+    let themes=[];
+    try{[schedule,themes]=await Promise.all([
+        tauriInvoke('get_theme_schedule').then(JSON.parse),
+        tauriInvoke('get_available_themes').then(JSON.parse),
+    ]);}catch(e){}
+    themes=themes.filter(t=>/^bookos/i.test(t.name));
+    const dark=themes.filter(t=>t.is_dark),light=themes.filter(t=>!t.is_dark);
+
+    c.innerHTML=renderHeader('Ajustes del modo Oscuro/Claro')+
+        `<div class="theme-block">
+            ${renderRowItem('Programar modo oscuro','Cambiar automáticamente por hora',renderToggle('sched',schedule.enabled))}
+            <div id="ms-opts" style="display:${schedule.enabled?'block':'none'}">
+                <div class="theme-block-divider"></div>
+                <div class="ms-grid">
+                    <div><span class="ds">${_tr('Claro desde')}</span><input type="time" id="sched-lt" value="${schedule.light_time}" class="sel"></div>
+                    <div><span class="ds">${_tr('Oscuro desde')}</span><input type="time" id="sched-dt" value="${schedule.dark_time}" class="sel"></div>
+                </div>
+                <div class="ms-grid" style="margin-top:12px">
+                    <div><span class="ds">${_tr('Tema claro')}</span><select id="sched-ltheme" class="sel">${light.map(t=>`<option value="${esc(t.name)}" ${t.name===schedule.light_theme?'selected':''}>${esc(t.name)}</option>`).join('')}</select></div>
+                    <div><span class="ds">${_tr('Tema oscuro')}</span><select id="sched-dtheme" class="sel">${dark.map(t=>`<option value="${esc(t.name)}" ${t.name===schedule.dark_theme?'selected':''}>${esc(t.name)}</option>`).join('')}</select></div>
+                </div>
+            </div>
+        </div>`;
+
+    setupToggle('sched',async a=>{document.getElementById('ms-opts').style.display=a?'block':'none';saveSchedule(a);toast(a?'Programación activada':'Programación desactivada');});
     ['sched-lt','sched-dt','sched-ltheme','sched-dtheme'].forEach(id=>{document.getElementById(id)?.addEventListener('change',()=>saveSchedule(true));});
 }
-async function saveSchedule(enabled){
-    const lt=document.getElementById('sched-lt')?.value||'07:00';
-    const dt=document.getElementById('sched-dt')?.value||'20:00';
-    const ltheme=document.getElementById('sched-ltheme')?.value||'BreezeLight';
-    const dtheme=document.getElementById('sched-dtheme')?.value||'BreezeDark';
-    try{await tauriInvoke('set_theme_schedule',{enabled,light_time:lt,dark_time:dt,light_theme:ltheme,dark_theme:dtheme});}catch(e){}
+
+// ── Tinted icons customization sub-page ──
+// Dual tint: Light and Dark icon variants each keep their own hue + strength.
+// Selecting a preview loads that variant into the sliders; editing recolours
+// only that variant. (Visual mock — persisted locally.)
+export async function renderTintedIcons(c){
+    // s = slider value. LEFT (s low) = strong/saturated, RIGHT (s high) = white-ish.
+    const _tintColor=(h,s)=>{
+        const sat=Math.round(90-(s/100)*55);           // s0→90% (strong) … s100→35% (washed)
+        const light=Math.round(42+(s/100)*38);         // s0→42% (deep) … s100→80% (light)
+        return `hsl(${h},${sat}%,${light}%)`;
+    };
+    const termGlyph=`<svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>`;
+    // Per-variant defaults (fall back to the fixed icon colours' rough hue).
+    const get=(k,d)=>parseInt(localStorage.getItem(k)||String(d),10);
+    const variants={
+        light:{hue:get('bookos_tint_light_hue',210),str:get('bookos_tint_light_strength',45),lhue:get('bookos_tint_light_logohue',210)},
+        dark :{hue:get('bookos_tint_dark_hue',210), str:get('bookos_tint_dark_strength',70), lhue:get('bookos_tint_dark_logohue',210)},
+    };
+    let selected=localStorage.getItem('bookos_tint_mode')||'light';
+
+    const swatch=(m,label,tileBg)=>{
+        const v=variants[m];
+        return `<div class="ti-preview-swatch ${m===selected?'active':''}" data-tmode="${m}">
+            <div class="ti-preview-tile" style="background:${tileBg}"><div class="ti-preview-glyph" id="ti-pg-${m}" style="background:${_tintColor(v.hue,v.str)}">${termGlyph}</div></div>
+            <span class="ti-preview-label">${_tr(label)}</span>
+            <div class="mode-radio ${m===selected?'on':''}"></div>
+        </div>`;
+    };
+
+    c.innerHTML=renderHeader('Iconos tintados')+
+        `<div class="theme-block ti-page-block">
+            <div class="ti-preview-row">
+                ${swatch('light','Claro','#ffffff')}
+                ${swatch('dark','Oscuro','#1c1c2e')}
+            </div>
+            <div class="ti-controls">
+                <div class="ti-slider-row">
+                    <span class="ti-slider-label">${_tr('Color')}</span>
+                    <div class="ti-slider ti-hue"><input type="range" id="ti-hue" min="0" max="360"></div>
+                </div>
+                <div class="ti-slider-row">
+                    <span class="ti-slider-label">${_tr('Intensidad')}</span>
+                    <div class="ti-slider ti-strength"><input type="range" id="ti-strength" min="0" max="100"></div>
+                </div>
+            </div>
+        </div>
+        <div class="theme-block ti-page-block">
+            ${renderRowItem('Pintar la base','El cuadrado de fondo toma el color del tinte',renderToggle('tintbase',localStorage.getItem('bookos_tint_base')!=='0'))}
+            ${renderRowItem('Pintar el logo','Recolorea el logo de cada app con su propio color',renderToggle('tintlogo',localStorage.getItem('bookos_tint_logo')==='1'))}
+            <div id="ti-logo-hue-row" class="ti-controls" style="display:${localStorage.getItem('bookos_tint_logo')==='1'?'block':'none'}">
+                <div class="ti-slider-row">
+                    <span class="ti-slider-label">${_tr('Color del logo')}</span>
+                    <div class="ti-slider ti-hue"><input type="range" id="ti-logo-hue" min="0" max="360"></div>
+                </div>
+            </div>
+        </div>`;
+
+    const hueEl=document.getElementById('ti-hue');
+    const strEl=document.getElementById('ti-strength');
+
+    // Load the selected variant's values into the sliders + recolour tracks.
+    const lhueEl=document.getElementById('ti-logo-hue');
+    const loadSliders=()=>{
+        const v=variants[selected];
+        hueEl.value=v.hue; strEl.value=v.str; lhueEl.value=v.lhue;
+        hueEl.style.setProperty('--thumb',_tintColor(v.hue,0));
+        strEl.style.setProperty('--c0',_tintColor(v.hue,0));    // left = strong
+        strEl.style.setProperty('--c1',_tintColor(v.hue,100));  // right = white-ish
+        strEl.style.setProperty('--thumb',_tintColor(v.hue,v.str));
+        lhueEl.style.setProperty('--thumb',_tintColor(v.lhue,0));
+    };
+    // Recolour only the selected variant's glyph as the sliders move.
+    const onSlide=()=>{
+        const h=parseInt(hueEl.value,10), s=parseInt(strEl.value,10);
+        variants[selected]={hue:h,str:s};
+        const g=document.getElementById('ti-pg-'+selected);
+        if(g)g.style.background=_tintColor(h,s);
+        strEl.style.setProperty('--c0',_tintColor(h,0));    // left = strong
+        strEl.style.setProperty('--c1',_tintColor(h,100));  // right = white-ish
+        strEl.style.setProperty('--thumb',_tintColor(h,s));
+        hueEl.style.setProperty('--thumb',_tintColor(h,0));
+        localStorage.setItem(`bookos_tint_${selected}_hue`,String(h));
+        localStorage.setItem(`bookos_tint_${selected}_strength`,String(s));
+    };
+    hueEl.addEventListener('input',onSlide);
+    strEl.addEventListener('input',onSlide);
+    lhueEl.addEventListener('input',()=>{
+        const lh=parseInt(lhueEl.value,10);
+        variants[selected].lhue=lh;
+        lhueEl.style.setProperty('--thumb',_tintColor(lh,0));
+        localStorage.setItem(`bookos_tint_${selected}_logohue`,String(lh));
+    });
+    // On release (not every pixel — regenerating the pack is heavy), apply the
+    // tinted icon theme with the new hue/strength.
+    const applyTint=async()=>{
+        const h=parseInt(hueEl.value,10), s=parseInt(strEl.value,10);
+        // `selected` is the variant being edited ('light' or 'dark') → that's the base.
+        const isDark=selected==='dark';
+        toast(_tr('Aplicando iconos…'),'🔄');
+        try{
+            const tintBase=localStorage.getItem('bookos_tint_base')!=='0';
+            const tintLogo=localStorage.getItem('bookos_tint_logo')==='1';
+            const logoHue=parseInt(lhueEl.value,10);
+            const r=JSON.parse(await tauriInvoke('set_icon_style',{mode:'tinted',hue:h,strength:s,dark:isDark,tintBase,tintLogo,logoHue}));
+            toast(r.ok?_tr('Iconos aplicados'):(_tr('Error')+': '+(r.error||'')), r.ok?'✅':'❌');
+        }catch(e){toast(_tr('No se pudieron aplicar los iconos'),'❌');}
+    };
+    hueEl.addEventListener('change',applyTint);
+    strEl.addEventListener('change',applyTint);
+    lhueEl.addEventListener('change',applyTint);
+    setupToggle('tintbase',a=>{localStorage.setItem('bookos_tint_base',a?'1':'0');applyTint();});
+    setupToggle('tintlogo',a=>{
+        localStorage.setItem('bookos_tint_logo',a?'1':'0');
+        document.getElementById('ti-logo-hue-row').style.display=a?'block':'none';
+        applyTint();
+    });
+    document.querySelectorAll('.ti-preview-swatch').forEach(sw=>sw.addEventListener('click',()=>{
+        document.querySelectorAll('.ti-preview-swatch').forEach(x=>{x.classList.remove('active');x.querySelector('.mode-radio').classList.remove('on');});
+        sw.classList.add('active');sw.querySelector('.mode-radio').classList.add('on');
+        selected=sw.dataset.tmode;
+        localStorage.setItem('bookos_tint_mode',selected);
+        loadSliders();
+    }));
+    loadSliders();
 }
 
 // Fingerprint draw-in animation — strokes materialize center→outward via stroke-dashoffset
@@ -3352,9 +2510,10 @@ export async function renderBloqueo(c){
     const fontOpts=[['serif','Serif'],['sans','Sans'],['mono','Mono']];
     const accentSwatches=['#007AFF','#FF3B30','#FF9500','#FFCC00','#34C759','#5AC8FA','#AF52DE','#FF2D55'];
     const blurPct=parseInt(sddmCfg.blurRadius)||24;
-    const sddmHtml=renderSection(t('sec_sddm'))+
-        `<div id="sddm-preview-wrap"></div>`+
-        `<div class="detail-card">
+    const sddmHtml=
+        `<div class="detail-card sddm-card">
+        <div class="sddm-card-title">${t('sec_sddm')}</div>
+        <div id="sddm-preview-wrap"></div>
         ${renderRowItem('Modo oscuro','Pantalla de inicio oscura o clara',renderToggle('sddm-dark',sddmCfg.variant==='dark'))}
         <div class="detail-item detail-item-row">
             <div class="detail-texts"><span class="dt">${_tr("Fondo")}</span></div>
@@ -3368,6 +2527,7 @@ export async function renderBloqueo(c){
             <span class="dt">Intensidad del blur</span>
             <div class="slider-container"><input type="range" class="filled" id="sddm-blur" min="0" max="60" value="${blurPct}" style="--fill:${(blurPct/60)*100}%"><span class="slider-label" id="sddm-blur-l">${blurPct}</span></div>
         </div>
+        <div class="sddm-subhead">${_tr('Reloj')}</div>
         <div class="detail-item detail-item-row">
             <div class="detail-texts"><span class="dt">Formato del reloj</span></div>
             <div class="seg-ctrl" id="sddm-fmt-ctrl">${fmtOpts.map(([v,l])=>`<button class="seg-btn${sddmCfg.clockFormat===v?' active':''}" data-val="${v}">${l}</button>`).join('')}</div>
@@ -3378,11 +2538,12 @@ export async function renderBloqueo(c){
         </div>
         <div class="detail-item detail-item-row">
             <div class="detail-texts"><span class="dt">Color de acento</span><span class="ds">Botones, enlaces y huella</span></div>
-            <div id="sddm-accent-swatches" style="display:flex;gap:6px;align-items:center">
+            <div id="sddm-accent-swatches" style="display:flex;gap:7px;align-items:center">
                 ${accentSwatches.map(c=>`<button class="sddm-swatch${sddmCfg.accentColor.toLowerCase()===c.toLowerCase()?' active':''}" data-color="${c}" style="width:22px;height:22px;border-radius:11px;border:2px solid ${sddmCfg.accentColor.toLowerCase()===c.toLowerCase()?'var(--tx)':'transparent'};background:${c};cursor:pointer;padding:0"></button>`).join('')}
                 <input type="color" id="sddm-accent-custom" value="${sddmCfg.accentColor}" style="width:24px;height:24px;border:none;background:transparent;cursor:pointer;padding:0">
             </div>
         </div>
+        <div class="sddm-subhead">${_tr('Elementos en pantalla')}</div>
         ${renderRowItem('Mostrar fecha','Día de la semana bajo el reloj',renderToggle('sddm-show-date',sddmCfg.showDate!=='false'))}
         ${renderRowItem('Mostrar batería','Pastilla con porcentaje de batería',renderToggle('sddm-show-batt',sddmCfg.showBattery!=='false'))}
         ${renderRowItem('Mostrar Book Bar','Pastilla con rutina activa o batería',renderToggle('sddm-show-bb',sddmCfg.showBookBar!=='false'))}
@@ -3396,10 +2557,11 @@ export async function renderBloqueo(c){
     const lockTypeLabel=lockType==='pin'?'PIN':'Contraseña del sistema';
 
     c.innerHTML=renderHeader(t('hdr_lockscreen_aod'))+
+        `<div class="themed-page">`+
         renderCard([
             `<div class="detail-item detail-item-row" id="lock-type-row" style="cursor:pointer">
                 <div class="detail-texts"><span class="dt">Tipo de bloqueo</span><span class="ds" id="lock-type-label">${lockTypeLabel}</span></div>
-                <span style="color:var(--tx2);font-size:18px;line-height:1">›</span>
+                ${chevron()}
             </div>`,
             `<div class="detail-item"><span class="dt">Tiempo de espera</span><div class="slider-container"><input type="range" class="filled" id="lt" min="1" max="30" value="${timeout}" style="--fill:${((timeout-1)/29)*100}%"><span class="slider-label" id="lt-l">${timeout} min</span></div></div>`,
             fp.available?`<div class="detail-item detail-item-row" id="fp-open-row" style="cursor:pointer">
@@ -3415,51 +2577,31 @@ export async function renderBloqueo(c){
         renderCard([
             renderRowItem('Tema BookOS — Pantalla de bloqueo','Reemplaza el lockscreen de Plasma',renderToggle('lock-theme',lockThemeOn)),
             renderRowItem('Tema BookOS — SDDM (login)','Activa el tema BookOS al iniciar sesión',renderToggle('sddm-theme',sddmThemeOn))
-        ])+sddmHtml;
+        ])+sddmHtml+`</div>`;
 
     setupSlider('lt',async v=>{try{await tauriInvoke('set_lock_timeout',{minutes:parseInt(v)})}catch(e){}const l=document.getElementById('lt-l');if(l)l.textContent=v+' min';toast('Tiempo de espera: '+v+' min');},false);
 
-    // Lock type — inline dropdown
-    const _lockOpts=[
-        {val:'password',label:'Contraseña',sub:'Contraseña clásica'},
-        {val:'pin',     label:'PIN',        sub:'Hará autologin'},
-    ];
-    document.getElementById('lock-type-row')?.addEventListener('click',()=>{
-        const row=document.getElementById('lock-type-row');
-        const existing=document.getElementById('lock-type-dropdown');
-        if(existing){existing.remove();return;}
-        const cur=document.getElementById('lock-type-label')?.textContent;
-        const dd=document.createElement('div');
-        dd.id='lock-type-dropdown';
-        dd.style.cssText='border-top:1px solid var(--div)';
-        dd.innerHTML=_lockOpts.map(o=>{
-            const active=(o.val==='password'&&(cur==='Contraseña del sistema'||cur==='Contraseña'))||(o.val==='pin'&&cur==='PIN');
-            return`<div class="detail-item detail-item-row lock-type-opt" data-val="${o.val}" style="cursor:pointer;padding:12px 20px;display:flex;justify-content:space-between;align-items:center">
-                <div class="detail-texts">
-                    <span class="dt" style="font-size:15px;${active?'color:var(--blue);font-weight:600':''}">${o.label}</span>
-                    <span class="ds">${o.sub}</span>
-                </div>
-                ${active?'<span style="color:var(--blue);font-size:16px">✓</span>':''}
-            </div>`;
-        }).join('<div style="height:1px;background:var(--div);margin:0 20px"></div>');
-        row.after(dd);
-        dd.querySelectorAll('.lock-type-opt').forEach(opt=>{
-            opt.addEventListener('click',async()=>{
-                const val=opt.dataset.val;
+    // Lock type — anchored popover
+    let _lockCur=lockType;
+    document.getElementById('lock-type-row')?.addEventListener('click',e=>{
+        popoverSelect(e.currentTarget,{
+            title:_tr('Tipo de bloqueo'),
+            options:[
+                {val:'password',label:_tr('Contraseña'),sub:_tr('Contraseña clásica')},
+                {val:'pin',     label:_tr('PIN'),        sub:_tr('Hará autologin')},
+            ],
+            current:_lockCur,
+            onSelect:async val=>{
+                _lockCur=val;
                 await setSetting('LockType',val);
                 const label=document.getElementById('lock-type-label');
-                if(label)label.textContent=val==='pin'?'PIN':'Contraseña del sistema';
-                dd.remove();
+                if(label)label.textContent=val==='pin'?'PIN':_tr('Contraseña del sistema');
                 if(val==='pin'){
                     try{await tauriInvoke('run_command',{cmd:'sh',args:['-c','klogin --configure-pin 2>/dev/null']});}catch(e){}
                 }
                 toast(val==='pin'?'Tipo de bloqueo: PIN':'Tipo de bloqueo: Contraseña');
-            });
+            },
         });
-        // close on outside click
-        setTimeout(()=>document.addEventListener('click',function _close(e){
-            if(!dd.contains(e.target)&&e.target!==row&&!row.contains(e.target)){dd.remove();document.removeEventListener('click',_close);}
-        }),50);
     });
 
     // Fingerprint popup
@@ -3646,7 +2788,7 @@ export async function renderBloqueo(c){
             <div style="position:absolute;inset:0;background:${overlay}"></div>`;
         }
 
-        wrap.innerHTML=`<div style="position:relative;width:100%;aspect-ratio:16/10;border-radius:18px;overflow:hidden;margin-bottom:12px;box-shadow:0 8px 32px rgba(0,0,0,.35)">
+        wrap.innerHTML=`<div style="position:relative;width:100%;max-width:560px;margin:4px auto 14px;aspect-ratio:16/9;border-radius:18px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.35)">
             ${bgLayer}
             <!-- clock -->
             <div style="position:absolute;top:7%;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:2px">
@@ -3679,35 +2821,13 @@ export async function renderBloqueo(c){
         </div>`;
     }
     _renderSddmPreview();
+    // Save SDDM config. Sends an empty password so the backend goes straight to
+    // pkexec's native polkit dialog — a single, consistent auth prompt (no
+    // custom password modal that could double up with pkexec).
+    let _sddmSaving=false;
     async function _sddmPromptAndSave(){
-        if(window._sudoModal)window._sudoModal.remove();
-        const pwd=await new Promise(resolve=>{
-            const d=document.createElement('div');d.className='sudo-modal-overlay';
-            d.innerHTML=`<div class="sudo-modal">
-                <div class="sudo-icon-wrap">
-                    <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                        <rect x="3" y="11" width="18" height="11" rx="2.5"/>
-                        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-                        <circle cx="12" cy="16.5" r="1.2" fill="currentColor"/>
-                    </svg>
-                </div>
-                <h3 class="sudo-title">${_tr('Pantalla de inicio de sesión')}</h3>
-                <p class="sudo-desc">${_tr('Introduce la contraseña para aplicar los cambios.')}</p>
-                <input type="password" class="sudo-input" id="sddm-pwd" placeholder="${_tr('Contraseña')}">
-                <div class="sudo-btns">
-                    <button class="btn btn-secondary" id="sddm-cancel">${_tr('Cancelar')}</button>
-                    <button class="btn btn-primary" id="sddm-ok">${_tr('Aplicar')}</button>
-                </div>
-            </div>`;
-            document.body.appendChild(d);window._sudoModal=d;
-            const cleanup=()=>{d.remove();window._sudoModal=null;};
-            document.getElementById('sddm-cancel').onclick=()=>{cleanup();resolve(null);};
-            const run=()=>{const v=document.getElementById('sddm-pwd').value;cleanup();resolve(v||null);};
-            document.getElementById('sddm-ok').onclick=run;
-            document.getElementById('sddm-pwd').addEventListener('keydown',e=>{if(e.key==='Enter')run();});
-            requestAnimationFrame(()=>document.getElementById('sddm-pwd')?.focus());
-        });
-        if(!pwd)return;
+        if(_sddmSaving)return; // avoid stacking dialogs from rapid toggles
+        _sddmSaving=true;
         try{
             const res=JSON.parse(await tauriInvoke('set_sddm_config',{
                 variant:_sddmCfg.variant,
@@ -3720,11 +2840,12 @@ export async function renderBloqueo(c){
                 showDate:_sddmCfg.showDate,
                 showBattery:_sddmCfg.showBattery,
                 showBookBar:_sddmCfg.showBookBar,
-                password:pwd
+                password:''
             }));
             if(res.ok){toast('Pantalla de inicio actualizada','🖥️');}
             else{toast('Error: '+(res.error||'desconocido'),'❌');}
         }catch(e){toast('Error al guardar configuración SDDM','❌');}
+        finally{_sddmSaving=false;}
     }
     setupToggle('sddm-dark',async dark=>{
         _sddmCfg.variant=dark?'dark':'light';
@@ -3853,6 +2974,55 @@ export async function renderBloqueo(c){
 // ════════════════════════════════════════════════════════════════════════
 // ── Actualizaciones (Apple + Windows Hybrid — OS card + progress bar) ──
 // ════════════════════════════════════════════════════════════════════════
+// ── Recovery / snapshots sub-page (below Updates) ───────────────────────
+export async function renderSnapshots(c){
+    c.innerHTML=renderHeader('Recuperación')+renderSkeleton(2);
+    const [support,snaps]=await Promise.all([
+        tauriInvoke('get_snapshot_support').then(JSON.parse).catch(()=>({supported:false,fs:''})),
+        tauriInvoke('list_bookos_snapshots').then(JSON.parse).catch(()=>[]),
+    ]);
+    const policy=await getSetting('SnapshotPolicy','osupdate');
+    const opt=(val,label,sub)=>`<div class="detail-item detail-item-row" data-snappol="${val}" style="cursor:pointer">
+        <div class="detail-texts"><span class="dt">${_tr(label)}</span><span class="ds">${_tr(sub)}</span></div>
+        ${policy===val?_ckmark():''}
+    </div>`;
+
+    let h=renderHeader('Recuperación');
+    h+=renderSection('Tomar captura al actualizar');
+    h+=renderCard([
+        opt('packages','Al actualizar paquetes','Antes de cada actualización de paquetes'),
+        opt('osupdate','Al actualizar el sistema','Solo antes de subir de versión BookOS'),
+        opt('never','Nunca','No crear capturas automáticamente'),
+    ]);
+    if(!support.supported){
+        h+=`<div class="detail-card" style="padding:16px 20px;margin-top:4px"><span class="ds">${_tr('Las instantáneas requieren un sistema de archivos Btrfs.')}${support.fs?` (${esc(support.fs)})`:''}</span></div>`;
+    }
+    h+=renderSection('Puntos de restauración');
+    if(!snaps.length){
+        h+=renderCard([`<div class="detail-item"><span class="ds">${_tr('No hay capturas todavía.')}</span></div>`]);
+    }else{
+        h+=renderCard(snaps.map(s=>`<div class="detail-item detail-item-row">
+            <div class="detail-texts"><span class="dt">#${esc(s.number)} · ${esc(s.description||_tr('Captura'))}</span><span class="ds">${esc(s.date)}</span></div>
+            <button class="upd-recheck" data-rollback="${esc(s.number)}">${_tr('Revertir')}</button>
+        </div>`));
+    }
+    c.innerHTML=h;
+
+    c.querySelectorAll('[data-snappol]').forEach(el=>el.addEventListener('click',()=>{
+        setSetting('SnapshotPolicy',el.dataset.snappol);
+        renderSnapshots(c);
+        toast(_tr('Política de capturas actualizada'),'✓');
+    }));
+    c.querySelectorAll('[data-rollback]').forEach(btn=>btn.addEventListener('click',()=>{
+        const num=btn.dataset.rollback;
+        showDialog(_tr('Revertir el sistema'),_tr('Se restaurará la captura')+' #'+num+'. '+_tr('Necesitarás reiniciar para aplicarla. ¿Continuar?'),{confirmText:_tr('Revertir'),confirmClass:'danger',onConfirm:async()=>{
+            const pwd=await promptUpdatePassword('BookOS'); if(!pwd)return;
+            const r=JSON.parse(await tauriInvoke('rollback_bookos_snapshot',{password:pwd,number:num}).catch(()=>({ok:false})));
+            toast(r.ok?_tr('Revertido — reinicia para aplicar'):(_tr('Error')+': '+(r.error||'')),r.ok?'✅':'❌');
+        }});
+    }));
+}
+
 export async function renderActualizacion(c){
     c.innerHTML=renderHeader(t('hdr_updates'))+
         `<div class="upd-searching">
@@ -3872,7 +3042,7 @@ async function renderUpdatesPackages(c, sys, flat, aur, sysInfo){
     try{_hasFlat=(JSON.parse(localStorage.getItem('__has_flatpak__')||'{}').available!==false);}catch{}
     function renderTab(){
         const tabs=[
-            {id:'sys',label:'Sistema',count:sys.count,pkgs:sys.packages,hasVer:true},
+            {id:'sys',label:_tr('Sistema'),count:sys.count,pkgs:sys.packages,hasVer:true},
         ];
         if(_hasFlat) tabs.push({id:'flat',label:'Flatpak',count:flat.count,pkgs:flat.packages,hasVer:false});
         if(_isArch)  tabs.push({id:'aur',label:'AUR',count:aur.count,pkgs:aur.packages,hasVer:true});
@@ -3895,10 +3065,10 @@ async function renderUpdatesPackages(c, sys, flat, aur, sysInfo){
         <div class="upd-pkg-list detail-card">
             ${active.pkgs.length
                 ? pkgRows
-                : `<div class="upd-pkg-empty">Sin paquetes pendientes</div>`}
+                : `<div class="upd-pkg-empty">${_tr('Sin paquetes pendientes')}</div>`}
         </div>
         <div class="upd-install-actions">
-            <button class="upd-btn-now" id="upd-install-all" ${(sys.count+flat.count+aur.count)===0?'disabled':''}>Actualizar todo ahora</button>
+            <button class="upd-btn-now" id="upd-install-all" ${active.count===0?'disabled':''}>${_tr(active.id==='sys'?'Actualizar sistema ahora':active.id==='flat'?'Actualizar Flatpak ahora':'Actualizar AUR ahora')}</button>
         </div>`;
     }
     function mount(){
@@ -3912,22 +3082,31 @@ async function renderUpdatesPackages(c, sys, flat, aur, sysInfo){
             const srcMap={sys:sys.packages,flat:flat.packages,aur:aur.packages};
             renderUpdateDetail(c,srcMap[src][idx],src,sysInfo,()=>{renderUpdatesPackages(c,sys,flat,aur,sysInfo);});
         }));
+        // The button updates ONLY the currently active tab's source — system
+        // updates system, Flatpak updates Flatpak, AUR updates AUR.
         document.getElementById('upd-install-all')?.addEventListener('click',async()=>{
-            const needPwd=sys.count>0||aur.count>0;
-            const pwd=needPwd?await promptUpdatePassword(sysInfo.distro):'';
-            if(needPwd&&!pwd)return;
+            if(activeTab==='flat'){
+                if(flat.count===0)return;
+                toast(_tr('Actualizando Flatpak...'),'⬇');
+                tauriInvoke('run_flatpak_update').catch(()=>{}).then(()=>toast(_tr('Flatpak actualizado'),'✅'));
+                renderActualizacion(c);
+                return;
+            }
+            if(activeTab==='aur'){
+                if(aur.count===0)return;
+                toast(_tr('Actualizando AUR...'),'⬇');
+                tauriInvoke('run_aur_update').catch(()=>{}).then(()=>toast(_tr('AUR actualizado'),'✅'));
+                renderActualizacion(c);
+                return;
+            }
+            // System (needs auth)
+            if(sys.count===0)return;
+            const pwd=await promptUpdatePassword(sysInfo.distro);
+            if(!pwd)return;
             try{
-                // Pacman (system) first if needed — silent runner shows progress
-                if(sys.count>0){
-                    const started=JSON.parse(await tauriInvoke('run_pacman_update_silent',{password:pwd}));
-                    if(!started.ok&&!started.started)throw new Error(started.error||'Contraseña incorrecta');
-                }
-                // Flatpak + AUR fire-and-forget in parallel
-                const tasks=[];
-                if(flat.count>0) tasks.push(tauriInvoke('run_flatpak_update').catch(()=>{}));
-                if(aur.count>0)  tasks.push(tauriInvoke('run_aur_update').catch(()=>{}));
-                if(tasks.length) Promise.all(tasks).then(()=>toast('Flatpak/AUR actualizados','✅'));
-                toast('Descargando e instalando actualizaciones...','⬇');
+                const started=JSON.parse(await tauriInvoke('run_pacman_update_silent',{password:pwd}));
+                if(!started.ok&&!started.started)throw new Error(started.error||_tr('Contraseña incorrecta'));
+                toast(_tr('Descargando e instalando actualizaciones...'),'⬇');
                 renderActualizacion(c);
             }catch(e){toast('Error: '+(e.message||'Fallo'),'✕');}
         });
@@ -3951,8 +3130,8 @@ async function renderUpdateDetail(c, pkg, src, sysInfo, onBack){
         </div>
     </div>
     <div class="upd-detail-actions">
-        <button class="upd-night-btn" id="upd-night">Actualizar por la noche</button>
-        <button class="upd-btn-now" id="upd-now">Actualizar ahora</button>
+        <button class="upd-night-btn" id="upd-night">${_tr('Actualizar por la noche')}</button>
+        <button class="upd-btn-now" id="upd-now">${_tr('Actualizar ahora')}</button>
     </div>
     ${renderSection(t('sec_info'))}
     ${renderCard([
@@ -3965,25 +3144,25 @@ async function renderUpdateDetail(c, pkg, src, sysInfo, onBack){
 
     document.getElementById('upd-night')?.addEventListener('click',()=>{
         setSetting('NightUpdate_'+esc(pkg.name),'true');
-        toast('Programado para esta noche','🌙');
+        toast(_tr('Programado para esta noche'),'🌙');
     });
     document.getElementById('upd-now')?.addEventListener('click',async()=>{
         try{
             if(src==='flat'){
-                toast('Actualizando '+pkg.name+'...','⬇');
-                tauriInvoke('run_flatpak_update').catch(()=>{}).then(()=>toast('Flatpak actualizado','✅'));
+                toast(_tr('Actualizando ')+pkg.name+'...','⬇');
+                tauriInvoke('run_flatpak_update').catch(()=>{}).then(()=>toast(_tr('Flatpak actualizado'),'✅'));
                 onBack(); return;
             }
             if(src==='aur'){
-                toast('Actualizando '+pkg.name+' (AUR)...','⬇');
-                tauriInvoke('run_aur_update').catch(()=>{}).then(()=>toast('AUR actualizado','✅'));
+                toast(_tr('Actualizando ')+pkg.name+' (AUR)...','⬇');
+                tauriInvoke('run_aur_update').catch(()=>{}).then(()=>toast(_tr('AUR actualizado'),'✅'));
                 onBack(); return;
             }
             const pwd=await promptUpdatePassword(sysInfo.distro);
             if(!pwd)return;
             const started=JSON.parse(await tauriInvoke('run_pacman_update_silent',{password:pwd}));
-            if(!started.ok&&!started.started)throw new Error(started.error||'Contraseña incorrecta');
-            toast('Actualizando '+pkg.name+'...','⬇');
+            if(!started.ok&&!started.started)throw new Error(started.error||_tr('Contraseña incorrecta'));
+            toast(_tr('Actualizando ')+pkg.name+'...','⬇');
             onBack();
         }catch(e){toast('Error: '+(e.message||'Fallo'),'✕');}
     });
@@ -4141,8 +3320,8 @@ async function promptAuth(opts={}){
 // Backwards-compat shim: existing call-sites that just want a password string.
 async function promptUpdatePassword(distro){
     const r=await promptAuth({
-        title:'Se requiere contraseña',
-        description:`<strong>${esc(distro||'BookOS')}</strong> quiere realizar cambios en el sistema. Introduce tu contraseña para autorizar la acción.`,
+        title:_tr('Se requiere contraseña'),
+        description:`<strong>${esc(distro||'BookOS')}</strong> ${_tr('quiere realizar cambios en el sistema. Introduce tu contraseña para autorizar la acción.')}`,
         verifyPassword:false,  // legacy callers verify themselves via sudo -S
     });
     return r&&r.method==='password'?r.password:null;
@@ -4150,10 +3329,11 @@ async function promptUpdatePassword(distro){
 
 // ── Channel picker dialog (3-dot menu on Updates page) ──────────────────
 function _openChannelDialog(c, currentChannel){
+    const _isDark=document.documentElement.classList.contains('dark-mode');
     const channels=[
-        {id:'stable', label:_tr('Estable'),   desc:_tr('Versiones probadas y recomendadas'), badge:'STABLE'},
-        {id:'beta',   label:_tr('Beta'),      desc:_tr('Nuevas funciones en pruebas'),       badge:'BETA'},
-        {id:'dev',    label:_tr('Developer'), desc:_tr('Actualizaciones más recientes, inestables'), badge:'DEV'},
+        {id:'stable', label:_tr('Estable'),   desc:_tr('Versiones probadas y recomendadas'), badge:'STABLE', banner:_isDark?'./assets/update-stable-dark.svg':'./assets/update-stable-light.svg'},
+        {id:'beta',   label:_tr('Beta'),      desc:_tr('Nuevas funciones en pruebas'),       badge:'BETA',   banner:'./assets/update-beta.svg'},
+        {id:'dev',    label:_tr('Developer'), desc:_tr('Actualizaciones más recientes, inestables'), badge:'DEV', banner:'./assets/update-dev.svg'},
     ];
     let selected = currentChannel;
     const overlay=document.createElement('div');
@@ -4165,7 +3345,7 @@ function _openChannelDialog(c, currentChannel){
             <div class="channel-list">
                 ${channels.map(ch=>`
                     <div class="channel-opt ${ch.id===selected?'active':''}" data-ch="${ch.id}">
-                        <div class="channel-opt-icon ${ch.id}">${ch.badge}</div>
+                        <div class="channel-opt-icon ${ch.id}" style="background-image:url('${ch.banner}')"></div>
                         <div class="channel-opt-body">
                             <div class="channel-opt-name">
                                 ${ch.label}
@@ -4185,7 +3365,9 @@ function _openChannelDialog(c, currentChannel){
     `;
     document.body.appendChild(overlay);
 
-    const close=()=>overlay.remove();
+    const onKey=e=>{ if(e.key==='Escape'){ e.preventDefault(); close(); } };
+    const close=()=>{ document.removeEventListener('keydown',onKey); overlay.remove(); };
+    document.addEventListener('keydown',onKey);
     overlay.addEventListener('click',e=>{ if(e.target===overlay) close(); });
     overlay.querySelectorAll('.channel-opt').forEach(opt=>opt.addEventListener('click',()=>{
         overlay.querySelectorAll('.channel-opt').forEach(o=>o.classList.remove('active'));
@@ -4196,7 +3378,13 @@ function _openChannelDialog(c, currentChannel){
     overlay.querySelector('#ch-save').addEventListener('click',async()=>{
         close();
         if(selected===currentChannel) return;
-        try{await tauriInvoke('set_update_channel',{channel:selected});}catch(e){}
+        let saved=false;
+        try{
+            const r=JSON.parse(await tauriInvoke('set_update_channel',{channel:selected}));
+            saved=r&&r.ok!==false;
+        }catch(e){}
+        if(!saved){ toast(_tr('No se pudo cambiar el canal'),'❌'); return; }
+        // Refresh manifest for the new channel; best-effort (may fail offline).
         try{await tauriInvoke('refresh_bookos_release',{lang:(localStorage.getItem('bookos_lang')||'es')});}catch(e){}
         toast(_tr('Canal cambiado a')+' '+selected.charAt(0).toUpperCase()+selected.slice(1),'🔄');
         renderActualizacion(c);
@@ -4221,20 +3409,45 @@ async function _doCheckUpdates(c){
     try{
         if(force) await tauriInvoke('refresh_bookos_release',{lang:(localStorage.getItem('bookos_lang')||'es')});
     }catch(e){}
-    try{[sys,flat,aur,sysInfo,autoupd,release]=await Promise.all([
+    let repoSt={supported:false,enabled:false};
+    try{[sys,flat,aur,sysInfo,autoupd,release,repoSt]=await Promise.all([
         tauriInvoke('check_system_updates',{force}).then(JSON.parse).catch(()=>({count:0,packages:[]})),
         tauriInvoke('check_flatpak_updates',{force}).then(JSON.parse).catch(()=>({count:0,packages:[]})),
         tauriInvoke('check_aur_updates',{force}).then(JSON.parse).catch(()=>({count:0,packages:[]})),
         tauriInvoke('get_system_info').then(JSON.parse).catch(()=>({distro:'BookOS',kernel:''})),
         getSetting('AutoUpdate','false').then(v=>v==='true'),
-        tauriInvoke('get_bookos_release',{lang:(localStorage.getItem('bookos_lang')||'es')}).then(JSON.parse).catch(()=>({available:false,channel:'stable'}))
+        tauriInvoke('get_bookos_release',{lang:(localStorage.getItem('bookos_lang')||'es')}).then(JSON.parse).catch(()=>({available:false,channel:'stable'})),
+        tauriInvoke('get_bookos_repo_status').then(JSON.parse).catch(()=>({supported:false,enabled:false}))
     ]);}catch(e){}
+    // BookOS dnf repo row (custom system packages: libfprint modificado, apps)
+    const _repoRow=repoSt.supported
+        ?renderRowItem('Repositorio BookOS','Paquetes del sistema personalizados (libfprint, apps BookOS)',renderToggle('bookos-repo',repoSt.enabled))
+        :'';
+    const _setupRepoToggle=()=>setupToggle('bookos-repo',async a=>{
+        try{
+            const r=JSON.parse(await tauriInvoke('set_bookos_repo',{enable:a}));
+            if(!r.ok)throw new Error(r.error||'Fallo');
+            toast(a?'Repositorio BookOS activado':'Repositorio BookOS desactivado','✓');
+        }catch(e){
+            // revert optimistic flip
+            const tg=document.querySelector('[data-toggle="bookos-repo"]');
+            tg?.classList.toggle('active',!a);
+            toast('Error: '+(e.message||'Fallo'),'✕');
+        }
+    });
     const total=sys.count+flat.count+aur.count;
+
+    // The active channel = the *persisted* setting (set_update_channel), which is
+    // authoritative even when the manifest in `release` lags behind (e.g. offline).
+    // Fall back to the manifest's channel only if the setting can't be read.
+    const _activeChannel=(await tauriInvoke('get_update_channel')
+        .then(JSON.parse).catch(()=>({channel:release.channel||'stable'}))).channel || release.channel || 'stable';
+    release.channel=_activeChannel;
 
     // Pick release banner background per channel + theme
     const _isDark=document.documentElement.classList.contains('dark-mode');
-    const _bannerBg = release.channel==='dev'  ? './assets/update-dev.svg'
-                    : release.channel==='beta' ? './assets/update-beta.svg'
+    const _bannerBg = _activeChannel==='dev'  ? './assets/update-dev.svg'
+                    : _activeChannel==='beta' ? './assets/update-beta.svg'
                     : (_isDark ? './assets/update-stable-dark.svg' : './assets/update-stable-light.svg');
 
     // ── Helper: BookOS release hero card (big banner with version + desc) ──
@@ -4289,7 +3502,8 @@ async function _doCheckUpdates(c){
         renderSection(t('sec_software_installed'))+
         renderCard([renderRowItem(t('label_system')||'Sistema',esc(sysInfo.distro||'BookOS'),''),renderRowItem(t('label_kernel')||'Kernel',esc(sysInfo.kernel||''),'')])+
         renderSection(t('sec_options'))+
-        renderCard([renderRowItem(t('upd_auto'),t('upd_auto_sub'),renderToggle('auto-upd',autoupd))]);
+        renderCard([renderRowItem(t('upd_auto'),t('upd_auto_sub'),renderToggle('auto-upd',autoupd)),_repoRow].filter(Boolean));
+        _setupRepoToggle();
         document.getElementById('re-check')?.addEventListener('click',()=>{window.__forceUpdCheck=true;renderActualizacion(c);});
         document.getElementById('upd-menu-btn')?.addEventListener('click',async()=>{
             const cur=(await tauriInvoke('get_update_channel').then(JSON.parse).catch(()=>({channel:'stable'}))).channel;
@@ -4328,15 +3542,21 @@ async function _doCheckUpdates(c){
                 </div>
                 <svg viewBox="0 0 8 14" width="8" height="14" fill="none" style="color:var(--tx2);flex-shrink:0"><path d="M1 1l6 6-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </div>` : '';
-    h+=renderCard([_autoRow, _pkgsRow].filter(Boolean));
+    h+=renderCard([_autoRow, _repoRow, _pkgsRow].filter(Boolean));
 
     c.innerHTML=h;
+    _setupRepoToggle();
 
     document.getElementById('upd-goto-pkgs')?.addEventListener('click',()=>{
         renderUpdatesPackages(c,sys,flat,aur,sysInfo);
     });
-    // Menu button (3 dots) → open channel picker dialog
-    document.getElementById('upd-menu-btn')?.addEventListener('click',()=>_openChannelDialog(c, release.channel || 'stable'));
+    // Menu button (3 dots) → open channel picker dialog.
+    // Read the *persisted* channel (set_update_channel) rather than release.channel,
+    // which reflects the last fetched manifest and may lag when offline.
+    document.getElementById('upd-menu-btn')?.addEventListener('click',async()=>{
+        const cur=(await tauriInvoke('get_update_channel').then(JSON.parse).catch(()=>({channel:release.channel||'stable'}))).channel;
+        _openChannelDialog(c, cur);
+    });
     // ── BookOS release actions ──
     document.getElementById('rel-night')?.addEventListener('click',()=>{
         setSetting('NightRelease',release.version||'1');
@@ -4435,7 +3655,7 @@ function _startUpdatePolling(c,bar,text,progressWrap,sysInfo){
 // ════════════════════════════════════════════════════════════════════════
 export async function renderAcerca(c){
     c.innerHTML=renderHeader(t('hdr_about'))+renderSkeleton(4);
-    let i={hostname:'--',kernel:'--',distro:'--',cpu:'--',ram:'--',gpu:'--',plasma:'--'};
+    let i={hostname:'--',kernel:'--',distro:'--',cpu:'--',ram:'--',gpu:'--',plasma:'--',model:'--'};
     try{i=JSON.parse(await tauriInvoke('get_system_info'));}catch(e){}
 
     // Samsung-style: device image + name + rename + info sections
@@ -4446,6 +3666,7 @@ export async function renderAcerca(c){
             <img src="./assets/generic_book2.svg" class="about-device-img" alt="Device">
         </div>
         <div class="about-hero-name" id="about-hostname-display">${esc(i.hostname)}</div>
+        ${i.model&&i.model!=='--'?`<div class="about-hero-model">${esc(i.model)}</div>`:''}
         <button class="about-rename-btn" id="btn-rename-device">Cambiar nombre</button>
         <div class="about-rename-row" id="about-rename-row" style="display:none">
             <input type="text" class="about-rename-input" id="about-rename-input" value="${esc(i.hostname)}" placeholder="Nombre del equipo">
@@ -4464,6 +3685,7 @@ export async function renderAcerca(c){
 
     h+=renderSection(t('sec_hardware'));
     h+=renderCard([
+        renderInfoItem('Modelo',esc(i.model)),
         renderInfoItem('Procesador',esc(i.cpu)),
         renderInfoItem('Memoria RAM',esc(i.ram)),
         renderInfoItem('Tarjeta gráfica',esc(i.gpu)),
@@ -4496,16 +3718,30 @@ export async function renderAcerca(c){
 export async function renderGeneral(c){
     c.innerHTML=renderHeader(t('hdr_general'))+renderSkeleton(2);
     let loc={locale:'',keymap:''},locales=[],keymaps=[],auto={enabled:false},autostartApps=[];
-    try{[loc,locales,keymaps,auto,autostartApps]=await Promise.all([
+    let dt={timezone:'',ntp:false,synced:false},timezones=[];
+    try{[loc,locales,keymaps,auto,autostartApps,dt,timezones]=await Promise.all([
         tauriInvoke('get_locale_info').then(JSON.parse),
         tauriInvoke('get_available_locales').then(JSON.parse),
         tauriInvoke('get_available_keymaps').then(JSON.parse),
         tauriInvoke('get_autostart_bookos').then(JSON.parse).catch(()=>({enabled:false})),
-        tauriInvoke('get_autostart_apps').then(JSON.parse).catch(()=>[])
+        tauriInvoke('get_autostart_apps').then(JSON.parse).catch(()=>[]),
+        tauriInvoke('get_datetime_info').then(JSON.parse).catch(()=>({timezone:'',ntp:false,synced:false})),
+        tauriInvoke('list_timezones').then(JSON.parse).catch(()=>[])
     ]);}catch(e){}
     
-    const langMap = {'en_US.UTF-8':'🇺🇸 English (US)', 'es_ES.UTF-8':'🇪🇸 Español (España)', 'fr_FR.UTF-8':'🇫🇷 Français'};
-    const getLangName = l => langMap[l] || l;
+    // Inline SVG flags (no emoji — render consistently across fonts/platforms).
+    const _FLAGS={
+        es:`<svg class="lang-flag" width="20" height="14" viewBox="0 0 20 14" aria-hidden="true"><rect width="20" height="14" rx="2" fill="#c60b1e"/><rect y="3.5" width="20" height="7" fill="#ffc400"/></svg>`,
+        us:`<svg class="lang-flag" width="20" height="14" viewBox="0 0 20 14" aria-hidden="true"><rect width="20" height="14" rx="2" fill="#fff"/><g fill="#b22234"><rect width="20" height="2"/><rect y="4" width="20" height="2"/><rect y="8" width="20" height="2"/><rect y="12" width="20" height="2"/></g><rect width="9" height="8" fill="#3c3b6e"/></svg>`,
+        fr:`<svg class="lang-flag" width="20" height="14" viewBox="0 0 20 14" aria-hidden="true"><rect width="20" height="14" rx="2" fill="#fff"/><rect width="6.67" height="14" fill="#0055a4"/><rect x="13.33" width="6.67" height="14" fill="#ef4135"/></svg>`
+    };
+    const langMap = {'en_US.UTF-8':['us','English (US)'], 'es_ES.UTF-8':['es','Español (España)'], 'fr_FR.UTF-8':['fr','Français']};
+    // Returns safe HTML (flag SVG + escaped name); falls back to the raw locale.
+    const getLangName = l => {
+        const m=langMap[l];
+        if(!m) return esc(l);
+        return `<span class="lang-label">${_FLAGS[m[0]]||''}<span>${esc(m[1])}</span></span>`;
+    };
 
     const _curAppLang=(localStorage.getItem('bookos_lang')||'auto');
     const _appLangOpts=[['auto','Auto / Auto-detect'],['es','Español'],['en','English']];
@@ -4523,7 +3759,7 @@ export async function renderGeneral(c){
             <div style="color:var(--tx2);font-size:18px">›</div>
         </div>`,
         `<div id="lang-list" style="display:none;padding:0 20px 16px"><div class="res-list" style="margin-bottom:0">
-            ${locales.map(l=>`<div class="res-item ${l===loc.locale?'active':''}" data-lang="${esc(l)}"><span>${esc(getLangName(l))}</span></div>`).join('')}
+            ${locales.map(l=>`<div class="res-item ${l===loc.locale?'active':''}" data-lang="${esc(l)}">${getLangName(l)}</div>`).join('')}
         </div></div>`,
         `<div class="detail-item detail-item-row" id="btn-key" style="cursor:pointer">
             <div class="detail-texts"><span class="dt">${t('label_keyboard_layout')}</span><span class="ds">${loc.keymap || t('default')}</span></div>
@@ -4538,6 +3774,23 @@ export async function renderGeneral(c){
         </div>`,
         `<div class="detail-item detail-item-row" style="cursor:pointer" id="open-custom-shortcuts">
             <div class="detail-texts"><span class="dt">${_tr("Atajos personalizados")}</span><span class="ds">${_tr("Crea atajos para lanzar apps")}</span></div>
+            <div style="color:var(--tx2);font-size:18px">›</div>
+        </div>`
+    ]) + renderSection(_tr('Fecha y hora')) + renderCard([
+        renderRowItem('Hora automática (NTP)','Sincroniza el reloj por internet',renderToggle('ntp',dt.ntp)),
+        `<div class="detail-item detail-item-row" id="btn-tz" style="cursor:pointer">
+            <div class="detail-texts"><span class="dt">${_tr('Zona horaria')}</span><span class="ds" id="tz-cur">${esc(dt.timezone||_tr('No configurada'))}</span></div>
+            <div style="color:var(--tx2);font-size:18px">›</div>
+        </div>`,
+        `<div id="tz-list" style="display:none;padding:0 20px 16px">
+            <input type="text" id="tz-filter" placeholder="${_tr('Buscar zona…')}" style="width:100%;padding:9px 12px;border-radius:10px;border:none;background:var(--sbg);color:var(--tx);font-size:13px;outline:none;margin-bottom:8px">
+            <div class="res-list" id="tz-res" style="margin-bottom:0;max-height:240px;overflow-y:auto">
+                ${timezones.map(z=>`<div class="res-item ${z===dt.timezone?'active':''}" data-tz="${esc(z)}"><span>${esc(z)}</span></div>`).join('')}
+            </div>
+        </div>`
+    ]) + renderSection(_tr('Impresoras')) + renderCard([
+        `<div class="detail-item detail-item-row" style="cursor:pointer" id="open-printers">
+            <div class="detail-texts"><span class="dt">${_tr('Impresoras y escáneres')}</span><span class="ds">${_tr('Añadir y configurar impresoras')}</span></div>
             <div style="color:var(--tx2);font-size:18px">›</div>
         </div>`
     ]) + renderSection(t('sec_app_behavior')) + renderCard([
@@ -4566,6 +3819,42 @@ export async function renderGeneral(c){
     }));
     document.getElementById('btn-lang')?.addEventListener('click', ()=>{ const el=document.getElementById('lang-list'); el.style.display=el.style.display==='none'?'block':'none'; });
     document.getElementById('btn-key')?.addEventListener('click', ()=>{ const el=document.getElementById('key-list'); el.style.display=el.style.display==='none'?'block':'none'; });
+
+    // ── Date & time ──
+    setupToggle('ntp',async on=>{
+        try{
+            const r=JSON.parse(await tauriInvoke('set_ntp',{enable:on}));
+            toast(r.ok?(on?_tr('Hora automática activada'):_tr('Hora automática desactivada')):_tr('No se pudo cambiar'),'🕐');
+        }catch(e){toast(_tr('No se pudo cambiar'),'❌');}
+    });
+    document.getElementById('btn-tz')?.addEventListener('click',()=>{ const el=document.getElementById('tz-list'); if(el){el.style.display=el.style.display==='none'?'block':'none';document.getElementById('tz-filter')?.focus();} });
+    document.getElementById('tz-filter')?.addEventListener('input',e=>{
+        const q=e.target.value.toLowerCase();
+        document.querySelectorAll('#tz-res .res-item').forEach(it=>{
+            it.style.display=it.textContent.toLowerCase().includes(q)?'':'none';
+        });
+    });
+    document.querySelectorAll('[data-tz]').forEach(b=>b.addEventListener('click',async()=>{
+        const tz=b.dataset.tz;
+        try{
+            const r=JSON.parse(await tauriInvoke('set_timezone',{timezone:tz}));
+            if(r.ok){
+                document.querySelectorAll('[data-tz]').forEach(x=>x.classList.remove('active'));
+                b.classList.add('active');
+                const cur=document.getElementById('tz-cur');if(cur)cur.textContent=tz;
+                document.getElementById('tz-list').style.display='none';
+                toast(_tr('Zona horaria actualizada'),'🌍');
+            } else toast(_tr('No se pudo cambiar'),'❌');
+        }catch(e){toast(_tr('No se pudo cambiar'),'❌');}
+    }));
+    document.getElementById('open-printers')?.addEventListener('click',async()=>{
+        // Try KDE's printer KCM, then system-config-printer, then GNOME control center.
+        let ok=false;
+        for(const [cmd,args] of [['kcmshell6',['kcm_printer_manager']],['system-config-printer',[]],['gnome-control-center',['printers']]]){
+            try{const r=await tauriInvoke('run_command',{cmd,args});if(r&&!String(r).includes('not found')){ok=true;break;}}catch(e){}
+        }
+        toast(ok?_tr('Abriendo impresoras'):_tr('No hay gestor de impresoras instalado'),'🖨️');
+    });
     document.getElementById('open-kde-shortcuts')?.addEventListener('click',()=>{
         try{tauriInvoke('run_command',{cmd:'kcmshell6',args:['kcm_keys']}).catch(()=>{});}catch(e){}
     });
@@ -4908,10 +4197,9 @@ export async function renderFondos(c){
     let current='';
     try{current=JSON.parse(await tauriInvoke('get_current_wallpaper')).path||'';}catch(e){}
 
-    let colorPalette=false,dimWallpaper=false,isDark=document.documentElement.classList.contains('dark-mode');
-    try{[colorPalette,dimWallpaper,isDark]=await Promise.all([
+    let colorPalette=false,isDark=document.documentElement.classList.contains('dark-mode');
+    try{[colorPalette,isDark]=await Promise.all([
         getSetting('ColorPalette','false').then(v=>v==='true'),
-        getSetting('DimWallpaper','false').then(v=>v==='true'),
         tauriInvoke('get_current_theme').then(r=>JSON.parse(r).is_dark).catch(()=>isDark)
     ]);}catch(e){}
 
@@ -4920,7 +4208,15 @@ export async function renderFondos(c){
         return;
     }
 
-    const currentWp = wallpapers.find(w=>w.path===current)||wallpapers[0];
+    // The active wallpaper may live outside the scanned folders (e.g. ~/Descargas).
+    // If so, synthesize an entry for it so it shows up as the current one and in the grid.
+    let currentWp = wallpapers.find(w=>w.path===current);
+    if(!currentWp && current){
+        const name=current.split('/').pop().replace(/\.[^.]+$/,'')||'Actual';
+        currentWp={name,path:current,thumbnail:current};
+        wallpapers.unshift(currentWp);
+    }
+    if(!currentWp) currentWp=wallpapers[0];
     const currentImg = getAssetUrl(currentWp.thumbnail||currentWp.path);
     const today = new Date();
     const time = today.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'});
@@ -4943,12 +4239,12 @@ export async function renderFondos(c){
     const battSvg=`<svg viewBox="0 0 24 24" width="12" height="10"><rect x="2" y="7" width="16" height="10" rx="2" fill="none" stroke="${panelTx2}" stroke-width="1.8"/><path d="M22 11v2" stroke="${panelTx2}" stroke-width="2" stroke-linecap="round"/><rect x="4" y="9" width="9" height="6" rx="1" fill="${panelTx2}"/></svg>`;
 
     let h=renderHeader(t('hdr_wallpaper_style'));
-    // Desktop preview matching actual BookOS desktop layout:
-    // top bar (thin, system tray right) + wallpaper + bottom floating dock
-    h += `<div class="wp-preview-desktop">
+    // ── Wallpaper hero card (redesign): big live preview, name top-left,
+    //    "Change wallpaper" button, and the Color Palette toggle below it. ──
+    h += `<div class="wp-hero-card">
+        <div class="wp-hero-name">${esc(currentWp.name)}</div>
         <div class="wp-desktop-screen" id="wp-screen">
             <img src="${currentImg}" class="wp-desktop-bg" id="wp-screen-img" alt="" onerror="this.style.opacity='0'">
-            <!-- Top bar: thin, same as real KDE panel -->
             <div class="wp-top-bar" style="background:${panelBg};border-bottom:1px solid ${panelBorder}">
                 <span class="wp-top-bar-title" style="color:${panelTx2}">BookOS</span>
                 <div class="wp-top-bar-tray">
@@ -4956,43 +4252,23 @@ export async function renderFondos(c){
                     <span style="font-size:8px;font-weight:600;color:${panelTx2};white-space:nowrap">${time}</span>
                 </div>
             </div>
-            <!-- Bottom floating dock -->
             <div class="wp-float-dock" style="background:${isDark?'rgba(28,28,30,0.85)':'rgba(255,255,255,0.85)'};box-shadow:0 4px 20px rgba(0,0,0,${isDark?'.5':'.2'})">
                 ${dockIcons.map(i=>`<div class="wp-dock-icon" style="background:${i.bg}"></div>`).join('')}
             </div>
         </div>
-    </div>`;
-
-    // Style quick-pick row (Dark / Light / Color)
-    h += `<div class="wp-style-row">
-        <div class="wp-style-card" id="wps-dark">
-            <div class="ws-icon" style="background:#1a1a2e"><svg viewBox="0 0 24 24" width="18" height="18"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" fill="white"/></svg></div>
-            <span class="ws-label">${_tr("Oscuro")}</span>
-        </div>
-        <div class="wp-style-card" id="wps-light">
-            <div class="ws-icon" style="background:#f5f5f5"><svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="5" fill="#ffb300"/><line x1="12" y1="1" x2="12" y2="3" stroke="#ffb300" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="21" x2="12" y2="23" stroke="#ffb300" stroke-width="2" stroke-linecap="round"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64" stroke="#ffb300" stroke-width="2" stroke-linecap="round"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" stroke="#ffb300" stroke-width="2" stroke-linecap="round"/><line x1="1" y1="12" x2="3" y2="12" stroke="#ffb300" stroke-width="2" stroke-linecap="round"/><line x1="21" y1="12" x2="23" y2="12" stroke="#ffb300" stroke-width="2" stroke-linecap="round"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36" stroke="#ffb300" stroke-width="2" stroke-linecap="round"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" stroke="#ffb300" stroke-width="2" stroke-linecap="round"/></svg></div>
-            <span class="ws-label">${_tr("Claro")}</span>
-        </div>
-        <div class="wp-style-card" id="wps-wallpaper">
-            <div class="ws-icon" style="background:linear-gradient(135deg,#667eea,#764ba2)"><svg viewBox="0 0 24 24" width="18" height="18"><rect x="3" y="3" width="18" height="18" rx="2" fill="none" stroke="white" stroke-width="2"/><circle cx="8.5" cy="8.5" r="1.5" fill="white"/><polyline points="21 15 16 10 5 21" fill="none" stroke="white" stroke-width="2" stroke-linecap="round"/></svg></div>
-            <span class="ws-label">${_tr("Fondo")}</span>
-        </div>
-        <div class="wp-style-card" id="wps-palette">
-            <div class="ws-icon" style="background:linear-gradient(135deg,#f093fb,#f5576c)"><svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10c.55 0 1-.45 1-1 0-.26-.1-.5-.26-.69-.38-.46-.26-1.14.28-1.44A10 10 0 0 0 12 2z" fill="white" opacity=".8"/><circle cx="6.5" cy="11.5" r="1.5" fill="#f44336"/><circle cx="9.5" cy="7.5" r="1.5" fill="#ffeb3b"/><circle cx="14.5" cy="7.5" r="1.5" fill="#4caf50"/><circle cx="17.5" cy="11.5" r="1.5" fill="#2196f3"/></svg></div>
-            <span class="ws-label">${_tr("Paleta")}</span>
+        <button class="wp-change-btn" id="btn-change-wp">${_tr("Cambiar fondo de pantalla")}</button>
+        <div class="wp-palette-row" id="wps-palette">
+            <div class="wp-palette-texts">
+                <span class="wp-palette-title">${_tr("Paleta de colores")}</span>
+                <span class="wp-palette-sub">${_tr("Ajusta colores según el fondo")}</span>
+            </div>
+            ${renderToggle('palette',colorPalette)}
         </div>
     </div>`;
 
-    h += renderCard([
-        `<div class="detail-item" style="cursor:pointer;text-align:center" id="btn-change-wp"><span class="dt" style="color:var(--blue)">${_tr("Cambiar fondo de pantalla")}</span></div>`
-    ]);
-
-    h += renderCard([
-        renderRowItem('Paleta de colores','Ajusta colores según el fondo',renderToggle('palette',colorPalette)),
-        renderRowItem('Atenuar fondo de pantalla','Atenúa en modo oscuro',renderToggle('dimwp',dimWallpaper))
-    ]);
-
-    h += `<div id="wp-grid" style="display:none;margin-top:24px">${renderSection(t('sec_wallpapers_avail'))}
+    // Full wallpaper grid — hidden until "Change wallpaper" is pressed.
+    h += `<div id="wp-grid" class="wp-grid-panel" style="display:none">
+        <div class="wp-grid-head">${_tr("Cambiar fondo de pantalla")}</div>
         <div class="wallpaper-grid">
             ${wallpapers.map(w=>{
                 const isActive=w.path===currentWp.path;
@@ -5000,65 +4276,94 @@ export async function renderFondos(c){
                 const colorHash=w.name.split('').reduce((a,c)=>a+c.charCodeAt(0),0);
         const hue=colorHash%360;
         const fallback=`this.style.display='none';this.nextElementSibling.style.display='flex'`;
-        return `<div class="wallpaper-card ${isActive?'active':''}" data-path="${esc(w.path)}"><img src="${imgUrl}" class="wp-card-img" loading="lazy" alt="${esc(w.name)}" onerror="${fallback}"><div class="wp-card-placeholder" style="display:none;background:linear-gradient(135deg,hsl(${hue},50%,35%),hsl(${(hue+40)%360},60%,25%))"></div><span class="wp-name">${esc(w.name)}</span></div>`;
+        return `<div class="wallpaper-card ${isActive?'active':''}" data-path="${esc(w.path)}" tabindex="0" role="button" aria-pressed="${isActive}" aria-label="${esc(w.name)}"><img src="${imgUrl}" class="wp-card-img" loading="lazy" alt="" onerror="${fallback}"><div class="wp-card-placeholder" style="display:none;background:linear-gradient(135deg,hsl(${hue},50%,35%),hsl(${(hue+40)%360},60%,25%))"></div><span class="wp-name">${esc(w.name)}</span></div>`;
             }).join('')}
         </div>
     </div>`;
 
     c.innerHTML=h;
 
-    document.getElementById('btn-change-wp')?.addEventListener('click',()=>{
-        document.getElementById('wp-grid').style.display='block';
-        document.getElementById('wp-grid').scrollIntoView({behavior:'smooth'});
-    });
+    // Drop any leftover FAB from a previous render of this page.
+    document.getElementById('wp-add-fab')?.remove();
 
-    // Style quick-pick actions
-    document.getElementById('wps-dark')?.addEventListener('click',async()=>{
-        try{await tauriInvoke('apply_kde_theme',{name:'',isGlobal:false});}catch(e){}
-        try{await tauriInvoke('set_color_scheme',{scheme:'BreezeDark'});}catch(e){}
-        document.documentElement.className='dark-mode';
-        toast('Modo oscuro activado');
-        renderFondos(c);
+    // Add new wallpapers from disk → copy into ~/.local/share/wallpapers.
+    const _addWallpapers=async()=>{
+        try{
+            const {open}=window.__TAURI__.dialog;
+            const sel=await open({multiple:true,filters:[{name:'Imágenes',extensions:['png','jpg','jpeg','webp']}]});
+            if(!sel)return;
+            const paths=Array.isArray(sel)?sel:[sel];
+            if(!paths.length)return;
+            const res=JSON.parse(await tauriInvoke('add_wallpapers',{paths}));
+            if(res.ok){
+                toast(res.added>1?`${res.added} fondos añadidos`:'Fondo añadido','🖼️');
+                await renderFondos(c); // re-render so new wallpapers appear
+                document.getElementById('btn-change-wp')?.click(); // keep grid open
+            }else{toast('Error al añadir fondo','❌');}
+        }catch(e){toast('Error al añadir fondo','❌');}
+    };
+
+    // The "+" FAB must stay fixed to the viewport, but #app's page-enter/fadeIn
+    // animation makes it a containing block for position:fixed (FAB would scroll
+    // with content). So we mount the FAB on document.body and auto-remove it when
+    // the wallpaper grid leaves the DOM (page navigation).
+    const _mountFab=()=>{
+        if(document.getElementById('wp-add-fab'))return;
+        const fab=document.createElement('button');
+        fab.id='wp-add-fab';fab.className='wp-add-fab';
+        fab.title=_tr('Añadir fondo de pantalla');
+        fab.setAttribute('aria-label',_tr('Añadir fondo de pantalla'));
+        fab.innerHTML=SVGI.plus;
+        fab.addEventListener('click',_addWallpapers);
+        document.body.appendChild(fab);
+        const grid=document.getElementById('wp-grid');
+        const app=document.getElementById('app');
+        const obs=new MutationObserver(()=>{
+            if(!grid||!document.body.contains(grid)){fab.remove();obs.disconnect();}
+        });
+        if(app)obs.observe(app,{childList:true,subtree:true});
+    };
+
+    document.getElementById('btn-change-wp')?.addEventListener('click',()=>{
+        const g=document.getElementById('wp-grid');
+        g.style.display='block';
+        g.scrollIntoView({behavior:'smooth'});
+        _mountFab();
     });
-    document.getElementById('wps-light')?.addEventListener('click',async()=>{
-        try{await tauriInvoke('apply_kde_theme',{name:'',isGlobal:false});}catch(e){}
-        try{await tauriInvoke('set_color_scheme',{scheme:'BreezeLight'});}catch(e){}
-        document.documentElement.className='light-mode';
-        toast('Modo claro activado');
-        renderFondos(c);
-    });
-    document.getElementById('wps-wallpaper')?.addEventListener('click',()=>{
-        document.getElementById('wp-grid').style.display='block';
-        document.getElementById('wp-grid').scrollIntoView({behavior:'smooth'});
-    });
+    // Apply accent-from-wallpaper and refresh Plasma so it takes effect live.
+    const _applyPalette=async(on)=>{
+        setSetting('ColorPalette',on?'true':'false');
+        try{
+            await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','kdeglobals','--group','General','--key','AccentColorFromWallpaper',on?'true':'false']});
+            // When turning off, clear any forced accent so Plasma reverts to default.
+            if(!on)await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','kdeglobals','--group','General','--key','accentColorFromWallpaper',on?'true':'false']}).catch(()=>{});
+            // Notify running apps of the kdeglobals change (live update, no relogin).
+            await tauriInvoke('run_command',{cmd:'dbus-send',args:['--session','--type=signal','/KGlobalSettings','org.kde.KGlobalSettings.notifyChange','int32:0','int32:0']}).catch(()=>{});
+        }catch(e){}
+        toast(on?'Paleta de colores activada':'Paleta desactivada');
+    };
+    // The whole palette row toggles; the inner switch is purely visual here
+    // so we don't double-fire via setupToggle.
     document.getElementById('wps-palette')?.addEventListener('click',async()=>{
         const tog=document.querySelector('[data-toggle="palette"]');
         const next=!tog?.classList.contains('active');
         tog?.classList.toggle('active',next);
-        setSetting('ColorPalette',next?'true':'false');
-        toast(next?'Paleta de colores activada':'Paleta desactivada');
-    });
-
-    setupToggle('palette',async a=>{
-        setSetting('ColorPalette',a?'true':'false');
-        try{await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','kdeglobals','--group','General','--key','AccentColorFromWallpaper',a?'true':'false']});}catch(e){}
-        toast(a?'Paleta de colores activada':'Paleta desactivada');
-    });
-    setupToggle('dimwp',async a=>{
-        setSetting('DimWallpaper',a?'true':'false');
-        toast(a?'Atenuación activada':'Atenuación desactivada');
+        await _applyPalette(next);
     });
 
     document.querySelectorAll('.wallpaper-card').forEach(card=>{
-        card.addEventListener('click',async()=>{
+        const apply=async()=>{
             try{await tauriInvoke('set_wallpaper',{path:card.dataset.path});}catch(e){toast('Error al aplicar fondo','❌');return;}
-            document.querySelectorAll('.wallpaper-card').forEach(x=>x.classList.remove('active'));
+            document.querySelectorAll('.wallpaper-card').forEach(x=>{x.classList.remove('active');x.setAttribute('aria-pressed','false');});
             card.classList.add('active');
+            card.setAttribute('aria-pressed','true');
             // Update preview immediately
             const previewImg=document.getElementById('wp-screen-img');
             if(previewImg)previewImg.src=card.querySelector('img')?.src||'';
             toast('Fondo de pantalla aplicado','🖼️');
-        });
+        };
+        card.addEventListener('click',apply);
+        card.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();apply();}});
     });
 }
 
@@ -5100,9 +4405,6 @@ const SVGI = {
     chevronR:  `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`,
 };
 
-export function getRoutines(){try{return JSON.parse(localStorage.getItem('bookos_routines')||'[]');}catch{return[];}}
-export function saveRoutines(r){localStorage.setItem('bookos_routines',JSON.stringify(r));}
-
 const RB_TRIGGERS=[
     {type:'time',              svg:SVGI.clock,     label:'A una hora específica',     valueType:'time'},
     {type:'power_connected',   svg:SVGI.plug,      label:'Al conectar el cargador'},
@@ -5128,7 +4430,7 @@ const RB_ACTIONS=[
     // ── Sonido
     {type:'volume',        svg:SVGI.volume2,  label:'Volumen del sistema', valueType:'range', min:0, max:100, default:50, category:'Sonido'},
     // ── Batería y rendimiento
-    {type:'performance',   svg:SVGI.zap,      label:'Modo de rendimiento',valueType:'select', options:[['ahorro','Ahorro extremo'],['power-saver','Silencioso'],['balanced','Optimizado'],['performance','Rendimiento']], category:'Batería'},
+    {type:'performance',   svg:SVGI.zap,      label:'Modo de rendimiento',valueType:'select', options:[['power-saver','Silencioso'],['balanced','Optimizado'],['performance','Rendimiento']], category:'Batería'},
     {type:'thermal',       svg:SVGI.zap,      label:'Perfil térmico',     valueType:'select', options:[['ahorro','Ahorro extremo (5W)'],['silencioso','Silencioso (8W)'],['optimizado','Optimizado (15W)'],['rendimiento','Rendimiento (28W)']], category:'Batería'},
     {type:'fan_mode',      svg:SVGI.zap,      label:'Modo ventilador',    valueType:'select', options:[['0','Automático'],['1','Silencioso'],['2','Normal']], category:'Batería'},
     {type:'charge_limit',  svg:SVGI.plug,     label:'Límite de carga',    valueType:'range', min:50, max:100, default:80, category:'Batería'},
@@ -5148,43 +4450,14 @@ function rbActionLabel(a){
     return d.label;
 }
 
-const SNAPS_KEY='bookos_routine_snaps';
-function _loadSnaps(){try{return JSON.parse(localStorage.getItem(SNAPS_KEY)||'{}');}catch{return{};}}
-function _saveSnap(id,snap){const s=_loadSnaps();s[id]=snap;localStorage.setItem(SNAPS_KEY,JSON.stringify(s));}
-function _deleteSnap(id){const s=_loadSnaps();delete s[id];localStorage.setItem(SNAPS_KEY,JSON.stringify(s));}
-function _getSnap(id){return _loadSnaps()[id]||null;}
-
-export async function executeRoutine(routine){
-    if(routine.undo){
-        const snap=await snapshotForRoutine(routine);
-        _saveSnap(routine.id,snap);
-    }
-    for(const a of routine.actions){
-        try{
-            if(a.type==='performance')await tauriInvoke('set_performance_mode',{mode:a.value});
-            else if(a.type==='wifi')await tauriInvoke('toggle_wifi',{enable:a.value==='true'});
-            else if(a.type==='bluetooth')await tauriInvoke('toggle_bluetooth',{enable:a.value==='true'});
-            else if(a.type==='airplane')await tauriInvoke('toggle_airplane_mode',{enable:a.value==='true'});
-            else if(a.type==='brightness')await tauriInvoke('set_brightness',{value:parseInt(a.value)});
-            else if(a.type==='volume')await tauriInvoke('set_volume',{value:parseInt(a.value)});
-            else if(a.type==='dnd')await tauriInvoke('toggle_dnd',{enable:a.value==='true'});
-            else if(a.type==='nightlight')await tauriInvoke('set_nightlight',{active:a.value==='true',temperature:null});
-            else if(a.type==='theme'){await tauriInvoke('set_color_scheme',{scheme:a.value});document.documentElement.className=a.value==='BreezeDark'?'dark-mode':'light-mode';}
-            else if(a.type==='kbd_brightness')await tauriInvoke('set_kbd_brightness',{level:parseInt(a.value)});
-            // ── New actions ──
-            else if(a.type==='vision_booster')await tauriInvoke(a.value==='true'?'activar_vision_booster':'desactivar_vision_booster');
-            else if(a.type==='hdr')await tauriInvoke(a.value==='true'?'activar_hdr':'desactivar_hdr');
-            else if(a.type==='screen_saver')await tauriInvoke(a.value==='true'?'activar_ahorro_pantalla':'desactivar_ahorro_pantalla');
-            else if(a.type==='thermal')await tauriInvoke('aplicar_perfil_termico',{modo:a.value});
-            else if(a.type==='icc_profile')await tauriInvoke('aplicar_perfil_color',{nombreArchivo:a.value});
-            else if(a.type==='fan_mode')await tauriInvoke('set_fan_mode',{mode:a.value});
-            else if(a.type==='charge_limit')await tauriInvoke('set_charge_limit',{limit:parseInt(a.value)});
-        }catch(e){}
-    }
-}
-
 function renderRoutinesList(routines){
-    if(!routines.length)return`<div class="detail-card">${renderInfoItem('No hay rutinas','Pulsa "Nueva rutina" para crear tu primera automatización')}</div>`;
+    if(!routines.length)return`<div class="detail-card routine-empty-card">
+        <div class="routine-empty">
+            <span class="routine-empty-title">No hay rutinas</span>
+            <span class="routine-empty-sub">Automatiza brillo, tema, no molestar y más según hora o eventos</span>
+            <button type="button" class="rb-new-btn" data-create-routine>${SVGI.plus}<span>Crear rutina</span></button>
+        </div>
+    </div>`;
     return`<div class="detail-card">`+routines.map(r=>`
         <div class="routine-item" data-id="${esc(r.id)}">
             <div class="routine-item-main">
@@ -5201,7 +4474,7 @@ function renderRoutinesList(routines){
                     <button class="rb-icon-btn rb-btn-run" data-run="${esc(r.id)}" title="Ejecutar">${SVGI.play}</button>
                     <button class="rb-icon-btn rb-btn-edit" data-edit="${esc(r.id)}" title="Editar">${SVGI.pencil}</button>
                     <button class="rb-icon-btn rb-btn-delete" data-delete="${esc(r.id)}" title="Eliminar">${SVGI.trash}</button>
-                    <div class="toggle-switch ${r.enabled?'active':''}" data-routine-toggle="${esc(r.id)}"></div>
+                    <button type="button" class="toggle-switch ${r.enabled?'active':''}" data-routine-toggle="${esc(r.id)}" role="switch" aria-checked="${r.enabled?'true':'false'}"></button>
                 </div>
             </div>
             <div class="routine-item-chips">
@@ -5213,6 +4486,8 @@ function renderRoutinesList(routines){
 }
 
 function bindRoutineEvents(c){
+    // Empty-state CTA (re-bound here so it works after deleting the last routine)
+    c.querySelector('[data-create-routine]')?.addEventListener('click',()=>openRoutineBuilder(null,c));
     c.querySelectorAll('[data-routine-toggle]').forEach(el=>{
         el.addEventListener('click',async()=>{
             const routines=getRoutines(),r=routines.find(x=>x.id===el.dataset.routineToggle);
@@ -5220,6 +4495,7 @@ function bindRoutineEvents(c){
             r.enabled=!r.enabled;
             saveRoutines(routines);
             el.classList.toggle('active',r.enabled);
+            el.setAttribute('aria-checked',r.enabled?'true':'false');
             if(!r.enabled&&r.undo){
                 const snap=_getSnap(r.id);
                 if(snap){await restoreSnapshot(snap);_deleteSnap(r.id);toast(`"${r.name}" desactivada — estado restaurado`,'↩');}
@@ -5262,8 +4538,8 @@ function bindRoutineEvents(c){
 
 function openRoutineBuilder(existing,mainContainer){
     const isEdit=!!existing;
-    let routine=existing?JSON.parse(JSON.stringify(existing)):{id:crypto.randomUUID(),name:'',enabled:true,undo:false,triggers:[],actions:[]};
-    if(routine.undo===undefined)routine.undo=false;
+    let routine=existing?JSON.parse(JSON.stringify(existing)):{id:crypto.randomUUID(),name:'',enabled:true,undo:true,triggers:[],actions:[]};
+    if(routine.undo===undefined)routine.undo=true;
     const ov=document.createElement('div');ov.className='rb-overlay';
     const render=()=>{
         ov.innerHTML=`<div class="rb-dialog">
@@ -5502,11 +4778,19 @@ export async function renderModos(c){
     document.querySelectorAll('.modo-card').forEach(btn=>{
         btn.addEventListener('click',async()=>{
             const id=btn.dataset.modo;
-            let theme='BreezeLight',dnd=false,brightness=50;
-            if(id==='sleep'){theme='BreezeDark';dnd=true;brightness=20;}
-            if(id==='work'){theme='BreezeLight';dnd=true;brightness=90;}
-            if(id==='movie'){theme='BreezeDark';dnd=true;brightness=60;}
-            if(id==='focus'){theme='BreezeLight';dnd=true;brightness=70;}
+            // Use the user's configured light/dark schemes (theme schedule) so
+            // modes don't yank a BookOS-themed desktop over to Breeze.
+            let lightScheme='BreezeLight',darkScheme='BreezeDark';
+            try{
+                const s=JSON.parse(await tauriInvoke('get_theme_schedule'));
+                if(s.light_theme)lightScheme=s.light_theme;
+                if(s.dark_theme)darkScheme=s.dark_theme;
+            }catch(e){}
+            let theme=lightScheme,dnd=false,brightness=50;
+            if(id==='sleep'){theme=darkScheme;dnd=true;brightness=20;}
+            if(id==='work'){theme=lightScheme;dnd=true;brightness=90;}
+            if(id==='movie'){theme=darkScheme;dnd=true;brightness=60;}
+            if(id==='focus'){theme=lightScheme;dnd=true;brightness=70;}
             document.querySelectorAll('.modo-card').forEach(x=>x.classList.remove('active'));
             btn.classList.add('active');
             btn.style.opacity='0.6';
@@ -5516,7 +4800,7 @@ export async function renderModos(c){
                     tauriInvoke('toggle_dnd',{enable:dnd}).catch(()=>{}),
                     tauriInvoke('set_brightness',{value:brightness}).catch(()=>{}),
                 ]);
-                document.documentElement.className=theme==='BreezeDark'?'dark-mode':'light-mode';
+                document.documentElement.className=/dark/i.test(theme)?'dark-mode':'light-mode';
             }finally{btn.style.opacity='';}
             setSetting('active_mode',id);
             toast(`Modo ${btn.querySelector('.modo-name').textContent} activado`,'✓');
@@ -5528,79 +4812,107 @@ export async function renderModos(c){
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// ── Routine snapshot / restore (for "Restaurar al finalizar") ──────────
-// ════════════════════════════════════════════════════════════════════════
-
-/** Capture current system state for each action type in a routine */
-export async function snapshotForRoutine(routine){
-    const snap={};
-    const types=new Set(routine.actions.map(a=>a.type));
-    const promises=[];
-    if(types.has('brightness'))promises.push(tauriInvoke('get_brightness').then(r=>{const v=JSON.parse(r);snap.brightness=v.brightness;}).catch(()=>{}));
-    if(types.has('volume'))promises.push(tauriInvoke('get_volume').then(r=>{const v=JSON.parse(r);snap.volume=v.volume;}).catch(()=>{}));
-    if(types.has('theme'))promises.push(tauriInvoke('get_current_theme').then(r=>{const v=JSON.parse(r);snap.theme=v.scheme;snap.theme_is_dark=v.is_dark;}).catch(()=>{}));
-    if(types.has('performance'))promises.push(tauriInvoke('check_book_hw').then(r=>{const v=JSON.parse(r);snap.performance=v.performance_mode||'balanced';}).catch(()=>{snap.performance='balanced';}));
-    if(types.has('wifi'))promises.push(tauriInvoke('get_wifi_status').then(r=>{snap.wifi=JSON.parse(r).enabled;}).catch(()=>{}));
-    if(types.has('bluetooth'))promises.push(tauriInvoke('get_bluetooth_status').then(r=>{snap.bluetooth=JSON.parse(r).enabled;}).catch(()=>{}));
-    if(types.has('airplane'))promises.push(tauriInvoke('get_airplane_mode').then(r=>{snap.airplane=JSON.parse(r).enabled;}).catch(()=>{}));
-    if(types.has('dnd'))promises.push(tauriInvoke('get_dnd_status').then(r=>{snap.dnd=JSON.parse(r).dnd_active;}).catch(()=>{}));
-    if(types.has('nightlight'))promises.push(tauriInvoke('get_nightlight').then(r=>{snap.nightlight=JSON.parse(r).active;}).catch(()=>{}));
-    if(types.has('kbd_brightness'))promises.push(tauriInvoke('get_kbd_brightness').then(r=>{snap.kbd_brightness=JSON.parse(r).level;}).catch(()=>{}));
-    // New action types snapshot
-    if(types.has('hdr')||types.has('vision_booster')||types.has('thermal')){
-        promises.push(tauriInvoke('obtener_estado_pantalla').then(r=>{
-            const v=typeof r==='string'?JSON.parse(r):r;
-            snap.hdr_active=v.hdr_activo;
-            snap.thermal_mode=v.modo_termico;
-        }).catch(()=>{}));
-    }
-    await Promise.all(promises);
-    return snap;
-}
-
-/** Restore a previously captured snapshot */
-export async function restoreSnapshot(snap){
-    const promises=[];
-    if('brightness' in snap)promises.push(tauriInvoke('set_brightness',{value:parseInt(snap.brightness)}).catch(()=>{}));
-    if('volume' in snap)promises.push(tauriInvoke('set_volume',{value:parseInt(snap.volume)}).catch(()=>{}));
-    if('theme' in snap){promises.push(tauriInvoke('set_color_scheme',{scheme:snap.theme}).catch(()=>{}));document.documentElement.className=snap.theme_is_dark?'dark-mode':'light-mode';}
-    if('performance' in snap)promises.push(tauriInvoke('set_performance_mode',{mode:snap.performance}).catch(()=>{}));
-    if('wifi' in snap)promises.push(tauriInvoke('toggle_wifi',{enable:snap.wifi}).catch(()=>{}));
-    if('bluetooth' in snap)promises.push(tauriInvoke('toggle_bluetooth',{enable:snap.bluetooth}).catch(()=>{}));
-    if('airplane' in snap)promises.push(tauriInvoke('toggle_airplane_mode',{enable:snap.airplane}).catch(()=>{}));
-    if('dnd' in snap)promises.push(tauriInvoke('toggle_dnd',{enable:snap.dnd}).catch(()=>{}));
-    if('nightlight' in snap)promises.push(tauriInvoke('set_nightlight',{active:snap.nightlight,temperature:null}).catch(()=>{}));
-    if('kbd_brightness' in snap)promises.push(tauriInvoke('set_kbd_brightness',{level:parseInt(snap.kbd_brightness)}).catch(()=>{}));
-    // New action types restore
-    if('hdr_active' in snap)promises.push(tauriInvoke(snap.hdr_active?'activar_hdr':'desactivar_hdr').catch(()=>{}));
-    if('thermal_mode' in snap)promises.push(tauriInvoke('aplicar_perfil_termico',{modo:snap.thermal_mode}).catch(()=>{}));
-    await Promise.all(promises);
-}
-
-// ════════════════════════════════════════════════════════════════════════
 // ── Aplicaciones Predeterminadas (NEW) ─────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════
 export async function renderAplicaciones(c){
     c.innerHTML=renderHeader(t('hdr_apps'))+renderSkeleton(3);
-    let defaults={browser:'',email:'',filemanager:''};
+    let defaults={};
     try{defaults=JSON.parse(await tauriInvoke('get_default_apps'));}catch(e){}
 
-    const apps=[
-        {key:'browser',icon:'🌐',label:'Navegador web',current:defaults.browser},
-        {key:'email',icon:'📧',label:'Cliente de correo',current:defaults.email},
-        {key:'filemanager',icon:'📁',label:'Gestor de archivos',current:defaults.filemanager}
-    ];
+    // Per-role metadata: fallback glyph + label.
+    const roleMeta={
+        browser:{glyph:'🌐',label:_tr('Navegador web')},
+        email:{glyph:'✉️',label:_tr('Cliente de correo')},
+        filemanager:{glyph:'📁',label:_tr('Gestor de archivos')},
+        image:{glyph:'🖼️',label:_tr('Imágenes')},
+        video:{glyph:'🎬',label:_tr('Vídeo')},
+        audio:{glyph:'🎵',label:_tr('Audio')},
+        pdf:{glyph:'📄',label:_tr('Documentos PDF')},
+        text:{glyph:'📝',label:_tr('Archivos de texto')},
+        archive:{glyph:'🗜️',label:_tr('Archivos comprimidos')},
+    };
+    const order=['browser','email','filemanager','image','video','audio','pdf','text','archive'];
 
-    c.innerHTML=renderHeader(t('hdr_apps'))+renderSection(t('sec_default_apps'))+`<div class="detail-card">${apps.map(a=>
-        `<div class="app-default-item"><div class="app-default-icon">${a.icon}</div><div class="app-default-info"><span class="app-default-name">${a.label}</span><span class="app-default-current">${esc(a.current||'No configurada')}</span></div></div>`
-    ).join('')}</div>`+renderSection(t('sec_actions'))+renderCard([
-        `<div class="detail-item" style="text-align:center"><button class="btn btn-secondary btn-sm" id="open-mime">Abrir configuración MIME</button></div>`
-    ]);
+    // Render an app icon: real .desktop Icon if it's an absolute path, else
+    // a tinted glyph tile as fallback.
+    const appIconHtml=(cur,glyph)=>{
+        const ic=cur&&cur.icon||'';
+        if(ic&&ic.startsWith('/')){
+            return `<img src="${getAssetUrl(ic)}" class="app-def-img" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'app-def-glyph',textContent:'${glyph}'}))">`;
+        }
+        return `<div class="app-def-glyph">${glyph}</div>`;
+    };
 
-    document.getElementById('open-mime')?.addEventListener('click',async()=>{
-        try{await tauriInvoke('open_mime_settings');}catch(e){}
-        toast('Abriendo configuración MIME');
-    });
+    const buildRows=()=>order.map(key=>{
+        const cur=defaults[key]||{};
+        const m=roleMeta[key];
+        const curName=cur.name||_tr('No configurada');
+        return `<div class="app-def-row" data-role="${key}">
+            <div class="app-def-icon">${appIconHtml(cur,m.glyph)}</div>
+            <div class="app-def-info">
+                <span class="app-def-role">${m.label}</span>
+                <span class="app-def-current">${esc(curName)}</span>
+            </div>
+            <svg class="app-def-chevron" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </div>`;
+    }).join('');
+
+    const render=()=>{
+        c.innerHTML=renderHeader(t('hdr_apps'))
+            +renderSection(t('sec_default_apps'))
+            +`<div class="detail-card app-def-list">${buildRows()}</div>`
+            +`<p class="app-def-hint">${_tr('Toca una categoría para elegir la app predeterminada.')}</p>`;
+        wire();
+    };
+
+    const openPicker=async(role)=>{
+        const m=roleMeta[role];
+        let apps=[];
+        try{apps=JSON.parse(await tauriInvoke('list_apps_for_role',{role}));}catch(e){}
+        const curId=(defaults[role]||{}).id||'';
+        if(!apps.length){
+            showDialog(m.label,_tr('No se encontraron aplicaciones para esta categoría.'),
+                {confirmText:null,cancelText:_tr('Cerrar'),onCancel:()=>{}});
+            return;
+        }
+        const list=apps.map(a=>{
+            const active=a.id===curId;
+            const icon=a.icon&&a.icon.startsWith('/')
+                ? `<img src="${getAssetUrl(a.icon)}" class="app-pick-img" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'app-pick-glyph',textContent:'${m.glyph}'}))">`
+                : `<div class="app-pick-glyph">${m.glyph}</div>`;
+            return `<button class="app-pick-row${active?' active':''}" data-id="${esc(a.id)}">
+                ${icon}
+                <span class="app-pick-name">${esc(a.name)}</span>
+                ${active?'<svg viewBox="0 0 20 20" width="18" height="18" fill="none"><path d="M5 10l3 3 7-7" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>':''}
+            </button>`;
+        }).join('');
+        showDialog(`${_tr('Elegir')} · ${m.label}`, `<div class="app-pick-list">${list}</div>`,
+            {confirmText:null,cancelText:_tr('Cerrar'),onCancel:()=>{}});
+        // Wire the picker rows (the dialog is appended to body).
+        document.querySelectorAll('.bk-overlay .app-pick-row').forEach(btn=>{
+            btn.addEventListener('click',async()=>{
+                const id=btn.dataset.id;
+                document.querySelector('.bk-overlay')?.remove();
+                try{
+                    const r=JSON.parse(await tauriInvoke('set_default_app',{role,desktopId:id}));
+                    if(r.ok){
+                        // Refresh from system to show the new default.
+                        try{defaults=JSON.parse(await tauriInvoke('get_default_apps'));}catch(e){}
+                        render();
+                        toast(_tr('App predeterminada actualizada'),'✅');
+                    } else toast(_tr('No se pudo cambiar'),'❌');
+                }catch(e){toast(_tr('No se pudo cambiar'),'❌');}
+            });
+        });
+    };
+
+    function wire(){
+        c.querySelectorAll('.app-def-row').forEach(row=>{
+            row.addEventListener('click',()=>openPicker(row.dataset.role));
+        });
+    }
+
+    render();
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -5615,7 +4927,7 @@ export async function renderSaludDigital(c){
         tauriInvoke('get_volume').then(JSON.parse).catch(()=>({volume:50,muted:false}))
     ]);}catch(e){}
 
-    // If no real usage data, show placeholder usage for UI demonstration
+    // Real usage only: tracking accumulates from main.js. Empty -> "no data yet" card below.
     const hasData=Array.isArray(appUsage)&&appUsage.length>0;
     const totalMin=hasData?appUsage.reduce((s,a)=>s+(a.minutes||0),0):0;
     const totalH=Math.floor(totalMin/60),totalM=totalMin%60;
@@ -5645,12 +4957,8 @@ export async function renderSaludDigital(c){
     // Screen time goal
     const goalMin=parseInt(await getSetting('sd_goal_min','480').catch(()=>'480'))||480;
 
-    // App usage bars
-    // Track active app every 60s when on this page (Wayland-aware)
-    addInterval(async()=>{
-        try{await tauriInvoke('track_active_app');}catch(e){}
-    },60000);
-
+    // App usage bars. Tracking runs globally from main.js, so opening this page
+    // just displays whatever has accumulated.
     if(hasData){
         h+=renderSection(t('sec_per_app_usage'));
         const maxMin=Math.max(...appUsage.map(a=>a.minutes||0),1);
@@ -5670,7 +4978,7 @@ export async function renderSaludDigital(c){
         }).join('')}</div>`;
     } else {
         h+=renderSection(t('sec_per_app_usage'));
-        h+=renderCard([renderInfoItem('Sin datos de uso aún','El uso se registra cuando actives el seguimiento')]);
+        h+=renderCard([renderInfoItem('Sin datos de uso aún','El uso se registra automáticamente mientras BookOS Settings esté abierto. Vuelve más tarde.')]);
     }
 
     // Volume
@@ -5883,7 +5191,6 @@ export async function renderAvanzadas(c){
     h+=renderSection(t('sec_active'));
     h+=renderCard([
         renderRowItem('Animaciones reducidas','Menos movimiento en la interfaz',renderToggle('lab-reducedmotion',labGet('reducedmotion')==='true')),
-        renderRowItem('Barra de estado extendida','Muestra más datos en la barra lateral',renderToggle('lab-extendedstatus',labGet('extendedstatus')==='true')),
     ]);
 
     h+=renderSection(t('sec_in_dev'));
@@ -5917,10 +5224,6 @@ export async function renderAvanzadas(c){
         labSet('reducedmotion',a?'true':'false');
         document.documentElement.classList.toggle('reduced-motion',a);
         toast(a?'Animaciones reducidas activadas':'Animaciones restauradas');
-    });
-    setupToggle('lab-extendedstatus',a=>{
-        labSet('extendedstatus',a?'true':'false');
-        toast(a?'Barra extendida activada (recarga para ver)':'Barra extendida desactivada');
     });
 
     setupToggle('fx-blur',async a=>{
@@ -6193,13 +5496,41 @@ async function _renderBudsDetail(c, device){
     const fw=gbcDev?gbcDev.FirmwareVersion:'';
     const modelTag=status.model||(gbcDev?gbcDev.Model:'');
 
+    // Pick model-specific artwork from src/assets. buds4pro has the full set;
+    // older models fall back to generic earbuds. Case colour is user-selectable
+    // (BT doesn't report it) and persisted per-device.
+    const _bn=((device.name||'')+' '+(modelTag||'')).toLowerCase();
+    const _model=(_bn.includes('buds4')||_bn.includes('buds 4'))?'4pro'
+                :(_bn.includes('buds2')||_bn.includes('buds 2'))?'2pro':'3pro';
+    const _BUDS_ART={
+        '4pro':{hero:'buds4pro-together.svg',l:'buds4pro-left.svg',r:'buds4pro-right.svg'},
+        '3pro':{hero:'buds3pro-together.png',l:'buds3pro-left.png',r:'buds3pro-right.png'},
+        '2pro':{hero:'buds3pro-together.svg',l:'budsleft.svg',r:'budsright.svg'},
+    }[_model];
+    // Available case colours per model (swatch value → label).
+    const _CASE_COLORS={
+        '4pro':[['white','White'],['black','Black']],
+        '3pro':[['white','White'],['silver','Silver']],
+        '2pro':[['white','White'],['black','Black'],['purple','Purple']],
+    }[_model];
+    let _caseColor=await getSetting('buds_case_color_'+device.mac,_CASE_COLORS[0][0]);
+    if(!_CASE_COLORS.some(c=>c[0]===_caseColor))_caseColor=_CASE_COLORS[0][0];
+    // Real-photo case art (PNG) where available; rest fall back to line-art SVG.
+    const _CASE_PNG={'3pro-silver':1};
+    const _caseFile=c=>`buds${_model}-case-${c}.${_CASE_PNG[_model+'-'+c]?'png':'svg'}`;
+    // Live-updated current case colour + builder, so the battery-ring poll
+    // (which rewrites #buds-rings) re-renders the case with the picked colour
+    // instead of the value frozen at first render.
+    let _curCase=_caseColor;
+    const _caseIcoHtml=col=>`<img id="buds-case-img" src="./assets/${_caseFile(col)}" class="buds-model-icon buds-keep-color" width="28" height="28" alt="">`;
+    const _bimg=(p,cls,style)=>`<img src="./assets/${p}" class="buds-model-icon${p.endsWith('.png')?' buds-keep-color':''}" ${style||'width="28" height="28"'} alt="">`;
     // Icons (inline SVG, currentColor)
     const _ICO={
-        earbud:'<img src="./assets/budsleft.svg" class="buds-model-icon" width="28" height="28" alt="">',
-        earbudL:'<img src="./assets/budsleft.svg" class="buds-model-icon" width="28" height="28" alt="">',
-        earbudR:'<img src="./assets/budsright.svg" class="buds-model-icon" width="28" height="28" alt="">',
-        case:'<img src="./assets/case3.svg" class="buds-model-icon" width="28" height="28" alt="">',
-        hero:'<img src="./assets/buds3pro-together.svg" class="buds-model-icon" style="width:220px;height:140px;object-fit:contain" alt="Buds3 Pro">',
+        earbud:_bimg(_BUDS_ART.l),
+        earbudL:_bimg(_BUDS_ART.l),
+        earbudR:_bimg(_BUDS_ART.r),
+        case:_caseIcoHtml(_caseColor),
+        hero:`<img src="./assets/${_BUDS_ART.hero}" class="buds-model-icon${_BUDS_ART.hero.endsWith('.png')?' buds-keep-color':''}" style="width:168px;height:112px;object-fit:contain" alt="${esc(device.name||'Buds')}">`,
         eq:'<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 4v6M6 14v6M12 4v2M12 10v10M18 4v10M18 18v2"/><circle cx="6" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="8" r="1.8" fill="currentColor"/><circle cx="18" cy="16" r="1.8" fill="currentColor"/></svg>',
         touch:'<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11V6a2 2 0 0 1 4 0v7"/><path d="M13 9a2 2 0 0 1 4 0v5"/><path d="M17 11a2 2 0 0 1 2 2v4a5 5 0 0 1-5 5h-2a5 5 0 0 1-4.3-2.5L5 15"/><path d="M9 11a2 2 0 0 0-2 2v1"/></svg>',
         voice:'<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
@@ -6330,6 +5661,17 @@ async function _renderBudsDetail(c, device){
         ${_battRing(battCase,'Estuche',_ICO.case)}
     </div>`;
 
+    // Case colour picker (per-model, persisted per-device).
+    const _swColor={white:'#e8e8ea',black:'#2a2a2c',silver:'#c4c8cc',purple:'#7d6fc7'};
+    if(_CASE_COLORS.length>1){
+        h+=`<div class="detail-card" style="margin:0 16px 10px;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:14px">
+            <span style="font-size:14px;color:var(--tx)">${_tr('Color del estuche')}</span>
+            <div style="display:flex;gap:10px" id="buds-case-colors">
+                ${_CASE_COLORS.map(([v,l])=>`<button class="buds-color-sw${v===_caseColor?' active':''}" data-color="${v}" title="${_tr(l)}" aria-label="${_tr(l)}" style="background:${_swColor[v]||'#888'}"></button>`).join('')}
+            </div>
+        </div>`;
+    }
+
     // ANC card: stepper + auto-ambient toggle
     h+=`<div class="detail-card" style="padding:0;margin:0 16px 10px;overflow:hidden">
         ${_ancStepper(status.anc_mode)}
@@ -6365,6 +5707,19 @@ async function _renderBudsDetail(c, device){
 
     c.innerHTML=renderHeader(device.name||'Buds')+h;
 
+    // Case colour swatches → persist + swap the case artwork live.
+    document.querySelectorAll('#buds-case-colors .buds-color-sw').forEach(sw=>{
+        sw.addEventListener('click',async()=>{
+            const col=sw.dataset.color;
+            _curCase=col;
+            await setSetting('buds_case_color_'+device.mac,col);
+            document.querySelectorAll('#buds-case-colors .buds-color-sw').forEach(x=>x.classList.remove('active'));
+            sw.classList.add('active');
+            const img=document.getElementById('buds-case-img');
+            if(img)img.src='./assets/'+_caseFile(col);
+        });
+    });
+
     // BT connect/disconnect button — master poll picks up transition + re-renders
     document.getElementById('buds-conn-btn')?.addEventListener('click',async()=>{
         const btn=document.getElementById('buds-conn-btn');
@@ -6376,6 +5731,7 @@ async function _renderBudsDetail(c, device){
             } else {
                 await tauriInvoke('connect_bluetooth',{mac:device.mac});
             }
+            window.updateHomeBudsRow?.();
         }catch(e){
             toast('Error de conexión');
             btn.disabled=false;btn.textContent=device.connected?'Desconectar':'Conectar';
@@ -6545,7 +5901,7 @@ async function _renderBudsDetail(c, device){
     function _renderRingsLive(bl,br,bc){
         const rings=document.getElementById('buds-rings');
         if(!rings) return;
-        rings.innerHTML=_battRing(bl,'Izda',_ICO.earbudL)+_battRing(br,'Dcha',_ICO.earbudR)+_battRing(bc,'Estuche',_ICO.case);
+        rings.innerHTML=_battRing(bl,'Izda',_ICO.earbudL)+_battRing(br,'Dcha',_ICO.earbudR)+_battRing(bc,'Estuche',_caseIcoHtml(_curCase));
     }
 
     // Master poll: detect BT connect/disconnect transitions + live battery
@@ -7196,6 +6552,34 @@ async function _renderBookShare(c){
 }
 
 // ── Main dispositivos list ──────────────────────────────────────────────
+// ── Connected-buds shortcut (used by the Home profile card) ──────────────
+// Returns the connected earbuds/headset device, or null.
+async function _getConnectedBudsDevice(){
+    try{
+        const st=JSON.parse(await tauriInvoke('get_bluetooth_status'));
+        if(!(st.enabled||st.powered))return null;
+        const devs=JSON.parse(await tauriInvoke('get_bluetooth_devices'));
+        const isAudio=d=>{ const ic=(d.icon||'').toLowerCase(),nm=(d.name||'').toLowerCase();
+            return ic.includes('headset')||ic.includes('headphone')||ic.includes('audio-head')||ic.includes('audio')||ic.startsWith('audio-')||
+                   nm.includes('buds')||nm.includes('airpods')||nm.includes('headset')||nm.includes('earphone')||
+                   nm.includes('galaxy buds')||nm.includes('pixel buds')||nm.includes('wf-')||nm.includes('wh-')||nm.includes('beats'); };
+        return devs.find(d=>d.connected&&(isAudio(d)||!d.icon))||null;
+    }catch(e){return null;}
+}
+if(typeof window!=='undefined'){
+    window.getConnectedBuds=_getConnectedBudsDevice;
+    // Open the Buds control page straight from the Home profile card.
+    window.openConnectedBuds=async function(){
+        const dev=await _getConnectedBudsDevice();
+        if(!dev)return;
+        const app=document.getElementById('app');
+        if(!app)return;
+        // Back returns to the (empty) Home view.
+        if(window.pushSubNav)window.pushSubNav(()=>{ app.innerHTML=''; document.querySelectorAll('.item').forEach(i=>i.classList.remove('active-item')); });
+        window.clearPageIntervals?.();
+        _renderBudsDetail(app,dev);
+    };
+}
 export async function renderDispositivos(c){
     c.innerHTML=renderHeader(t('hdr_devices'))+renderSkeleton(2);
 
@@ -7254,7 +6638,10 @@ export async function renderDispositivos(c){
     } else {
         const _budsModelIcon=(name)=>{
             const n=(name||'').toLowerCase();
-            if(n.includes('buds3 pro')||n.includes('buds 3 pro'))return '<img src="./assets/buds3pro-together.svg" class="buds-model-icon" style="width:36px;height:36px;object-fit:contain" alt="">';
+            const art=(n.includes('buds4')||n.includes('buds 4'))?'buds4pro-together.svg'
+                     :(n.includes('buds3')||n.includes('buds 3'))?'buds3pro-together.png'
+                     :(n.includes('buds2')||n.includes('buds 2'))?'buds3pro-together.svg':null;
+            if(art)return `<img src="./assets/${art}" class="buds-model-icon${art.endsWith('.png')?' buds-keep-color':''}" style="width:36px;height:36px;object-fit:contain" alt="">`;
             return _SVG_HEADPHONES;
         };
         h+=renderCard(budsDevices.map((d,i)=>_devRow({
@@ -7436,11 +6823,13 @@ export async function renderAI(c){
         const reidx=document.getElementById('sem-reindex-row');
         if(reidx) reidx.onclick=async()=>{ toast('Reindexando en segundo plano…'); await tauriInvoke('search_reindex'); };
         const unCh=document.getElementById('sem-uninstall-row');
-        if(unCh) unCh.onclick=async()=>{
-            if(confirm('¿Desinstalar búsqueda semántica?\n\nSe borrará el modelo, el índice y las dependencias (~500 MB).')){
-                await tauriInvoke('search_uninstall');
-                semRender();
-            }
+        if(unCh) unCh.onclick=()=>{
+            showDialog(_tr('Desinstalar búsqueda semántica'),
+                _tr('Se borrará el modelo, el índice y las dependencias (~500 MB).'),
+                {confirmText:_tr('Desinstalar'),confirmClass:'danger',onConfirm:async()=>{
+                    await tauriInvoke('search_uninstall');
+                    semRender();
+                }});
         };
 
         const q=document.getElementById('sem-q');

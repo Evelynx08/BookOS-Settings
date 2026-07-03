@@ -3,7 +3,8 @@
   "identifier": "default",
   "description": "Permisos básicos para la ventana principal",
   "windows": [
-    "main"
+    "main",
+    "buds-popup"
   ],
   "permissions": [
     "core:default",
@@ -13,6 +14,8 @@
     "core:window:allow-minimize",
     "core:window:allow-maximize",
     "core:window:allow-unmaximize",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-position",
     "core:image:default",
     "core:resources:default",
     "core:path:default",

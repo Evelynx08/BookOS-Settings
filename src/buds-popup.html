@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>BookOS Buds</title>
+<style>
+  :root{
+    --card:#ffffff; --tx:#1a1a1a; --tx2:#6b7280;
+    --btn:#8a8a8e; --btn-tx:#ffffff; --connect:#5ea1f2;
+    --ring-bg:rgba(120,120,128,.20); --ring:#34d058;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --card:#1f1f22; --tx:#f2f2f5; --tx2:#a0a0a8;
+           --btn:#48484a; --connect:#3a7be0; --ring-bg:rgba(120,120,128,.28); }
+  }
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  html,body{ background:transparent; overflow:hidden; user-select:none;
+    font-family:'Inter','Segoe UI',system-ui,sans-serif; }
+  #card{
+    margin:2px; background:var(--card); border-radius:26px;
+    padding:18px 22px 20px;
+    opacity:0; transform:translateY(-8px); transition:opacity .18s, transform .18s;
+  }
+  #card.in{ opacity:1; transform:none; }
+  #title{ text-align:center; font-size:19px; font-weight:700; color:var(--tx);
+    margin-bottom:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #cols{ display:flex; align-items:flex-start; justify-content:center; gap:26px; }
+  .col{ display:flex; flex-direction:column; align-items:center; gap:14px;
+    flex:1; min-width:0; }
+  .art-wrap{ height:112px; display:flex; align-items:center; justify-content:center; }
+  .buds-art{ height:104px; width:auto; max-width:132px; object-fit:contain; }
+  .case-art{ width:104px; height:auto; object-fit:contain; }
+  .slot{ width:100%; display:flex; justify-content:center; }
+  .btn{ border:none; cursor:pointer; font-size:17px; font-weight:600;
+    border-radius:16px; padding:13px 0; width:100%; color:var(--btn-tx);
+    transition:filter .12s, transform .05s; }
+  .btn:active{ transform:scale(.97); }
+  .btn.dismiss{ background:var(--btn); }
+  .btn.connect{ background:var(--connect); }
+  .btn:hover{ filter:brightness(1.06); }
+  .ring{ position:relative; width:62px; height:62px; }
+  .ring svg{ width:62px; height:62px; transform:rotate(-90deg); }
+  .ring .pct{ margin-top:6px; text-align:center; font-size:13px;
+    font-weight:700; color:var(--tx); }
+  .ringbox{ display:flex; flex-direction:column; align-items:center; }
+</style>
+</head>
+<body>
+  <div id="card"></div>
+<script>
+  const q = new URLSearchParams(location.search);
+  const NAME = q.get('name') || 'Buds';
+  const MAC  = q.get('mac')  || '';
+  let   STATE = q.get('state') || 'connect';
+  let   L = +(q.get('l')||0), R = +(q.get('r')||0), C = +(q.get('c')||0);
+
+  const inv = window.__TAURI__?.core?.invoke;
+  const curWin = () => window.__TAURI__.window.getCurrentWindow();
+  const closeWin = () => { try{ curWin().close(); }catch(e){} };
+
+  // buds battery = lowest non-zero of L/R (or whichever is present)
+  const budsPct = () => {
+    const v = [L,R].filter(x=>x>0);
+    return v.length ? Math.min(...v) : 0;
+  };
+
+  function ring(pct){
+    const r=27, c=2*Math.PI*r, off=c*(1-Math.max(0,Math.min(100,pct))/100);
+    return `<div class="ringbox">
+      <div class="ring"><svg viewBox="0 0 62 62">
+        <circle cx="31" cy="31" r="${r}" fill="none" stroke="var(--ring-bg)" stroke-width="5"/>
+        <circle cx="31" cy="31" r="${r}" fill="none" stroke="var(--ring)" stroke-width="5"
+          stroke-linecap="round" stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"/>
+      </svg></div>
+      <div class="pct">${pct}%</div>
+    </div>`;
+  }
+
+  function render(){
+    const budsArt = `<img class="buds-art" src="./assets/buds3pro-together.png" alt="">`;
+    const caseArt = `<img class="case-art" src="./assets/buds3pro-case-silver.png" alt="">`;
+    let leftSlot, rightSlot;
+    if(STATE === 'connected'){
+      leftSlot  = ring(budsPct());
+      rightSlot = ring(C);
+    } else {
+      leftSlot  = `<button class="btn dismiss" id="b-dismiss">Descartar</button>`;
+      rightSlot = `<button class="btn connect" id="b-connect">Conectar</button>`;
+    }
+    document.getElementById('card').innerHTML = `
+      <div id="title">${NAME.replace(/[<>&]/g,'')}</div>
+      <div id="cols">
+        <div class="col"><div class="art-wrap">${budsArt}</div><div class="slot">${leftSlot}</div></div>
+        <div class="col"><div class="art-wrap">${caseArt}</div><div class="slot">${rightSlot}</div></div>
+      </div>`;
+    wire();
+    autoDismiss();
+  }
+
+  let _timer=null;
+  function autoDismiss(){
+    if(_timer) clearTimeout(_timer);
+    // connected card lingers briefly; connect prompt waits longer for a click
+    _timer = setTimeout(closeWin, STATE==='connected' ? 8000 : 15000);
+  }
+
+  function wire(){
+    document.getElementById('b-dismiss')?.addEventListener('click', closeWin);
+    document.getElementById('b-connect')?.addEventListener('click', async ()=>{
+      const btn = document.getElementById('b-connect');
+      btn.textContent='Conectando…'; btn.disabled=true;
+      try{
+        await inv('buds_connect', { mac: MAC });
+        // poll status a few times for the extended-status battery reply
+        for(let i=0;i<6;i++){
+          await new Promise(r=>setTimeout(r,500));
+          try{
+            const s = JSON.parse(await inv('buds_get_status'));
+            if(s && s.connected){
+              L=s.battery_l||0; R=s.battery_r||0; C=s.battery_case||0;
+              if(budsPct()>0 || C>0) break;
+            }
+          }catch(e){}
+        }
+      }catch(e){}
+      STATE='connected';
+      render();
+      try{ await inv('open_main_window'); }catch(e){}   // bring the app up too
+    });
+  }
+
+  render();
+  requestAnimationFrame(()=>document.getElementById('card').classList.add('in'));
+  // close on Escape
+  window.addEventListener('keydown', e=>{ if(e.key==='Escape') closeWin(); });
+</script>
+</body>
+</html>

@@ -1,28 +1,29 @@
 export const searchIndex=[
-{id:'conexiones',title:'Conexiones',subtitle:'WiFi · Bluetooth · Modo Avión',keywords:['wifi','red','internet','bluetooth','avion','conexion','network']},
-{id:'dispositivos',title:'Dispositivos conectados',subtitle:'Share · Buds',keywords:['dispositivo','compartir','share','buds']},
-{id:'ai',title:'AI',subtitle:'Asistente de escritura · notas',keywords:['ai','inteligencia','asistente']},
-{id:'modos',title:'Modos y rutinas',subtitle:'Modos · Rutinas',keywords:['modo','rutina']},
-{id:'sonido',title:'Sonidos y vibración',subtitle:'Volumen · Melodía',keywords:['sonido','volumen','vibracion','audio','silencio']},
-{id:'notificaciones',title:'Notificaciones',subtitle:'No molestar',keywords:['notificacion','alerta','dnd']},
-{id:'pantalla',title:'Pantalla',subtitle:'Brillo · Resolución · Protector vista',keywords:['pantalla','brillo','resolucion','display','kwin','blur','efectos']},
-{id:'bateria',title:'Batería',subtitle:'Energía · Carga · Samsung Book',keywords:['bateria','energia','carga','samsung','book','ventilador','rendimiento']},
-{id:'bloqueo',title:'Pantalla de bloqueo',subtitle:'Bloqueo · Biometría · AOD',keywords:['bloqueo','lock','aod','huella']},
-{id:'inicio',title:'Pantalla Inicio',subtitle:'Diseño · Apps',keywords:['inicio','home','escritorio']},
-{id:'fondos',title:'Fondo de pantalla',subtitle:'Fondos · Paleta',keywords:['fondo','wallpaper','paleta']},
-{id:'temas',title:'Temas',subtitle:'Temas · Modo oscuro',keywords:['tema','oscuro','claro','dark','light']},
-{id:'seguridad',title:'Seguridad y privacidad',subtitle:'Firewall · Permisos',keywords:['seguridad','privacidad','permiso','firewall','ufw']},
-{id:'ubicacion',title:'Ubicación',subtitle:'Solicitudes',keywords:['ubicacion','gps']},
-{id:'emergencia',title:'Seguridad y emergencia',subtitle:'Datos médicos',keywords:['emergencia','medico']},
-{id:'cuentas',title:'Cuentas',subtitle:'Perfil · Nombre · Hostname',keywords:['cuenta','perfil','nombre','hostname']},
-{id:'avanzadas',title:'Funciones avanzadas',subtitle:'Labs',keywords:['avanzado','labs']},
-{id:'salud',title:'Salud digital',subtitle:'Tiempo de uso',keywords:['salud','digital','uso']},
-{id:'mantenimiento',title:'Mantenimiento',subtitle:'Almacenamiento · Cache',keywords:['mantenimiento','limpiar','cache','espacio','disk','almacenamiento','memoria']},
-{id:'aplicaciones',title:'Aplicaciones',subtitle:'Apps predeterminadas',keywords:['aplicacion','app','predeterminada','navegador','browser']},
-{id:'general',title:'Administración general',subtitle:'Idioma · Teclado · Fecha',keywords:['idioma','teclado','fecha','hora','keyboard']},
-{id:'accesibilidad',title:'Accesibilidad',subtitle:'Visión · Audición',keywords:['accesibilidad','vision','zoom']},
-{id:'actualizacion',title:'Actualización de software',subtitle:'Sistema · Flatpak',keywords:['actualizar','update','paru','pacman','flatpak']},
-{id:'acerca',title:'Acerca del portátil',subtitle:'Hardware · Info',keywords:['acerca','about','info','kernel','plasma']},
+{id:'conexiones',title:'Conexiones',subtitle:'WiFi · Bluetooth · Modo Avión',keywords:['wifi','red','internet','bluetooth','avion','conexion','network','connections','airplane','ethernet','cable','wired']},
+{id:'dispositivos',title:'Dispositivos conectados',subtitle:'Share · Buds',keywords:['dispositivo','compartir','share','buds','devices','connected','nearby','headphones','earbuds']},
+{id:'ai',title:'AI',subtitle:'Asistente de escritura · notas',keywords:['ai','inteligencia','asistente','assistant','search','semantic','busqueda']},
+{id:'modos',title:'Modos y rutinas',subtitle:'Modos · Rutinas',keywords:['modo','rutina','modes','routines','automation','automatizacion']},
+{id:'sonido',title:'Sonido',subtitle:'Volumen · Salida',keywords:['sonido','volumen','audio','silencio','salida','sound','volume','mute','output','balance']},
+{id:'notificaciones',title:'Notificaciones',subtitle:'No molestar',keywords:['notificacion','alerta','dnd','notifications','alert','do not disturb']},
+{id:'pantalla',title:'Pantalla',subtitle:'Brillo · Resolución · Protector vista',keywords:['pantalla','brillo','resolucion','display','kwin','blur','efectos','screen','brightness','resolution','nightlight']},
+{id:'bateria',title:'Batería',subtitle:'Energía · Carga · Samsung Book',keywords:['bateria','energia','carga','samsung','book','ventilador','rendimiento','battery','power','charge','performance','fan']},
+{id:'bloqueo',title:'Pantalla de bloqueo',subtitle:'Bloqueo · Biometría · AOD',keywords:['bloqueo','lock','aod','huella','lockscreen','biometrics','fingerprint','sddm']},
+{id:'inicio',title:'Pantalla Inicio',subtitle:'Diseño · Apps',keywords:['inicio','home','escritorio','homescreen','layout','desktop']},
+{id:'fondos',title:'Fondo de pantalla',subtitle:'Fondos · Paleta',keywords:['fondo','wallpaper','paleta','background','palette','accent','color']},
+{id:'temas',title:'Temas',subtitle:'Temas · Modo oscuro',keywords:['tema','oscuro','claro','dark','light','themes','theme','mode']},
+{id:'seguridad',title:'Seguridad y privacidad',subtitle:'Firewall · Permisos',keywords:['seguridad','privacidad','permiso','firewall','ufw','security','privacy','permissions','camera','microphone']},
+{id:'ubicacion',title:'Ubicación',subtitle:'Solicitudes',keywords:['ubicacion','gps','location']},
+{id:'emergencia',title:'Seguridad y emergencia',subtitle:'Datos médicos',keywords:['emergencia','medico','emergency','medical','sos']},
+{id:'cuentas',title:'Cuentas',subtitle:'Perfil · Nombre · Hostname',keywords:['cuenta','perfil','nombre','hostname','account','profile','name','password','user']},
+{id:'avanzadas',title:'Funciones avanzadas',subtitle:'Labs',keywords:['avanzado','labs','advanced','experimental','compositor','effects']},
+{id:'salud',title:'Salud digital',subtitle:'Tiempo de uso',keywords:['salud','digital','uso','wellbeing','screen time','usage','focus']},
+{id:'mantenimiento',title:'Mantenimiento',subtitle:'Almacenamiento · Cache',keywords:['mantenimiento','limpiar','cache','espacio','disk','almacenamiento','memoria','maintenance','clean','storage','space']},
+{id:'aplicaciones',title:'Aplicaciones',subtitle:'Apps predeterminadas',keywords:['aplicacion','app','predeterminada','navegador','browser','apps','default','pdf','image','video','imagenes','correo','email']},
+{id:'general',title:'Administración general',subtitle:'Idioma · Teclado · Fecha',keywords:['idioma','teclado','fecha','hora','keyboard','general','language','date','time','locale','shortcuts','atajos','autostart']},
+{id:'accesibilidad',title:'Accesibilidad',subtitle:'Visión · Audición',keywords:['accesibilidad','vision','zoom','accessibility','cursor','font','invert','contrast']},
+{id:'actualizacion',title:'Actualización de software',subtitle:'Sistema · Flatpak',keywords:['actualizar','update','paru','pacman','flatpak','updates','software','upgrade','dnf','channel','canal']},
+{id:'recuperacion',title:'Recuperación',subtitle:'Capturas · Revertir',keywords:['recuperacion','recovery','snapshot','captura','revertir','rollback','btrfs','snapper','restaurar','backup']},
+{id:'acerca',title:'Acerca del portátil',subtitle:'Hardware · Info',keywords:['acerca','about','info','kernel','plasma','hardware','version']},
 ];
 
 // Granular sub-settings index — each entry points to its parent page
@@ -127,25 +128,67 @@ export const subSearchIndex=[
 // Dispositivos
 {parent:'dispositivos',title:'Quick Share',keywords:['share','compartir','quick','rquickshare']},
 {parent:'dispositivos',title:'Galaxy Buds',keywords:['buds','audifonos','samsung']},
+// Conexiones — añadidos
+{parent:'conexiones',title:'Ethernet (cable)',keywords:['ethernet','cable','wired','rj45','lan']},
+// Avanzadas — efectos concretos
+{parent:'avanzadas',title:'Desenfoque de fondo',keywords:['desenfoque','blur','transparencia','translucido']},
+{parent:'avanzadas',title:'Ventanas elásticas',keywords:['elasticas','wobbly','wobble','goma']},
+{parent:'avanzadas',title:'Lámpara mágica',keywords:['lampara','magica','magic','minimizar','genie']},
+{parent:'avanzadas',title:'Latencia del cursor',keywords:['cursor','latencia','lag','hz','raton']},
+{parent:'avanzadas',title:'Animaciones reducidas',keywords:['animaciones','reducir','motion','movimiento']},
+// Bateria — añadidos
+{parent:'bateria',title:'Al conectar el cargador',keywords:['cargador','enchufe','charger','plug','ac','corriente']},
+{parent:'bateria',title:'Atenuar pantalla',keywords:['atenuar','dim','brillo','bajo']},
+{parent:'bateria',title:'Perfil térmico',keywords:['termico','thermal','watts','tdp','temperatura']},
+{parent:'bateria',title:'Límite de carga',keywords:['limite','carga','80','tope','charge limit']},
+// Sonido — añadidos
+{parent:'sonido',title:'Balance de audio',keywords:['balance','izquierda','derecha','left','right','pan']},
+// Accesibilidad — añadidos
+{parent:'accesibilidad',title:'Tamaño del cursor',keywords:['cursor','tamaño','raton','grande','puntero']},
+{parent:'accesibilidad',title:'Tamaño de texto',keywords:['texto','fuente','font','letra','dpi']},
+{parent:'accesibilidad',title:'Colores invertidos',keywords:['invertir','invert','colores','negativo']},
+// Aplicaciones — categorías nuevas
+{parent:'aplicaciones',title:'Visor de imágenes',keywords:['imagen','imagenes','image','foto','gwenview','visor']},
+{parent:'aplicaciones',title:'Lector de PDF',keywords:['pdf','documento','okular','lector']},
+{parent:'aplicaciones',title:'Editor de texto',keywords:['texto','editor','text','kate']},
+{parent:'aplicaciones',title:'Gestor de archivos',keywords:['archivos','files','gestor','dolphin']},
+{parent:'aplicaciones',title:'Archivos comprimidos',keywords:['comprimido','zip','rar','7z','archive']},
+// Mantenimiento
+{parent:'mantenimiento',title:'Limpiar caché',keywords:['cache','limpiar','clean','basura','temporal']},
+{parent:'mantenimiento',title:'Limpiar Flatpak',keywords:['flatpak','limpiar','huerfanos','unused']},
+// Salud digital
+{parent:'salud',title:'Tiempo de uso',keywords:['tiempo','uso','screen time','pantalla','horas']},
+{parent:'salud',title:'Modo enfoque',keywords:['enfoque','focus','concentracion','distraccion']},
+{parent:'salud',title:'Límite diario',keywords:['limite','diario','objetivo','goal']},
 ];
 
 import{t}from'./i18n.js';
 
 const ic=s=>`<div class="item-icon"><img src="assets/${s}" alt=""></div>`;
-const it=(page,icon,key)=>`<div class="item" data-page="${page}" tabindex="0">${ic(icon)}<div class="item-texts"><span class="title">${t(key)}</span><span class="subtitle">${t(key+'_sub')}</span></div></div>`;
+// Earbuds icon for the Home profile-card shortcut — reuses the same SVG art as
+// the Buds page rings (looks clean, never emoji).
+const BUDS_SVG=`<span class="home-buds-pair"><img src="assets/budsleft.svg" alt=""><img src="assets/budsright.svg" alt=""></span>`;
+const it=(page,icon,key)=>`<div class="item" data-page="${page}" tabindex="0" role="button">${ic(icon)}<div class="item-texts"><span class="title">${t(key)}</span><span class="subtitle">${t(key+'_sub')}</span></div></div>`;
 
 export function renderHome(u){
     const name=u?.display_name||'Usuario';
     const ini=name.charAt(0).toUpperCase();
     // Backend inlines the avatar as a data URL — no protocol headaches.
-    const avSrc=u?.avatar_data||(u?.has_avatar?`asset://localhost${u.avatar_path}`:'');
+    const _assetUrl=(p)=>window.__TAURI__?.core?.convertFileSrc?window.__TAURI__.core.convertFileSrc(p):('asset://localhost'+(p.startsWith('/')?p:'/'+p));
+    const avSrc=u?.avatar_data||(u?.has_avatar?_assetUrl(u.avatar_path):'');
     const av=avSrc
         ?`<img src="${avSrc}" class="profile-avatar" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'profile-avatar-placeholder',textContent:'${ini}'}))">`
         :`<div class="profile-avatar-placeholder">${ini}</div>`;
     return `
-<div class="card card-profile"><div class="item" data-page="cuentas" tabindex="0">
-    <div class="profile-left"><span class="title">${name}</span><span class="subtitle">${t('bookos_account')}</span></div>${av}
-</div></div>
+<div class="card card-profile">
+    <div class="item" data-page="cuentas" tabindex="0" role="button">
+        <div class="profile-left"><span class="title">${name}</span><span class="subtitle">${t('bookos_account')}</span></div>${av}
+    </div>
+    <div class="item home-buds-row" id="home-buds" tabindex="0" role="button" style="display:none">
+        <div class="item-icon">${BUDS_SVG}</div>
+        <div class="item-texts"><span class="title home-buds-name"></span></div>
+    </div>
+</div>
 
 <div class="card">
     ${it('conexiones','wifi.svg','connections')}
@@ -195,6 +238,7 @@ export function renderHome(u){
 
 <div class="card">
     ${it('actualizacion','software.svg','updates')}
+    ${it('recuperacion','recovery.svg','recovery')}
     ${it('acerca','about.svg','about')}
 </div>`;
 }

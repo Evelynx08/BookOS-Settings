@@ -1,0 +1,45 @@
+# BookOS DNF repositories — served at https://bookos.es/store-files/bookos.repo
+# Installed to /etc/yum.repos.d/bookos.repo by the Settings app (set_bookos_repo).
+#
+# Three channel repos so `apply_bookos_release` can do:
+#   dnf upgrade --enablerepo=bookos-<channel> --disablerepo=bookos-<others> bookos-meta
+# Each channel hosts its own `bookos-meta` (+ the BookOS package set it Requires:)
+# at the version published in releases.json.
+#
+# Layout matches publish-0.6.sh on the NAS:
+#   https://bookos.es/repo/fedora/<releasever>/<basearch>/<channel>/
+# Today: dev = live (bookos-meta 0.6-1.fc44). stable/beta = 404 until published.
+#
+# Keep the original [bookos] app repo too (modified libfprint, BookOS apps).
+
+[bookos]
+name=BookOS Apps
+baseurl=https://bookos.es/store-files/
+enabled=1
+gpgcheck=0
+metadata_expire=300
+skip_if_unavailable=True
+
+[bookos-stable]
+name=BookOS Release - Stable
+baseurl=https://bookos.es/repo/fedora/$releasever/$basearch/stable/
+enabled=1
+gpgcheck=0
+metadata_expire=300
+skip_if_unavailable=True
+
+[bookos-beta]
+name=BookOS Release - Beta
+baseurl=https://bookos.es/repo/fedora/$releasever/$basearch/beta/
+enabled=0
+gpgcheck=0
+metadata_expire=300
+skip_if_unavailable=True
+
+[bookos-dev]
+name=BookOS Release - Dev
+baseurl=https://bookos.es/repo/fedora/$releasever/$basearch/dev/
+enabled=0
+gpgcheck=0
+metadata_expire=300
+skip_if_unavailable=True
