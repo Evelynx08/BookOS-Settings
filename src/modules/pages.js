@@ -596,7 +596,7 @@ export async function renderPantalla(c){
         card.addEventListener('click',async()=>{
             const isDark=card.dataset.mode==='dark';
             const kcsT=await tauriInvoke('get_kde_light_dark_themes').then(JSON.parse).catch(()=>({light:'',dark:'',is_global:false}));
-            const name=isDark?(kcsT.dark||'BookOS Dark'):(kcsT.light||'BookOS Light');
+            const name=isDark?(kcsT.dark||'BookOS-Dark'):(kcsT.light||'BookOS-Light');
             try{await tauriInvoke('apply_kde_theme',{name,isGlobal:kcsT.is_global});}catch(e){}
             document.documentElement.className=isDark?'dark-mode':'light-mode';
             document.querySelectorAll('.display-mode-card').forEach(x=>x.classList.remove('active'));
@@ -2092,7 +2092,7 @@ export async function renderSeguridad(c){
 // ════════════════════════════════════════════════════════════════════════
 export async function renderTemas(c){
     c.innerHTML=renderHeader(t('hdr_themes'))+renderSkeleton(3);
-    let theme={scheme:'',is_dark:false},themes=[],schedule={enabled:false,light_time:'07:00',dark_time:'20:00',light_theme:'BookOS Light',dark_theme:'BookOS Dark'};
+    let theme={scheme:'',is_dark:false},themes=[],schedule={enabled:false,light_time:'07:00',dark_time:'20:00',light_theme:'BookOS-Light',dark_theme:'BookOS-Dark'};
     let kcsT={light:'',dark:'',is_global:false};
     try{[theme,themes,schedule,kcsT]=await Promise.all([
         tauriInvoke('get_current_theme').then(JSON.parse),
@@ -2173,7 +2173,7 @@ export async function renderTemas(c){
 
     // Light / Dark mode swatches
     const _applyMode=async dark_=>{
-        const name=dark_?(kcsT.dark||dark[0]?.name||'BookOS Dark'):(kcsT.light||light[0]?.name||'BookOS Light');
+        const name=dark_?(kcsT.dark||dark[0]?.name||'BookOS-Dark'):(kcsT.light||light[0]?.name||'BookOS-Light');
         try{await tauriInvoke('apply_kde_theme',{name,isGlobal:kcsT.is_global})}catch(e){}
         document.documentElement.className=dark_?'dark-mode':'light-mode';
         toast(dark_?'Modo oscuro activado':'Modo claro activado');
@@ -2231,15 +2231,15 @@ export async function renderTemas(c){
 async function saveSchedule(enabled,from){
     const lt=from?.light_time||document.getElementById('sched-lt')?.value||'07:00';
     const dt=from?.dark_time||document.getElementById('sched-dt')?.value||'20:00';
-    const ltheme=from?.light_theme||document.getElementById('sched-ltheme')?.value||'BookOS Light';
-    const dtheme=from?.dark_theme||document.getElementById('sched-dtheme')?.value||'BookOS Dark';
+    const ltheme=from?.light_theme||document.getElementById('sched-ltheme')?.value||'BookOS-Light';
+    const dtheme=from?.dark_theme||document.getElementById('sched-dtheme')?.value||'BookOS-Dark';
     try{await tauriInvoke('set_theme_schedule',{enabled,light_time:lt,dark_time:dt,light_theme:ltheme,dark_theme:dtheme});}catch(e){}
 }
 
 // ── Dark/Light mode settings sub-page (automatic schedule) ──
 export async function renderModeSettings(c){
     c.innerHTML=renderHeader('Ajustes del modo Oscuro/Claro')+renderSkeleton(1);
-    let schedule={enabled:false,light_time:'07:00',dark_time:'20:00',light_theme:'BookOS Light',dark_theme:'BookOS Dark'};
+    let schedule={enabled:false,light_time:'07:00',dark_time:'20:00',light_theme:'BookOS-Light',dark_theme:'BookOS-Dark'};
     let themes=[];
     try{[schedule,themes]=await Promise.all([
         tauriInvoke('get_theme_schedule').then(JSON.parse),
@@ -4222,7 +4222,7 @@ export async function renderFondos(c){
     const time = today.toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'});
     const date = today.toLocaleDateString('es-ES',{weekday:'short',day:'numeric',month:'short'});
 
-    // Panel colors matching BookOS Dark/Light theme
+    // Panel colors matching BookOS-Dark/Light theme
     const panelBg=isDark?'rgba(20,20,22,0.92)':'rgba(248,248,252,0.92)';
     const panelBorder=isDark?'rgba(255,255,255,0.07)':'rgba(0,0,0,0.08)';
     const panelTx=isDark?'#ffffff':'#1c1c1e';

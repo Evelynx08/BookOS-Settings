@@ -1667,7 +1667,7 @@ fn get_kv_pt(cfg: &serde_json::Value, is_dark: bool) -> (String, String) {
     (kv, pt)
 }
 async fn apply_lockscreen_theme(is_dark: bool) {
-    let theme = if is_dark { "BookOS Dark" } else { "BookOS Light" };
+    let theme = if is_dark { "BookOS-Dark" } else { "BookOS-Light" };
     run("kwriteconfig6",&["--file","kscreenlockerrc","--group","Greeter","--key","theme",theme]).await;
 }
 async fn apply_gtk_theme(cfg: &serde_json::Value, is_dark: bool) {
@@ -2835,7 +2835,7 @@ fn detect_pkg_mgr() -> &'static str {
 // The lockscreen QML lives in `/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/`
 // Plasma 6 doesn't honor look-and-feel for lockscreen, so we patch the shell directly.
 // Source files come from /usr/share/bookos-settings/lockscreen/ (installed by package)
-// or fall back to ~/.local/share/plasma/look-and-feel/BookOS Light/contents/lockscreen/.
+// or fall back to ~/.local/share/plasma/look-and-feel/BookOS-Light/contents/lockscreen/.
 const LOCKSCREEN_FILES: &[&str] = &[
     "MainBlock.qml",
     "LockScreenUi.qml",
@@ -2849,7 +2849,7 @@ fn lockscreen_source() -> Option<String> {
     let pkg = "/usr/share/bookos-settings/lockscreen";
     if std::path::Path::new(pkg).is_dir() { return Some(pkg.into()); }
     let home = std::env::var("HOME").ok()?;
-    let local = format!("{}/.local/share/plasma/look-and-feel/BookOS Light/contents/lockscreen", home);
+    let local = format!("{}/.local/share/plasma/look-and-feel/BookOS-Light/contents/lockscreen", home);
     if std::path::Path::new(&local).is_dir() { return Some(local); }
     None
 }
@@ -3158,8 +3158,8 @@ fn lockscreen_source() -> Option<String> {
     let enabled = cfg.get("theme_schedule_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
     let light_time = cfg.get("theme_light_time").and_then(|v| v.as_str()).unwrap_or("07:00").to_string();
     let dark_time = cfg.get("theme_dark_time").and_then(|v| v.as_str()).unwrap_or("20:00").to_string();
-    let light_theme = cfg.get("theme_light").and_then(|v| v.as_str()).unwrap_or("BookOS Light").to_string();
-    let dark_theme = cfg.get("theme_dark").and_then(|v| v.as_str()).unwrap_or("BookOS Dark").to_string();
+    let light_theme = cfg.get("theme_light").and_then(|v| v.as_str()).unwrap_or("BookOS-Light").to_string();
+    let dark_theme = cfg.get("theme_dark").and_then(|v| v.as_str()).unwrap_or("BookOS-Dark").to_string();
     format!(r#"{{"enabled":{},"light_time":"{}","dark_time":"{}","light_theme":"{}","dark_theme":"{}"}}"#,
         enabled,esc(&light_time),esc(&dark_time),esc(&light_theme),esc(&dark_theme))
 }
