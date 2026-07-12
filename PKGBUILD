@@ -23,7 +23,7 @@ sha256sums=()
 
 build() {
     cd "${startdir}/src-tauri"
-    cargo build --release
+    cargo build --no-bundle
 }
 
 package() {

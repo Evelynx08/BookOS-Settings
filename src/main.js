@@ -73,6 +73,11 @@ document.addEventListener('DOMContentLoaded',async()=>{
         accesibilidad:'renderAccesibilidad',
         inicio:'renderPantallaInicio'
     };
+    // Páginas directas / aliases usados por los widgets del panel (BookOS-Widgets)
+    pages.wifi='renderWifiPage';          // subpágina Wi-Fi
+    pages.bluetooth='renderBTPage';       // subpágina Bluetooth
+    const pageAliases={red:'conexiones',brillo:'pantalla',volumen:'sonido'};
+    Object.entries(pageAliases).forEach(([a,t])=>{ if(!pages[a]) pages[a]=pages[t]; });
     // Resolve+invoke a page renderer, loading the renderers module on first use.
     // The guarded container drops writes if the user navigated away meanwhile.
     function renderPage(id,container){

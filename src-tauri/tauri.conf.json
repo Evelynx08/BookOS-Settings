@@ -14,7 +14,13 @@
     "security": {
       "assetProtocol": {
         "enable": true,
-        "scope": ["**", "/**", "$HOME/**", "/usr/share/wallpapers/**", "/usr/share/backgrounds/**"]
+        "scope": [
+          "**",
+          "/**",
+          "$HOME/**",
+          "/usr/share/wallpapers/**",
+          "/usr/share/backgrounds/**"
+        ]
       },
       "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' asset: http://asset.localhost https://asset.localhost; img-src 'self' asset: http://asset.localhost https://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'"
     },
@@ -38,68 +44,82 @@
       "../src/assets/settings.png",
       "../src/assets/settings.svg"
     ],
-    "targets": ["deb", "rpm"],
+    "targets": [
+      "deb",
+      "rpm"
+    ],
     "publisher": "BookOS",
     "homepage": "https://github.com/Evelynx08/BookOS-Settings",
     "category": "Utility",
     "linux": {
       "deb": {
-        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "python3", "python3-venv"],
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "python3",
+          "python3-venv"
+        ],
         "files": {
-          "/opt/bookos-ai/train.py":   "extra/ai/train.py",
+          "/opt/bookos-ai/train.py": "extra/ai/train.py",
           "/opt/bookos-ai/predict.py": "extra/ai/predict.py",
-          "/opt/bookos-ai/setup.sh":   "extra/ai/setup.sh",
+          "/opt/bookos-ai/setup.sh": "extra/ai/setup.sh",
           "/usr/lib/systemd/system/bookos-battery-train.service": "extra/ai/bookos-battery-train.service",
-          "/usr/lib/systemd/system/bookos-battery-train.timer":   "extra/ai/bookos-battery-train.timer",
-          "/usr/share/bookos-settings/lockscreen/MainBlock.qml":     "extra/lockscreen/MainBlock.qml",
-          "/usr/share/bookos-settings/lockscreen/LockScreenUi.qml":  "extra/lockscreen/LockScreenUi.qml",
-          "/usr/share/bookos-settings/lockscreen/BookBar.qml":       "extra/lockscreen/BookBar.qml",
+          "/usr/lib/systemd/system/bookos-battery-train.timer": "extra/ai/bookos-battery-train.timer",
+          "/usr/share/bookos-settings/lockscreen/MainBlock.qml": "extra/lockscreen/MainBlock.qml",
+          "/usr/share/bookos-settings/lockscreen/LockScreenUi.qml": "extra/lockscreen/LockScreenUi.qml",
+          "/usr/share/bookos-settings/lockscreen/BookBar.qml": "extra/lockscreen/BookBar.qml",
           "/usr/share/bookos-settings/lockscreen/MediaControls.qml": "extra/lockscreen/MediaControls.qml",
-          "/usr/share/bookos-settings/sddm-theme/Main.qml":         "extra/sddm-theme/Main.qml",
+          "/usr/share/bookos-settings/sddm-theme/Main.qml": "extra/sddm-theme/Main.qml",
           "/usr/share/bookos-settings/sddm-theme/metadata.desktop": "extra/sddm-theme/metadata.desktop",
-          "/usr/share/bookos-settings/sddm-theme/theme.conf":       "extra/sddm-theme/theme.conf",
-          "/usr/share/bookos-settings/sddm-theme/icons/charging.svg":          "extra/sddm-theme/icons/charging.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/like-song.svg":         "extra/sddm-theme/icons/like-song.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/liked-song.svg":        "extra/sddm-theme/icons/liked-song.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/play.svg":              "extra/sddm-theme/icons/play.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/pause.svg":             "extra/sddm-theme/icons/pause.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/previous-track.svg":    "extra/sddm-theme/icons/previous-track.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/next-track.svg":        "extra/sddm-theme/icons/next-track.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/random.svg":            "extra/sddm-theme/icons/random.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/random-selected.svg":   "extra/sddm-theme/icons/random-selected.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/control-bookbuds.svg":  "extra/sddm-theme/icons/control-bookbuds.svg"
+          "/usr/share/bookos-settings/sddm-theme/theme.conf": "extra/sddm-theme/theme.conf",
+          "/usr/share/bookos-settings/sddm-theme/icons/charging.svg": "extra/sddm-theme/icons/charging.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/like-song.svg": "extra/sddm-theme/icons/like-song.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/liked-song.svg": "extra/sddm-theme/icons/liked-song.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/play.svg": "extra/sddm-theme/icons/play.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/pause.svg": "extra/sddm-theme/icons/pause.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/previous-track.svg": "extra/sddm-theme/icons/previous-track.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/next-track.svg": "extra/sddm-theme/icons/next-track.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/random.svg": "extra/sddm-theme/icons/random.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/random-selected.svg": "extra/sddm-theme/icons/random-selected.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/control-bookbuds.svg": "extra/sddm-theme/icons/control-bookbuds.svg"
         },
-        "preInstallScript":  "extra/scripts/deb-postinst",
+        "preInstallScript": "extra/scripts/deb-postinst",
         "postInstallScript": "extra/scripts/deb-postinst",
-        "preRemoveScript":   "extra/scripts/deb-prerm",
-        "postRemoveScript":  "extra/scripts/deb-postrm"
+        "preRemoveScript": "extra/scripts/deb-prerm",
+        "postRemoveScript": "extra/scripts/deb-postrm",
+        "desktopTemplate": "linux/desktop.hbs"
       },
       "rpm": {
-        "depends": ["webkit2gtk4.1", "gtk3", "python3"],
+        "depends": [
+          "webkit2gtk4.1",
+          "gtk3",
+          "python3"
+        ],
         "files": {
-          "/opt/bookos-ai/train.py":   "extra/ai/train.py",
+          "/opt/bookos-ai/train.py": "extra/ai/train.py",
           "/opt/bookos-ai/predict.py": "extra/ai/predict.py",
-          "/opt/bookos-ai/setup.sh":   "extra/ai/setup.sh",
+          "/opt/bookos-ai/setup.sh": "extra/ai/setup.sh",
           "/usr/lib/systemd/system/bookos-battery-train.service": "extra/ai/bookos-battery-train.service",
-          "/usr/lib/systemd/system/bookos-battery-train.timer":   "extra/ai/bookos-battery-train.timer",
-          "/usr/share/bookos-settings/lockscreen/MainBlock.qml":     "extra/lockscreen/MainBlock.qml",
-          "/usr/share/bookos-settings/lockscreen/LockScreenUi.qml":  "extra/lockscreen/LockScreenUi.qml",
-          "/usr/share/bookos-settings/lockscreen/BookBar.qml":       "extra/lockscreen/BookBar.qml",
+          "/usr/lib/systemd/system/bookos-battery-train.timer": "extra/ai/bookos-battery-train.timer",
+          "/usr/share/bookos-settings/lockscreen/MainBlock.qml": "extra/lockscreen/MainBlock.qml",
+          "/usr/share/bookos-settings/lockscreen/LockScreenUi.qml": "extra/lockscreen/LockScreenUi.qml",
+          "/usr/share/bookos-settings/lockscreen/BookBar.qml": "extra/lockscreen/BookBar.qml",
           "/usr/share/bookos-settings/lockscreen/MediaControls.qml": "extra/lockscreen/MediaControls.qml",
-          "/usr/share/bookos-settings/sddm-theme/Main.qml":         "extra/sddm-theme/Main.qml",
+          "/usr/share/bookos-settings/sddm-theme/Main.qml": "extra/sddm-theme/Main.qml",
           "/usr/share/bookos-settings/sddm-theme/metadata.desktop": "extra/sddm-theme/metadata.desktop",
-          "/usr/share/bookos-settings/sddm-theme/theme.conf":       "extra/sddm-theme/theme.conf",
-          "/usr/share/bookos-settings/sddm-theme/icons/charging.svg":          "extra/sddm-theme/icons/charging.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/like-song.svg":         "extra/sddm-theme/icons/like-song.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/liked-song.svg":        "extra/sddm-theme/icons/liked-song.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/play.svg":              "extra/sddm-theme/icons/play.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/pause.svg":             "extra/sddm-theme/icons/pause.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/previous-track.svg":    "extra/sddm-theme/icons/previous-track.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/next-track.svg":        "extra/sddm-theme/icons/next-track.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/random.svg":            "extra/sddm-theme/icons/random.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/random-selected.svg":   "extra/sddm-theme/icons/random-selected.svg",
-          "/usr/share/bookos-settings/sddm-theme/icons/control-bookbuds.svg":  "extra/sddm-theme/icons/control-bookbuds.svg"
-        }
+          "/usr/share/bookos-settings/sddm-theme/theme.conf": "extra/sddm-theme/theme.conf",
+          "/usr/share/bookos-settings/sddm-theme/icons/charging.svg": "extra/sddm-theme/icons/charging.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/like-song.svg": "extra/sddm-theme/icons/like-song.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/liked-song.svg": "extra/sddm-theme/icons/liked-song.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/play.svg": "extra/sddm-theme/icons/play.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/pause.svg": "extra/sddm-theme/icons/pause.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/previous-track.svg": "extra/sddm-theme/icons/previous-track.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/next-track.svg": "extra/sddm-theme/icons/next-track.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/random.svg": "extra/sddm-theme/icons/random.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/random-selected.svg": "extra/sddm-theme/icons/random-selected.svg",
+          "/usr/share/bookos-settings/sddm-theme/icons/control-bookbuds.svg": "extra/sddm-theme/icons/control-bookbuds.svg"
+        },
+        "desktopTemplate": "linux/desktop.hbs"
       }
     }
   }

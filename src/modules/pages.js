@@ -172,7 +172,7 @@ async function renderEthernetDetailPage(c){
 }
 
 // ── Wi-Fi subpage ──
-async function renderWifiPage(c){
+export async function renderWifiPage(c){
     c.innerHTML=renderHeader(t('hdr_wifi'))+renderSkeleton(2);
     let w={enabled:false,ssid:''};
     try{w=JSON.parse(await tauriInvoke('get_wifi_status'));}catch(e){}
@@ -219,7 +219,7 @@ async function renderWifiPage(c){
 }
 
 // ── Bluetooth subpage ──
-async function renderBTPage(c){
+export async function renderBTPage(c){
     c.innerHTML=renderHeader(t('hdr_bluetooth'))+renderSkeleton(2);
     let bt={enabled:false};
     try{bt=JSON.parse(await tauriInvoke('get_bluetooth_status'));}catch(e){}
@@ -1939,6 +1939,16 @@ export async function renderNotificaciones(c){
     }catch(e){}
     const updNotif=(await getSetting('UpdateNotifications','true'))!=='false';
 
+    // Popups BookOS (~/.config/bookos-notificationsrc, compartido con el widget)
+    const bnRead=(key,def)=>tauriInvoke('run_command',{cmd:'kreadconfig6',args:['--file','bookos-notificationsrc','--group','Popups','--key',key,'--default',def]}).then(v=>v.trim()).catch(()=>def);
+    const bnWrite=(key,val)=>tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','bookos-notificationsrc','--group','Popups','--key',key,String(val)]}).catch(()=>{});
+    let bnEnabled='true',bnTimeout='6',bnCountdown='true',bnPosition='bottomright',bnTheme='auto';
+    try{
+        [bnEnabled,bnTimeout,bnCountdown,bnPosition,bnTheme]=await Promise.all([
+            bnRead('Enabled','true'),bnRead('Timeout','6'),bnRead('ShowCountdown','true'),bnRead('Position','bottomright'),bnRead('Theme','auto'),
+        ]);
+    }catch(e){}
+
     let h=renderHeader(t('hdr_notifications'));
     h+=renderSection(t('sec_general'));
     h+=renderCard([
@@ -1949,6 +1959,19 @@ export async function renderNotificaciones(c){
     h+=renderSection('BookOS');
     h+=renderCard([
         renderRowItem('Avisos de actualizaciones','Notificar cuando haya actualizaciones de BookOS o paquetes',renderToggle('notif-updates',updNotif)),
+    ]);
+    h+=renderSection('Ventanas emergentes (BookOS)');
+    const bnPosOpts=[['bottomright','Abajo a la derecha'],['bottomleft','Abajo a la izquierda'],['topright','Arriba a la derecha'],['topleft','Arriba a la izquierda'],['topcenter','Arriba centrado']]
+        .map(([v,l])=>`<option value="${v}" ${v===bnPosition?'selected':''}>${l}</option>`).join('');
+    const bnTimeOpts=[0,3,5,6,8,10,15,30].map(s=>`<option value="${s}" ${String(s)===bnTimeout?'selected':''}>${s===0?'Nunca':s+' s'}</option>`).join('');
+    const bnThemeOpts=[['auto','Automático'],['light','Claro'],['dark','Oscuro']]
+        .map(([v,l])=>`<option value="${v}" ${v===bnTheme?'selected':''}>${l}</option>`).join('');
+    h+=renderCard([
+        renderRowItem('Notificaciones emergentes','Popups estilo BookOS al recibir notificaciones',renderToggle('bn-enabled',bnEnabled!=='false')),
+        `<div class="detail-item"><span class="dt">Posición en pantalla</span><select class="sel" id="bn-position" style="margin-top:8px">${bnPosOpts}</select></div>`,
+        `<div class="detail-item"><span class="dt">Cerrar automáticamente tras</span><select class="sel" id="bn-timeout" style="margin-top:8px">${bnTimeOpts}</select></div>`,
+        renderRowItem('Barra de cuenta atrás','Muestra cuándo se cerrará el popup',renderToggle('bn-countdown',bnCountdown!=='false')),
+        `<div class="detail-item"><span class="dt">Tema de los popups</span><select class="sel" id="bn-theme" style="margin-top:8px">${bnThemeOpts}</select></div>`,
     ]);
     h+=renderSection(t('sec_audio'));
     h+=renderCard([
@@ -1976,6 +1999,26 @@ export async function renderNotificaciones(c){
     setupToggle('notif-updates',async a=>{
         setSetting('UpdateNotifications',a?'true':'false');
         toast(a?'Avisos de actualizaciones activados':'Avisos de actualizaciones desactivados');
+    });
+    setupToggle('bn-enabled',async a=>{
+        await bnWrite('Enabled',a);
+        toast(a?'Popups BookOS activados':'Popups BookOS desactivados','🔔');
+    });
+    setupToggle('bn-countdown',async a=>{
+        await bnWrite('ShowCountdown',a);
+        toast(a?'Cuenta atrás visible':'Cuenta atrás oculta');
+    });
+    document.getElementById('bn-position')?.addEventListener('change',async e=>{
+        await bnWrite('Position',e.target.value);
+        toast('Posición actualizada');
+    });
+    document.getElementById('bn-timeout')?.addEventListener('change',async e=>{
+        await bnWrite('Timeout',e.target.value);
+        toast('Duración actualizada');
+    });
+    document.getElementById('bn-theme')?.addEventListener('change',async e=>{
+        await bnWrite('Theme',e.target.value);
+        toast('Tema de popups actualizado');
     });
     setupToggle('notif-snd',async a=>{
         try{await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','plasmanotifyrc','--group','Notifications','--key','Sound',a?'true':'false']});}catch(e){}
