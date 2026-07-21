@@ -64,6 +64,8 @@ document.addEventListener('DOMContentLoaded',async()=>{
         general:'renderGeneral',cuentas:'renderCuentas',mantenimiento:'renderMantenimiento',
         seguridad:'renderSeguridad',fondos:'renderFondos',aplicaciones:'renderAplicaciones',
         dispositivos:'renderDispositivos',
+        teclado:'renderTeclado',
+        touchpadmouse:'renderTouchpadMouse',
         ai:'renderAI',
         modos:'renderModos',
         ubicacion:'renderUbicacion',
@@ -189,11 +191,16 @@ document.addEventListener('DOMContentLoaded',async()=>{
     }
     // Extends goBack: handles callback-based sub-page entries pushed via pushSubNav
     function goBackExt(){
-        const epoch=(window._navEpoch=(window._navEpoch||0)+1);
         clearPageIntervals();
         if(!_navHistory.length){app.innerHTML='';sb.querySelectorAll('.item').forEach(i=>i.classList.remove('active-item'));return;}
         const prev=_navHistory.pop();
+        // Sub-page pop: do NOT bump the epoch here — the callback re-renders the
+        // parent through the guarded container it closed over, which was created
+        // with the epoch still current. Bumping first made that container stale,
+        // so the parent render was silently dropped and the next back-press
+        // jumped to the wrong page.
         if(prev&&typeof prev==='object'&&prev._subNav){_playTransition(true);prev.fn();return;}
+        const epoch=(window._navEpoch=(window._navEpoch||0)+1);
         const curId=sb.querySelector('.item.active-item')?.dataset?.page;
         if(curId){_rememberScroll(curId);_fwdHistory.push(curId);if(_fwdHistory.length>15)_fwdHistory.shift();}
         sb.querySelectorAll('.item').forEach(i=>i.classList.remove('active-item'));
@@ -285,6 +292,8 @@ document.addEventListener('DOMContentLoaded',async()=>{
 
     // ── Search ──
     const sIn=document.getElementById('search-in'),sX=document.getElementById('search-x'),noR=document.getElementById('no-res');
+    // Prefetch pages.js on first focus so window._tr is ready for sub-results.
+    sIn?.addEventListener('focus',()=>{_loadPages();},{once:true});
     sIn?.addEventListener('input',()=>{const v=sIn.value.length>0;if(sX)sX.style.visibility=v?'visible':'hidden';filter(sIn.value.toLowerCase().trim());});
     sIn?.addEventListener('keydown',e=>{if(e.key==='Escape'){sIn.value='';if(sX)sX.style.visibility='hidden';filter('');}});
     sX?.addEventListener('click',()=>{sIn.value='';if(sX)sX.style.visibility='hidden';filter('');sIn.focus();});
@@ -322,7 +331,10 @@ document.addEventListener('DOMContentLoaded',async()=>{
         }).slice(0,12);
         if(subMatches.length){
             const labelOf=id=>searchIndex.find(x=>x.id===id)?.title||id;
-            subCard.innerHTML=subMatches.map(s=>`<div class="item sub-result-item" data-page="${s.parent}" tabindex="0"><div class="item-icon sub-result-ic">›</div><div class="item-texts"><span class="title">${s.title}</span><span class="subtitle">en ${labelOf(s.parent)}</span></div></div>`).join('');
+            // _tr (literal ES→EN dict) lives in pages/_common.js; identity until it loads.
+            const trf=window._tr||(x=>x);
+            const inWord=getLang()==='es'?'en':'in';
+            subCard.innerHTML=subMatches.map(s=>`<div class="item sub-result-item" data-page="${s.page||s.parent}" tabindex="0"><div class="item-icon sub-result-ic">›</div><div class="item-texts"><span class="title">${trf(s.title)}</span><span class="subtitle">${inWord} ${trf(labelOf(s.parent))}</span></div></div>`).join('');
             subCard.style.display='';
             any=true;
         }else{
@@ -626,6 +638,7 @@ document.addEventListener('DOMContentLoaded',async()=>{
     // Buds auto-reconnect: every 15s ask backend to reconnect any saved buds
     // marked with auto_reconnect=true if they're in range. Cheap no-op when already connected.
     setInterval(async()=>{
+        if(!localStorage.getItem('buds_last_mac'))return;
         try{await tauriInvoke('buds_try_auto_reconnect');}catch(e){}
     },15000);
 

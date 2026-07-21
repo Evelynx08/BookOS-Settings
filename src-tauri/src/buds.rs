@@ -503,28 +503,20 @@ pub fn update_prefs<F: FnOnce(&mut BudsPrefs)>(mac: &str, f: F) {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-/// Detect whether the device uses legacy header format by reading bluetoothctl info.
-fn detect_legacy(mac: &str) -> bool {
+/// Detect whether the device uses legacy header format, via BlueZ Device1.UUIDs.
+async fn detect_legacy(mac: &str) -> bool {
     // Original Buds have UUID 00001102-0000-1000-8000-00805f9b34fd
     // All others use 00001101 or the proprietary 2e73a4ad UUID
-    let out = std::process::Command::new("bluetoothctl")
-        .args(["info", mac])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
-    out.contains("00001102-0000-1000-8000-00805f9b34fd")
+    crate::bluez_profile::device_uuids(mac)
+        .await
+        .iter()
+        .any(|u| u.eq_ignore_ascii_case("00001102-0000-1000-8000-00805f9b34fd"))
 }
 
-/// Extract model name from bluetoothctl info output.
-fn detect_model_name(mac: &str) -> String {
-    let out = std::process::Command::new("bluetoothctl")
-        .args(["info", mac])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
-    out.lines()
-        .find(|l| l.trim_start().starts_with("Name:"))
-        .map(|l| l.split(':').skip(1).collect::<Vec<_>>().join(":").trim().to_string())
+/// Model name via BlueZ Device1.Name.
+async fn detect_model_name(mac: &str) -> String {
+    crate::bluez_profile::device_name(mac)
+        .await
         .unwrap_or_else(|| "Galaxy Buds".to_string())
 }
 
@@ -539,8 +531,8 @@ pub async fn buds_connect(
 ) -> Result<String, String> {
     let mac_clone = mac.clone();
 
-    let legacy_sync = detect_legacy(&mac_clone);
-    let model_sync  = detect_model_name(&mac_clone);
+    let legacy_sync = detect_legacy(&mac_clone).await;
+    let model_sync  = detect_model_name(&mac_clone).await;
 
     // Preferred native path: BlueZ Profile1 registration + ConnectProfile.
     // Works for the Samsung proprietary UUID without relying on GalaxyBudsClient.
@@ -843,23 +835,21 @@ pub fn buds_set_auto_reconnect(mac: String, enable: bool) -> String {
 //   {"action":"disconnect"} — caller should disconnect
 //   {"action":"none"}
 #[tauri::command]
-pub fn buds_audio_switch_check(mac: String) -> String {
+pub async fn buds_audio_switch_check(mac: String) -> String {
     let prefs = get_prefs(&mac);
     if !prefs.auto_reconnect { return r#"{"action":"none"}"#.into(); }
 
     // PipeWire/PulseAudio: any active sink-input means something is playing.
+    // No stable system-bus API for this without module-dbus-protocol loaded
+    // (not on by default), so this one stays a subprocess call.
     let playing = std::process::Command::new("pactl")
         .args(["list", "sink-inputs", "short"])
         .output()
         .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
         .unwrap_or(false);
 
-    // BlueZ Connected state for our buds.
-    let connected = std::process::Command::new("bluetoothctl")
-        .args(["info", &mac])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("Connected: yes"))
-        .unwrap_or(false);
+    // BlueZ Connected state for our buds — via DBus, no subprocess.
+    let connected = crate::bluez_profile::is_device_connected(&mac).await;
 
     // State tracked across calls (idle counter).
     use std::sync::Mutex as StdMutex;
@@ -898,11 +888,7 @@ pub async fn buds_try_auto_reconnect(state: tauri::State<'_, BudsState>) -> Resu
     let prefs = load_all_prefs();
     for (mac, p) in prefs.iter() {
         if !p.auto_reconnect { continue; }
-        let ok = std::process::Command::new("bluetoothctl")
-            .args(["info", mac])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("Connected: yes"))
-            .unwrap_or(false);
+        let ok = crate::bluez_profile::is_device_connected(mac).await;
         if !ok { continue; }
         // Delegate to buds_connect via direct call
         let res = buds_connect(mac.clone(), state.clone()).await;

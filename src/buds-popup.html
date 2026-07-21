@@ -50,6 +50,15 @@
   <div id="card"></div>
 <script>
   const q = new URLSearchParams(location.search);
+  // Standalone window (no i18n.js import) — same-origin localStorage carries
+  // the app language; resolve like i18n.js does (override, else system locale).
+  const _lang = (()=>{ try{
+      const s = localStorage.getItem('bookos_lang');
+      if (s && s !== 'auto') return s.startsWith('es') ? 'es' : 'en';
+  }catch(e){} return (navigator.language||'en').toLowerCase().startsWith('es') ? 'es' : 'en'; })();
+  const TXT = _lang === 'es'
+    ? { dismiss:'Descartar', connect:'Conectar', connecting:'Conectando…' }
+    : { dismiss:'Dismiss',  connect:'Connect',  connecting:'Connecting…' };
   const NAME = q.get('name') || 'Buds';
   const MAC  = q.get('mac')  || '';
   let   STATE = q.get('state') || 'connect';
@@ -85,8 +94,8 @@
       leftSlot  = ring(budsPct());
       rightSlot = ring(C);
     } else {
-      leftSlot  = `<button class="btn dismiss" id="b-dismiss">Descartar</button>`;
-      rightSlot = `<button class="btn connect" id="b-connect">Conectar</button>`;
+      leftSlot  = `<button class="btn dismiss" id="b-dismiss">${TXT.dismiss}</button>`;
+      rightSlot = `<button class="btn connect" id="b-connect">${TXT.connect}</button>`;
     }
     document.getElementById('card').innerHTML = `
       <div id="title">${NAME.replace(/[<>&]/g,'')}</div>
@@ -109,7 +118,7 @@
     document.getElementById('b-dismiss')?.addEventListener('click', closeWin);
     document.getElementById('b-connect')?.addEventListener('click', async ()=>{
       const btn = document.getElementById('b-connect');
-      btn.textContent='Conectando…'; btn.disabled=true;
+      btn.textContent=TXT.connecting; btn.disabled=true;
       try{
         await inv('buds_connect', { mac: MAC });
         // poll status a few times for the extended-status battery reply

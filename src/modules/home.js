@@ -1,6 +1,9 @@
 export const searchIndex=[
 {id:'conexiones',title:'Conexiones',subtitle:'WiFi · Bluetooth · Modo Avión',keywords:['wifi','red','internet','bluetooth','avion','conexion','network','connections','airplane','ethernet','cable','wired']},
 {id:'dispositivos',title:'Dispositivos conectados',subtitle:'Share · Buds',keywords:['dispositivo','compartir','share','buds','devices','connected','nearby','headphones','earbuds']},
+{id:'recuperacion',title:'Recuperación',subtitle:'Capturas · Revertir',keywords:['recuperacion','recovery','snapshot','captura','revertir','rollback','btrfs','snapper','restaurar','backup']},
+{id:'teclado',title:'Teclado',subtitle:'Distribución · Atajos · Repetición',keywords:['teclado','keyboard','distribucion','layout','atajos','shortcuts','teclas','repeticion','krunner']},
+{id:'touchpadmouse',title:'Touchpad y ratón',subtitle:'Sensibilidad · Botones · Velocidad',keywords:['touchpad','raton','mouse','tactil','panel','gestos','tap','scroll','puntero','botones','velocidad','aceleracion']},
 {id:'ai',title:'AI',subtitle:'Asistente de escritura · notas',keywords:['ai','inteligencia','asistente','assistant','search','semantic','busqueda']},
 {id:'modos',title:'Modos y rutinas',subtitle:'Modos · Rutinas',keywords:['modo','rutina','modes','routines','automation','automatizacion']},
 {id:'sonido',title:'Sonido',subtitle:'Volumen · Salida',keywords:['sonido','volumen','audio','silencio','salida','sound','volume','mute','output','balance']},
@@ -12,8 +15,6 @@ export const searchIndex=[
 {id:'fondos',title:'Fondo de pantalla',subtitle:'Fondos · Paleta',keywords:['fondo','wallpaper','paleta','background','palette','accent','color']},
 {id:'temas',title:'Temas',subtitle:'Temas · Modo oscuro',keywords:['tema','oscuro','claro','dark','light','themes','theme','mode']},
 {id:'seguridad',title:'Seguridad y privacidad',subtitle:'Firewall · Permisos',keywords:['seguridad','privacidad','permiso','firewall','ufw','security','privacy','permissions','camera','microphone']},
-{id:'ubicacion',title:'Ubicación',subtitle:'Solicitudes',keywords:['ubicacion','gps','location']},
-{id:'emergencia',title:'Seguridad y emergencia',subtitle:'Datos médicos',keywords:['emergencia','medico','emergency','medical','sos']},
 {id:'cuentas',title:'Cuentas',subtitle:'Perfil · Nombre · Hostname',keywords:['cuenta','perfil','nombre','hostname','account','profile','name','password','user']},
 {id:'avanzadas',title:'Funciones avanzadas',subtitle:'Labs',keywords:['avanzado','labs','advanced','experimental','compositor','effects']},
 {id:'salud',title:'Salud digital',subtitle:'Tiempo de uso',keywords:['salud','digital','uso','wellbeing','screen time','usage','focus']},
@@ -22,12 +23,22 @@ export const searchIndex=[
 {id:'general',title:'Administración general',subtitle:'Idioma · Teclado · Fecha',keywords:['idioma','teclado','fecha','hora','keyboard','general','language','date','time','locale','shortcuts','atajos','autostart']},
 {id:'accesibilidad',title:'Accesibilidad',subtitle:'Visión · Audición',keywords:['accesibilidad','vision','zoom','accessibility','cursor','font','invert','contrast']},
 {id:'actualizacion',title:'Actualización de software',subtitle:'Sistema · Flatpak',keywords:['actualizar','update','paru','pacman','flatpak','updates','software','upgrade','dnf','channel','canal']},
-{id:'recuperacion',title:'Recuperación',subtitle:'Capturas · Revertir',keywords:['recuperacion','recovery','snapshot','captura','revertir','rollback','btrfs','snapper','restaurar','backup']},
 {id:'acerca',title:'Acerca del portátil',subtitle:'Hardware · Info',keywords:['acerca','about','info','kernel','plasma','hardware','version']},
 ];
 
-// Granular sub-settings index — each entry points to its parent page
+// Granular sub-settings index — each entry points to its parent page.
+// Optional `page` field: navigate directly to that page instead of the parent
+// (used by full pages demoted from the sidebar into a section of another page).
 export const subSearchIndex=[
+// Funciones nuevas (sub-páginas dentro de páginas existentes)
+{parent:'pantalla',title:'Pantallas externas',keywords:['monitor','externo','hdmi','proyector','multimonitor','duplicar','extender','display']},
+{parent:'bateria',title:'Opciones avanzadas de energía',keywords:['tapa','lid','suspender','suspension','inactividad','critica','energia','apagar']},
+{parent:'temas',title:'Tema del cursor',keywords:['cursor','puntero','tema','breeze']},
+{parent:'temas',title:'Iconos del sistema',keywords:['iconos','icons','papirus','breeze','tema']},
+{parent:'teclado',title:'Atajos de teclado',keywords:['atajos','shortcuts','combinacion','captura']},
+// Páginas fusionadas en Seguridad / Actualización (sin entrada propia en sidebar)
+{parent:'seguridad',page:'ubicacion',title:'Ubicación',keywords:['ubicacion','gps','location']},
+{parent:'seguridad',page:'emergencia',title:'Seguridad y emergencia',keywords:['emergencia','medico','emergency','medical','sos']},
 // Pantalla
 {parent:'pantalla',title:'Brillo',keywords:['brillo','brightness','luminosidad']},
 {parent:'pantalla',title:'Modo oscuro',keywords:['oscuro','dark','noche','tema']},
@@ -84,7 +95,7 @@ export const subSearchIndex=[
 {parent:'cuentas',title:'Avatar',keywords:['avatar','foto','imagen','perfil']},
 // General
 {parent:'general',title:'Idioma',keywords:['idioma','language','lenguaje','locale']},
-{parent:'general',title:'Distribución de teclado',keywords:['teclado','keyboard','distribucion','layout']},
+{parent:'teclado',title:'Distribución de teclado',keywords:['teclado','keyboard','distribucion','layout']},
 {parent:'general',title:'Fecha y hora',keywords:['fecha','hora','date','time','zona']},
 {parent:'general',title:'Página de inicio',keywords:['inicio','startup','arranque','default']},
 // Mantenimiento
@@ -216,12 +227,6 @@ export function renderHome(u){
 
 <div class="card">
     ${it('seguridad','security.svg','security')}
-    ${it('ubicacion','location.svg','location')}
-    ${it('emergencia','emergency.svg','emergency')}
-</div>
-
-<div class="card">
-    ${it('cuentas','accounts.svg','accounts')}
     ${it('avanzadas','advanced.svg','advanced')}
 </div>
 
@@ -233,6 +238,8 @@ export function renderHome(u){
 
 <div class="card">
     ${it('general','general.svg','general')}
+    ${it('teclado','keyboard.svg','kb_page')}
+    ${it('touchpadmouse','touchpad.svg','tpm_page')}
     ${it('accesibilidad','accesibility.svg','accessibility')}
 </div>
 

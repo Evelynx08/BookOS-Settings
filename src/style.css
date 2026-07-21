@@ -418,12 +418,15 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 
 /* Skeleton Loaders */
 .skeleton{background:var(--card);border-radius:25px;margin-bottom:16px;overflow:hidden;padding:16px 20px}
-.skeleton-line{height:14px;background:var(--sbg);border-radius:7px;margin-bottom:12px;animation:shimmer 1.5s ease-in-out infinite;background-size:200% 100%;background-image:linear-gradient(90deg,var(--sbg) 25%,var(--hov) 50%,var(--sbg) 75%)}
+/* Shimmer por transform (composicionable) en vez de background-position, que
+   re-rasterizaba cada barra en cada frame justo durante la navegación. */
+.skeleton-line{height:14px;background:var(--sbg);border-radius:7px;margin-bottom:12px;position:relative;overflow:hidden}
+.skeleton-line::after,.skeleton-bar::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent 25%,var(--hov) 50%,transparent 75%);transform:translateX(-100%);animation:shimmerX 1.5s ease-in-out infinite}
 .skeleton-line.w60{width:60%}.skeleton-line.w40{width:40%}.skeleton-line.w80{width:80%}.skeleton-line.w100{width:100%}
 .skeleton-line.thick{height:22px;margin-bottom:16px;border-radius:11px}
 .skeleton-bar-row{display:flex;gap:2px;align-items:flex-end;height:80px;margin-top:10px}
-.skeleton-bar{flex:1;width:3px;background:var(--sbg);border-radius:2px 2px 0 0;animation:shimmer 1.5s ease-in-out infinite;background-size:200% 100%;background-image:linear-gradient(90deg,var(--sbg) 25%,var(--hov) 50%,var(--sbg) 75%);will-change:background-position,transform}
-@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.skeleton-bar{flex:1;width:3px;background:var(--sbg);border-radius:2px 2px 0 0;position:relative;overflow:hidden}
+@keyframes shimmerX{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
 
 /* Toast Notifications */
 .toast-container{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:9999;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none}
@@ -466,7 +469,9 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 #app>div{animation:fadeIn .22s cubic-bezier(0.25,0.46,0.45,0.94);transform-origin:top center}
 #app.page-enter{animation:pageEnter .28s cubic-bezier(0.25,0.46,0.45,0.94)}
 @keyframes pageEnter{from{opacity:.4;transform:translateX(8px)}to{opacity:1;transform:translateX(0)}}
-.detail-card{transform:translateZ(0);will-change:transform}
+/* Sin will-change/translateZ permanentes: fijaban una capa GPU por tarjeta
+   para siempre a cambio de un fadeIn único de 0.2s — el compositor ya
+   promociona capas durante la animación por sí solo. */
 .detail-card:nth-child(1){animation:fadeIn .18s cubic-bezier(0.25,0.46,0.45,0.94)}
 .detail-card:nth-child(2){animation:fadeIn .22s cubic-bezier(0.25,0.46,0.45,0.94) 30ms both}
 .detail-card:nth-child(3){animation:fadeIn .22s cubic-bezier(0.25,0.46,0.45,0.94) 55ms both}
@@ -1091,10 +1096,18 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
     margin: 0 0 12px;
 }
 .release-changelog-link{
+    display:inline-flex;
+    align-items:center;
+    gap:4px;
     color: var(--blue);
     font-size: 14px;
+    font-weight:600;
+    background:none;
+    border:0;
+    padding:6px 0;
+    cursor:pointer;
+    font-family:inherit;
     text-decoration: none;
-    word-break: break-all;
 }
 .release-changelog-link:hover{text-decoration: underline}
 .release-divider{

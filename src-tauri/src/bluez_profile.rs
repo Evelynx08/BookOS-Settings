@@ -136,3 +136,53 @@ pub async fn connect_buds_native(mac: &str) -> Result<i32, String> {
     // can hand off further connections without re-registering.
     Ok(fd)
 }
+
+// ── Device1 property lookups (replaces `bluetoothctl info` subprocess polling) ──
+//
+// The audio-switch (5s) and auto-reconnect (15s) timers used to fork
+// `bluetoothctl info <mac>` and text-scan the output on every tick. That's a
+// process spawn every few seconds even when idle. BlueZ already publishes
+// these as Device1 properties on the system bus — read them directly.
+
+async fn device_proxy(mac: &str) -> Result<(Connection, OwnedObjectPath), String> {
+    let conn = Connection::system().await.map_err(|e| e.to_string())?;
+    let path = ObjectPath::try_from(mac_to_path(mac))
+        .map_err(|e| e.to_string())?
+        .into();
+    Ok((conn, path))
+}
+
+/// Whether BlueZ currently reports the device as connected.
+pub async fn is_device_connected(mac: &str) -> bool {
+    async {
+        let (conn, path) = device_proxy(mac).await.ok()?;
+        let dev = zbus::Proxy::new(&conn, "org.bluez", path, "org.bluez.Device1")
+            .await
+            .ok()?;
+        dev.get_property::<bool>("Connected").await.ok()
+    }
+    .await
+    .unwrap_or(false)
+}
+
+/// Device1.Name, if BlueZ knows it.
+pub async fn device_name(mac: &str) -> Option<String> {
+    let (conn, path) = device_proxy(mac).await.ok()?;
+    let dev = zbus::Proxy::new(&conn, "org.bluez", path, "org.bluez.Device1")
+        .await
+        .ok()?;
+    dev.get_property::<String>("Name").await.ok()
+}
+
+/// Device1.UUIDs, if BlueZ knows them (empty on error/unknown device).
+pub async fn device_uuids(mac: &str) -> Vec<String> {
+    async {
+        let (conn, path) = device_proxy(mac).await.ok()?;
+        let dev = zbus::Proxy::new(&conn, "org.bluez", path, "org.bluez.Device1")
+            .await
+            .ok()?;
+        dev.get_property::<Vec<String>>("UUIDs").await.ok()
+    }
+    .await
+    .unwrap_or_default()
+}

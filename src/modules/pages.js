@@ -571,6 +571,10 @@ export async function renderPantalla(c){
             <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px" id="lbl-resolution">${curRes}</span>${chevron()}</div>
         </div>`);
     }
+    dispRows.push(`<div class="detail-item" style="cursor:pointer" id="btn-ext-displays">
+        <span class="dt">${_tr('Pantallas externas')}</span>
+        <div style="display:flex;align-items:center;gap:6px">${chevron()}</div>
+    </div>`);
     h+=renderCard(dispRows);
 
     // ④ Timeout card
@@ -704,6 +708,11 @@ export async function renderPantalla(c){
             });
         });
     }
+    document.getElementById('btn-ext-displays')?.addEventListener('click',()=>{
+        if(window.pushSubNav)window.pushSubNav(()=>renderPantalla(c));
+        window.clearPageIntervals?.();
+        renderExternalDisplays(c);
+    });
     if(displays.length){
         document.getElementById('btn-resolution')?.addEventListener('click',e=>{
             const d=displays[0];
@@ -1709,8 +1718,15 @@ async function _renderBateriaContent(c, heavy=null){
         const modes=['power-saver','balanced','performance'];
         h+=renderSection(t('sec_perf_mode'))+`<div class="perf-modes">${modes.map(m=>`<div class="perf-mode-card ${pm===m?'active':''}" data-mode="${m}"><div class="perf-mode-icon"><img src="${perfIcons[m]}" width="32" height="32" class="perf-icon-img"></div><div class="perf-mode-name">${perfNames[m]}</div><div class="perf-mode-desc">${perfDescs[m]}</div></div>`).join('')}</div>`;
     }
+    // ── Opciones avanzadas de energía (powerdevil: tapa, suspensión, crítica) ──
+    h+=renderCard([`<div class="detail-item detail-item-row" style="cursor:pointer" id="go-power-adv"><div class="detail-texts"><span class="dt">${_tr('Opciones avanzadas de energía')}</span><span class="ds">${_tr('Tapa, suspensión y batería crítica')}</span></div>${chevron()}</div>`]);
     h+=`</div>`; // cierre bat-page-wrap
     c.innerHTML=h;
+    document.getElementById('go-power-adv')?.addEventListener('click',()=>{
+        if(window.pushSubNav)window.pushSubNav(()=>renderBateria(c));
+        window.clearPageIntervals?.();
+        renderPowerAdvanced(c);
+    });
 
     // System process toggle (same mkAppRow as above)
     {
@@ -2077,7 +2093,15 @@ export async function renderSeguridad(c){
         `<div class="detail-item" style="cursor:pointer" id="sec-clear-hist"><span class="dt" style="color:var(--red,#e53935)">Borrar historial de actividades</span></div>`,
     ]);
 
+    // Páginas fusionadas aquí desde el sidebar (Ubicación, Emergencia)
+    h+=renderCard([
+        `<div class="detail-item detail-item-row" style="cursor:pointer" id="go-ubicacion"><div class="detail-texts"><span class="dt">${_tr('Ubicación')}</span><span class="ds">${_tr('Solicitudes')}</span></div>${chevron()}</div>`,
+        `<div class="detail-item detail-item-row" style="cursor:pointer" id="go-emergencia"><div class="detail-texts"><span class="dt">${_tr('Seguridad y emergencia')}</span><span class="ds">${_tr('Datos médicos')}</span></div>${chevron()}</div>`,
+    ]);
+
     c.innerHTML=h;
+    document.getElementById('go-ubicacion')?.addEventListener('click',()=>window.openPage('ubicacion'));
+    document.getElementById('go-emergencia')?.addEventListener('click',()=>window.openPage('emergencia'));
 
     setupToggle('fw',async a=>{
         const ok=await promptSudo(a?'activar el cortafuegos':'desactivar el cortafuegos','ufw',[a?'enable':'disable']);
@@ -2212,7 +2236,65 @@ export async function renderTemas(c){
         // ── BookOS color schemes ──
         `<div class="theme-block">
             <div class="theme-grid-duo">${themes.map(t=>mkCard(t,t.is_dark)).join('')}</div>
-        </div>`;
+        </div>`+
+        // ── Cursor y set de iconos del sistema ──
+        renderSection(_tr('Personalización'))+
+        renderCard([
+            `<div class="detail-item" style="cursor:pointer" id="btn-cursor-theme">
+                <span class="dt">${_tr('Tema del cursor')}</span>
+                <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px" id="lbl-cursor-theme">…</span>${chevron()}</div>
+            </div>`,
+            `<div class="detail-item" style="cursor:pointer" id="btn-icon-theme">
+                <span class="dt">${_tr('Iconos del sistema')}</span>
+                <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px" id="lbl-icon-theme">…</span>${chevron()}</div>
+            </div>`,
+        ]);
+
+    // Current cursor/icon theme + pickers (best-effort, lazy)
+    (async()=>{
+        const rcRead=async(file,group,key)=>{
+            try{const r=JSON.parse(await tauriInvoke('run_command',{cmd:'kreadconfig6',args:['--file',file,'--group',group,'--key',key]}));return (r.output||'').trim();}
+            catch(e){return '';}
+        };
+        const _setLbl=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v||_tr('Predeterminado');};
+        let curCursor=await rcRead('kcminputrc','Mouse','cursorTheme');
+        let curIcons=await rcRead('kdeglobals','Icons','Theme');
+        _setLbl('lbl-cursor-theme',curCursor);
+        _setLbl('lbl-icon-theme',curIcons);
+
+        document.getElementById('btn-cursor-theme')?.addEventListener('click',async e=>{
+            let list=[];try{list=JSON.parse(await tauriInvoke('list_cursor_themes'));}catch(err){}
+            if(!list.length){toast(_tr('No se encontraron temas de cursor'),'❌');return;}
+            popoverSelect(e.currentTarget,{
+                title:_tr('Tema del cursor'),
+                options:list.map(th=>({val:th.id,label:th.name})),
+                current:curCursor,
+                onSelect:async id=>{
+                    try{
+                        const r=JSON.parse(await tauriInvoke('apply_cursor_theme',{id}));
+                        if(r.ok){curCursor=id;_setLbl('lbl-cursor-theme',id);toast(_tr('Tema del cursor aplicado'));}
+                        else toast(_tr('Error al aplicar'),'❌');
+                    }catch(err){toast(_tr('Error al aplicar'),'❌');}
+                },
+            });
+        });
+        document.getElementById('btn-icon-theme')?.addEventListener('click',async e=>{
+            let list=[];try{list=JSON.parse(await tauriInvoke('list_icon_themes'));}catch(err){}
+            if(!list.length){toast(_tr('No se encontraron temas de iconos'),'❌');return;}
+            popoverSelect(e.currentTarget,{
+                title:_tr('Iconos del sistema'),
+                options:list.map(th=>({val:th.id,label:th.name})),
+                current:curIcons,
+                onSelect:async id=>{
+                    try{
+                        const r=JSON.parse(await tauriInvoke('apply_icon_theme',{id}));
+                        if(r.ok){curIcons=id;_setLbl('lbl-icon-theme',id);toast(_tr('Iconos aplicados'));}
+                        else toast(_tr('Error al aplicar'),'❌');
+                    }catch(err){toast(_tr('Error al aplicar'),'❌');}
+                },
+            });
+        });
+    })();
 
     // Light / Dark mode swatches
     const _applyMode=async dark_=>{
@@ -3497,9 +3579,9 @@ async function _doCheckUpdates(c){
     const _releaseDesc = esc(release.description||t('upd_includes'))
         .replace(/\\n\\n/g,'</p><p class="release-desc">')
         .replace(/\\n/g,'<br>');
-    const _changelogP = release.changelog
-        ? `<a class="release-changelog-link" href="${esc(release.changelog)}" target="_blank">${esc(release.changelog)}</a>`
-        : '';
+    // Botón fijo al changelog online de BookOS (el backend valida el dominio).
+    const _changelogUrl='https://bookos.es/changelog';
+    const _changelogP = `<button class="release-changelog-link" id="rel-changelog">${_tr('Ver el registro de cambios')} ↗</button>`;
     const _releaseCard = release.available ? `
         <div class="bookos-release-card">
             <div class="release-hero" style="background-image:url('${_bannerBg}')">
@@ -3601,6 +3683,9 @@ async function _doCheckUpdates(c){
         _openChannelDialog(c, cur);
     });
     // ── BookOS release actions ──
+    document.getElementById('rel-changelog')?.addEventListener('click',()=>{
+        tauriInvoke('open_external_url',{url:_changelogUrl}).catch(()=>{});
+    });
     document.getElementById('rel-night')?.addEventListener('click',()=>{
         setSetting('NightRelease',release.version||'1');
         toast(t('upd_scheduled_night')||'Programado para esta noche');
@@ -3804,21 +3889,6 @@ export async function renderGeneral(c){
         `<div id="lang-list" style="display:none;padding:0 20px 16px"><div class="res-list" style="margin-bottom:0">
             ${locales.map(l=>`<div class="res-item ${l===loc.locale?'active':''}" data-lang="${esc(l)}">${getLangName(l)}</div>`).join('')}
         </div></div>`,
-        `<div class="detail-item detail-item-row" id="btn-key" style="cursor:pointer">
-            <div class="detail-texts"><span class="dt">${t('label_keyboard_layout')}</span><span class="ds">${loc.keymap || t('default')}</span></div>
-            <div style="color:var(--tx2);font-size:18px">›</div>
-        </div>`,
-        `<div id="key-list" style="display:none;padding:0 20px 16px"><div class="res-list" style="margin-bottom:0">
-            ${keymaps.map(k=>`<div class="res-item ${k===loc.keymap?'active':''}" data-key="${esc(k)}"><span>${esc(k)}</span></div>`).join('')}
-        </div></div>`,
-        `<div class="detail-item detail-item-row" style="cursor:pointer" id="open-kde-shortcuts">
-            <div class="detail-texts"><span class="dt">${_tr("Atajos del sistema")}</span><span class="ds">${_tr("Asigna teclas a acciones de KDE Plasma")}</span></div>
-            <div style="color:var(--tx2);font-size:18px">›</div>
-        </div>`,
-        `<div class="detail-item detail-item-row" style="cursor:pointer" id="open-custom-shortcuts">
-            <div class="detail-texts"><span class="dt">${_tr("Atajos personalizados")}</span><span class="ds">${_tr("Crea atajos para lanzar apps")}</span></div>
-            <div style="color:var(--tx2);font-size:18px">›</div>
-        </div>`
     ]) + renderSection(_tr('Fecha y hora')) + renderCard([
         renderRowItem('Hora automática (NTP)','Sincroniza el reloj por internet',renderToggle('ntp',dt.ntp)),
         `<div class="detail-item detail-item-row" id="btn-tz" style="cursor:pointer">
@@ -3861,7 +3931,6 @@ export async function renderGeneral(c){
         setTimeout(()=>location.reload(),400);
     }));
     document.getElementById('btn-lang')?.addEventListener('click', ()=>{ const el=document.getElementById('lang-list'); el.style.display=el.style.display==='none'?'block':'none'; });
-    document.getElementById('btn-key')?.addEventListener('click', ()=>{ const el=document.getElementById('key-list'); el.style.display=el.style.display==='none'?'block':'none'; });
 
     // ── Date & time ──
     setupToggle('ntp',async on=>{
@@ -3898,12 +3967,6 @@ export async function renderGeneral(c){
         }
         toast(ok?_tr('Abriendo impresoras'):_tr('No hay gestor de impresoras instalado'),'🖨️');
     });
-    document.getElementById('open-kde-shortcuts')?.addEventListener('click',()=>{
-        try{tauriInvoke('run_command',{cmd:'kcmshell6',args:['kcm_keys']}).catch(()=>{});}catch(e){}
-    });
-    document.getElementById('open-custom-shortcuts')?.addEventListener('click',()=>{
-        try{tauriInvoke('run_command',{cmd:'kcmshell6',args:['kcm_khotkeys']}).catch(()=>{});}catch(e){}
-    });
 
     document.querySelectorAll('[data-lang]').forEach(b => b.addEventListener('click', async()=>{
         try {
@@ -3916,16 +3979,6 @@ export async function renderGeneral(c){
             }
         } catch(e){}
     }));
-    document.querySelectorAll('[data-key]').forEach(b => b.addEventListener('click', async()=>{
-        try {
-            await tauriInvoke('set_keymap',{layout:b.dataset.key});
-            document.querySelectorAll('[data-key]').forEach(x=>x.classList.remove('active'));
-            b.classList.add('active');
-            document.querySelector('#btn-key .ds').textContent = b.dataset.key;
-            toast(t('tst_keyboard_changed'));
-        } catch(e){}
-    }));
-
     setupToggle('autostart', async a => {
         try { await tauriInvoke('toggle_autostart_bookos',{enable:a}); toast(a?t('tst_autostart_on'):t('tst_autostart_off')); } catch(e){}
     });
@@ -3973,15 +4026,26 @@ export async function renderCuentas(c){
 
     c.innerHTML=renderHeader(t('hdr_accounts')) + `
         <div class="acc-hero">
-            ${av}
+            <div style="position:relative;cursor:pointer;flex-shrink:0" id="acc-avatar-btn" title="${_tr('Cambiar foto')}">
+                ${av}
+                <div style="position:absolute;right:-2px;bottom:-2px;width:26px;height:26px;border-radius:50%;background:var(--blue);display:flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 2px 6px rgba(0,0,0,.25);border:2px solid var(--card)">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                </div>
+            </div>
             <div class="acc-hero-info">
-                <span class="acc-hero-name">${esc(currentUser.display_name || u.username)}</span>
-                <span class="acc-hero-sub">Administrador de BookOS</span>
+                <span class="acc-hero-name" id="acc-hero-name">${esc(currentUser.display_name || u.username)}</span>
+                <span class="acc-hero-sub">${_tr('Administrador de BookOS')} · @${esc(u.username)}</span>
             </div>
         </div>
     ` + renderSection(t('sec_local_data')) + renderCard([
-        `<div class="detail-item"><span class="dt">${_tr("Nombre visible")}</span><div style="display:flex;gap:8px;margin-top:8px"><input type="text" id="dn" value="${esc(u.display_name)}" class="sel" style="flex:1"><button class="btn btn-primary btn-sm" id="sn">${_tr("Guardar")}</button></div></div>`,
-        `<div class="detail-item"><span class="dt">${_tr("Nombre del equipo")}</span><div style="display:flex;gap:8px;margin-top:8px"><input type="text" id="hn" value="${esc(u.hostname)}" class="sel" style="flex:1"><button class="btn btn-primary btn-sm" id="sh">${_tr("Guardar")}</button></div></div>`
+        `<div class="detail-item detail-item-row" style="cursor:pointer" id="acc-edit-dn">
+            <div class="detail-texts"><span class="dt">${_tr('Nombre visible')}</span><span class="ds" id="acc-dn-cur">${esc(u.display_name||'—')}</span></div>
+            ${chevron()}
+        </div>`,
+        `<div class="detail-item detail-item-row" style="cursor:pointer" id="acc-edit-hn">
+            <div class="detail-texts"><span class="dt">${_tr('Nombre del equipo')}</span><span class="ds" id="acc-hn-cur">${esc(u.hostname||'—')}</span></div>
+            ${chevron()}
+        </div>`
     ]) + renderSection(t('sec_security')) + renderCard([
         renderRowItem('Contraseña','Cambia la contraseña de tu cuenta',`<button class="btn btn-secondary btn-sm" id="acc-change-pw">Cambiar</button>`),
         renderRowItem(
@@ -3996,15 +4060,128 @@ export async function renderCuentas(c){
             <button class="btn btn-primary btn-sm" id="acc-create-user">+ Crear cuenta nueva</button>
          </div>`;
 
-    document.getElementById('sn')?.addEventListener('click',async()=>{try{
-        const ok = await promptSudo('cambiar el nombre visible', 'chfn', ['-f', document.getElementById('dn').value, u.username]);
-        if(ok){ tauriInvoke('set_display_name', {name: document.getElementById('dn').value}).catch(()=>{}); toast('Nombre guardado'); }
-    }catch(e){}});
+    // Diálogo de edición de texto (One UI-style, mismo overlay que showDialog)
+    const promptText=(title,val)=>new Promise(res=>{
+        const ov=document.createElement('div');ov.className='bk-overlay';
+        ov.innerHTML=`<div class="bk-dialog"><div class="bk-dialog-title">${title}</div>
+            <input type="text" id="pt-in" class="sel" style="width:100%;margin:14px 0;box-sizing:border-box" value="${esc(val||'')}">
+            <div class="bk-dialog-btns"><button class="bk-dbtn cancel" id="pt-c">${t('cancel')}</button><button class="bk-dbtn confirm" id="pt-o">${t('save')}</button></div></div>`;
+        document.body.appendChild(ov);
+        const inp=ov.querySelector('#pt-in');setTimeout(()=>{inp.focus();inp.select();},50);
+        const done=v=>{ov.remove();res(v);};
+        ov.querySelector('#pt-c').onclick=()=>done(null);
+        ov.querySelector('#pt-o').onclick=()=>done(inp.value.trim());
+        inp.addEventListener('keydown',e=>{if(e.key==='Enter')done(inp.value.trim());if(e.key==='Escape')done(null);});
+        ov.addEventListener('click',e=>{if(e.target===ov)done(null);});
+    });
 
-    document.getElementById('sh')?.addEventListener('click',async()=>{try{
-        const ok = await promptSudo('cambiar el nombre del equipo', 'hostnamectl', ['set-hostname', document.getElementById('hn').value]);
-        if(ok){ tauriInvoke('set_hostname',{name:document.getElementById('hn').value}).catch(()=>{}); toast('Hostname guardado'); }
-    }catch(e){}});
+    // Cambiar foto de perfil: selector → diálogo de recorte (zoom + arrastre) → PNG 256px
+    const avatarCropDialog=(path)=>{
+        const SIZE=260;
+        const ov=document.createElement('div');ov.className='bk-overlay';
+        ov.innerHTML=`<div class="bk-dialog" style="width:330px">
+            <div class="bk-dialog-title">${_tr('Ajustar foto')}</div>
+            <div id="av-vp" style="width:${SIZE}px;height:${SIZE}px;border-radius:50%;overflow:hidden;margin:14px auto 6px;position:relative;background:#111;cursor:grab;touch-action:none">
+                <img id="av-img" style="position:absolute;user-select:none;-webkit-user-drag:none;pointer-events:none" draggable="false">
+            </div>
+            <p style="color:var(--tx2);font-size:12px;text-align:center;margin:0 0 8px">${_tr('Arrastra para encuadrar')}</p>
+            <input type="range" id="av-zoom" min="100" max="300" value="100" style="width:100%;margin:0 0 14px">
+            <div class="bk-dialog-btns"><button class="bk-dbtn cancel" id="av-c">${t('cancel')}</button><button class="bk-dbtn confirm" id="av-o">${t('apply')}</button></div>
+        </div>`;
+        document.body.appendChild(ov);
+        const vp=ov.querySelector('#av-vp'),img=ov.querySelector('#av-img'),zoom=ov.querySelector('#av-zoom');
+        let W=0,H=0,s0=1,z=1,tx=0,ty=0;
+        const clamp=()=>{
+            const s=s0*z,iw=W*s,ih=H*s;
+            tx=Math.min(0,Math.max(SIZE-iw,tx));
+            ty=Math.min(0,Math.max(SIZE-ih,ty));
+        };
+        const paint=()=>{
+            const s=s0*z;
+            img.style.width=(W*s)+'px';img.style.height=(H*s)+'px';
+            img.style.left=tx+'px';img.style.top=ty+'px';
+        };
+        img.onload=()=>{
+            W=img.naturalWidth;H=img.naturalHeight;
+            if(!W||!H){ov.remove();toast(_tr('Error al seleccionar imagen'),'❌');return;}
+            s0=Math.max(SIZE/W,SIZE/H);   // cover
+            tx=(SIZE-W*s0)/2;ty=(SIZE-H*s0)/2;   // centrado
+            paint();
+        };
+        img.onerror=()=>{ov.remove();toast(_tr('Error al seleccionar imagen'),'❌');};
+        img.crossOrigin='anonymous';   // asset:// es otro origen; sin esto el canvas queda tainted
+        img.src=getAssetUrl(path);
+        zoom.addEventListener('input',()=>{
+            // zoom manteniendo el centro del viewport fijo
+            const zNew=parseInt(zoom.value)/100,sOld=s0*z,sNew=s0*zNew;
+            const cx=(SIZE/2-tx)/sOld,cy=(SIZE/2-ty)/sOld;
+            z=zNew;tx=SIZE/2-cx*sNew;ty=SIZE/2-cy*sNew;
+            clamp();paint();
+        });
+        let drag=null;
+        vp.addEventListener('pointerdown',e=>{drag={x:e.clientX,y:e.clientY,tx,ty};vp.setPointerCapture(e.pointerId);vp.style.cursor='grabbing';});
+        vp.addEventListener('pointermove',e=>{
+            if(!drag)return;
+            tx=drag.tx+(e.clientX-drag.x);ty=drag.ty+(e.clientY-drag.y);
+            clamp();paint();
+        });
+        vp.addEventListener('pointerup',()=>{drag=null;vp.style.cursor='grab';});
+        const closeDlg=()=>ov.remove();
+        ov.querySelector('#av-c').onclick=closeDlg;
+        ov.addEventListener('click',e=>{if(e.target===ov)closeDlg();});
+        ov.querySelector('#av-o').onclick=async()=>{
+            try{
+                const OUT=256,k=OUT/SIZE,s=s0*z;
+                const cv=document.createElement('canvas');cv.width=OUT;cv.height=OUT;
+                const ctx=cv.getContext('2d');
+                ctx.drawImage(img,tx*k,ty*k,W*s*k,H*s*k);
+                const blob=await new Promise(res=>cv.toBlob(res,'image/png'));
+                const data=Array.from(new Uint8Array(await blob.arrayBuffer()));
+                const r=JSON.parse(await tauriInvoke('set_avatar_data',{data}));
+                if(r.ok){closeDlg();toast(_tr('Foto actualizada'));renderCuentas(c);}
+                else toast(_tr('Error al aplicar'),'❌');
+            }catch(e){
+                // Canvas tainted u otro fallo del recorte → copiar la imagen tal cual
+                try{
+                    const r2=JSON.parse(await tauriInvoke('set_avatar',{sourcePath:path}));
+                    if(r2.ok!==false){closeDlg();toast(_tr('Foto actualizada'));renderCuentas(c);return;}
+                }catch(e2){}
+                toast(_tr('Error al aplicar'),'❌');
+            }
+        };
+    };
+    document.getElementById('acc-avatar-btn')?.addEventListener('click',async()=>{
+        try{
+            const {open}=window.__TAURI__.dialog;
+            const file=await open({multiple:false,filters:[{name:'Imágenes',extensions:['png','jpg','jpeg','webp']}]});
+            if(!file)return;
+            avatarCropDialog(file);
+        }catch(e){toast(_tr('Error al seleccionar imagen'),'❌');}
+    });
+
+    document.getElementById('acc-edit-dn')?.addEventListener('click',async()=>{
+        const v=await promptText(_tr('Nombre visible'),u.display_name);
+        if(v===null||v===''||v===u.display_name)return;
+        const ok=await promptSudo('cambiar el nombre visible','chfn',['-f',v,u.username]);
+        if(ok){
+            tauriInvoke('set_display_name',{name:v}).catch(()=>{});
+            u.display_name=v;
+            const ds=document.getElementById('acc-dn-cur');if(ds)ds.textContent=v;
+            const hn=document.getElementById('acc-hero-name');if(hn)hn.textContent=v;
+            toast('Nombre guardado');
+        }
+    });
+    document.getElementById('acc-edit-hn')?.addEventListener('click',async()=>{
+        const v=await promptText(_tr('Nombre del equipo'),u.hostname);
+        if(v===null||v===''||v===u.hostname)return;
+        const ok=await promptSudo('cambiar el nombre del equipo','hostnamectl',['set-hostname',v]);
+        if(ok){
+            tauriInvoke('set_hostname',{name:v}).catch(()=>{});
+            u.hostname=v;
+            const ds=document.getElementById('acc-hn-cur');if(ds)ds.textContent=v;
+            toast('Hostname guardado');
+        }
+    });
 
     // ── Autologin toggle ──
     setupToggle('autologin', async enable=>{
@@ -6135,6 +6312,18 @@ async function _renderBookShare(c){
     // ── Fetch KDE Connect devices ──
     let kdeDevices=[];
     try{kdeDevices=JSON.parse(await tauriInvoke('get_kdeconnect_devices'));}catch(e){console.error('[BookShare]',e);}
+    // Dedupe: kdeconnect a veces lista el mismo teléfono dos veces (entrada
+    // vieja + nueva con distinto id). Nos quedamos con una por nombre,
+    // prefiriendo la que esté al alcance.
+    {
+        const byName=new Map();
+        for(const d of kdeDevices){
+            const k=(d.name||'').trim().toLowerCase()||d.id;
+            const prev=byName.get(k);
+            if(!prev||(d.reachable&&!prev.reachable))byName.set(k,d);
+        }
+        kdeDevices=[...byName.values()];
+    }
 
     const _SVG_UPLOAD=`<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`;
     const _SVG_PHONE=`<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="17" r="1" fill="currentColor" stroke="none"/></svg>`;
@@ -6582,6 +6771,8 @@ async function _renderBookShare(c){
     addInterval(async()=>{
         try{
             const devs=JSON.parse(await tauriInvoke('get_kdeconnect_devices'));
+            // reachable al final: si hay duplicados por nombre, gana el que responde
+            devs.sort((a,b)=>(a.reachable?1:0)-(b.reachable?1:0));
             devs.forEach(d=>{
                 document.querySelectorAll('.detail-item.detail-item-row').forEach(row=>{
                     if(row.querySelector('.dt')?.textContent?.includes(d.name)){
@@ -6672,7 +6863,7 @@ export async function renderDispositivos(c){
     if(!btEnabled){
         h+=renderCard([_devRow({icon:_SVG_HEADPHONES,iconColor:'var(--tx2)',
             title:'Bluetooth desactivado',subtitle:'Activa Bluetooth para ver tus Buds',
-            right:`<button class="bk-dbtn confirm" id="bt-enable-btn" style="font-size:13px;padding:6px 14px;flex-shrink:0">Activar</button>`})]);
+            right:`<button class="bk-dbtn confirm" id="bt-enable-btn" style="flex:0 0 auto;width:auto;height:auto;font-size:13px;padding:8px 20px;border-radius:18px">Activar</button>`})]);
     } else if(budsDevices.length===0){
         h+=renderCard([_devRow({id:'buds-pair',extraStyle:'cursor:pointer',
             icon:_SVG_HEADPHONES,iconColor:'var(--blue)',
@@ -6790,6 +6981,627 @@ export async function renderDispositivos(c){
             });
         }catch(e){}
     },10000);
+}
+
+// ── Atajos de teclado (kglobalshortcutsrc) ─────────────────────────────
+// Editor curado: los atajos más usados de KWin/Plasma, con captura de tecla.
+// El daemon se reinicia tras cada cambio (restart_kglobalaccel).
+export async function renderShortcutsPage(c){
+    const title=_tr('Atajos de teclado');
+    c.innerHTML=renderHeader(title)+renderSkeleton(3);
+
+    // group:[...grupos anidados], key, label. services usan valor simple; kwin usa "actual,defecto,desc"
+    const SHORTCUTS=[
+        {sec:_tr('Sistema'),items:[
+            {groups:['services','org.kde.krunner.desktop'],key:'_launch',label:'KRunner (buscador)',simple:true},
+            {groups:['services','org.kde.spectacle.desktop'],key:'_launch',label:_tr('Captura de pantalla'),simple:true},
+            {groups:['services','org.kde.konsole.desktop'],key:'_launch',label:_tr('Terminal'),simple:true},
+            {groups:['ksmserver'],key:'Lock Session',label:_tr('Bloquear pantalla')},
+        ]},
+        {sec:_tr('Ventanas'),items:[
+            {groups:['kwin'],key:'Walk Through Windows',label:_tr('Cambiar de ventana')},
+            {groups:['kwin'],key:'Overview',label:_tr('Vista general')},
+            {groups:['kwin'],key:'Grid View',label:_tr('Vista de cuadrícula')},
+            {groups:['kwin'],key:'Show Desktop',label:_tr('Mostrar escritorio')},
+            {groups:['kwin'],key:'Window Maximize',label:_tr('Maximizar ventana')},
+            {groups:['kwin'],key:'Window Minimize',label:_tr('Minimizar ventana')},
+            {groups:['kwin'],key:'Window Fullscreen',label:_tr('Pantalla completa')},
+            {groups:['kwin'],key:'Window Close',label:_tr('Cerrar ventana')},
+            {groups:['kwin'],key:'Kill Window',label:_tr('Forzar cierre de ventana')},
+        ]},
+    ];
+
+    const rcRead=async(groups,key)=>{
+        try{
+            const args=['--file','kglobalshortcutsrc'];groups.forEach(g=>args.push('--group',g));args.push('--key',key);
+            const r=JSON.parse(await tauriInvoke('run_command',{cmd:'kreadconfig6',args}));
+            return (r.output||'').trim();
+        }catch(e){return '';}
+    };
+    const rcWrite=async(groups,key,val)=>{
+        const args=['--file','kglobalshortcutsrc'];groups.forEach(g=>args.push('--group',g));args.push('--key',key,val);
+        await tauriInvoke('run_command',{cmd:'kwriteconfig6',args}).catch(()=>{});
+    };
+    // Primer atajo del campo actual ("A\tB" → "A"; "none" → '')
+    const parseCur=(raw,simple)=>{
+        const field=simple?raw:(raw.split(',')[0]||'');
+        const first=field.split('\\t')[0].split('\t')[0].trim();
+        return (first&&first!=='none')?first:'';
+    };
+
+    // Leer todos en paralelo
+    const flat=SHORTCUTS.flatMap(s=>s.items);
+    const raws=await Promise.all(flat.map(it=>rcRead(it.groups,it.key)));
+    flat.forEach((it,i)=>{it.raw=raws[i];it.cur=parseCur(raws[i],it.simple);});
+    let customs=[];
+    try{customs=JSON.parse(await tauriInvoke('list_custom_shortcuts'));}catch(e){}
+
+    let h=renderHeader(title);
+    let idx=0;
+    for(const sec of SHORTCUTS){
+        h+=renderSection(sec.sec);
+        h+=renderCard(sec.items.map(it=>{
+            const i=idx++;
+            return `<div class="detail-item detail-item-row" style="cursor:pointer" id="sc-${i}">
+                <div class="detail-texts"><span class="dt">${it.label}</span></div>
+                <span class="sc-combo" id="sc-${i}-v" style="color:var(--blue);font-size:13px;font-family:monospace;background:var(--bg2,rgba(128,128,128,.12));padding:3px 10px;border-radius:6px">${esc(it.cur||_tr('Sin asignar'))}</span>
+            </div>`;
+        }));
+    }
+    // ── Atajos personalizados (lanzar un comando con una combinación) ──
+    h+=renderSection(_tr('Atajos personalizados'));
+    const comboChip=(id,txt)=>`<span class="sc-combo" id="${id}" style="color:var(--blue);font-size:13px;font-family:monospace;background:var(--bg2,rgba(128,128,128,.12));padding:3px 10px;border-radius:6px">${esc(txt)}</span>`;
+    const customRows=customs.map((cs,j)=>`<div class="detail-item detail-item-row" id="scc-${j}" style="cursor:pointer">
+        <div class="detail-texts"><span class="dt">${esc(cs.name)}</span><span class="ds" style="font-family:monospace">${esc(cs.command)}</span></div>
+        <div style="display:flex;align-items:center;gap:10px">
+            ${comboChip(`scc-${j}-v`,cs.combo||_tr('Sin asignar'))}
+            <button id="scc-${j}-del" title="${_tr('Eliminar')}" style="background:none;border:none;cursor:pointer;color:var(--red,#e53935);padding:4px;display:flex"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg></button>
+        </div>
+    </div>`);
+    if(!customRows.length)customRows.push(`<div class="detail-item"><span class="ds">${_tr('Lanza cualquier comando con una combinación de teclas')}</span></div>`);
+    customRows.push(`<div class="detail-item" style="cursor:pointer" id="sc-add"><span class="dt" style="color:var(--blue)">+ ${_tr('Añadir atajo')}</span></div>`);
+    h+=renderCard(customRows);
+
+    h+=`<p style="color:var(--tx2);font-size:12px;padding:4px 16px">${_tr('Toca un atajo y pulsa la nueva combinación. Esc cancela · Retroceso lo borra.')}</p>`;
+    c.innerHTML=h;
+
+    // KDE key names for a few JS event.key values
+    const KEYMAP={' ':'Space','ArrowUp':'Up','ArrowDown':'Down','ArrowLeft':'Left','ArrowRight':'Right','Escape':'Esc','+':'Plus','-':'Minus'};
+    const comboFrom=e=>{
+        const mods=[];
+        if(e.metaKey)mods.push('Meta');if(e.ctrlKey)mods.push('Ctrl');if(e.altKey)mods.push('Alt');if(e.shiftKey)mods.push('Shift');
+        let k=e.key;
+        if(['Meta','Control','Alt','Shift'].includes(k))return null;   // solo modificador aún
+        k=KEYMAP[k]||(k.length===1?k.toUpperCase():k);
+        return [...mods,k].join('+');
+    };
+
+    let capturing=null; // {it,el}
+    const stopCapture=()=>{
+        if(!capturing)return;
+        capturing.el.textContent=capturing.it.cur||_tr('Sin asignar');
+        capturing.el.style.background='var(--bg2,rgba(128,128,128,.12))';
+        capturing=null;
+        document.removeEventListener('keydown',onKey,true);
+    };
+    const saveCombo=async(it,el,combo)=>{
+        const newField=combo||'none';
+        const newRaw=it.simple?newField:(()=>{const parts=it.raw.split(',');parts[0]=newField;return parts.join(',');})();
+        // set_global_shortcut para el daemon ANTES de escribir: kglobalaccel
+        // persiste su estado en memoria al salir, así que escribir con el
+        // daemon vivo hacía que el cambio se revirtiera solo.
+        try{
+            const r=JSON.parse(await tauriInvoke('set_global_shortcut',{groups:it.groups,key:it.key,value:newRaw}));
+            if(!r.ok){toast(_tr('Error al aplicar'),'❌');return;}
+        }catch(e){toast(_tr('Error al aplicar'),'❌');return;}
+        it.raw=newRaw;it.cur=combo;
+        el.textContent=combo||_tr('Sin asignar');
+        toast(_tr('Atajo actualizado'));
+    };
+    const onKey=e=>{
+        if(!capturing)return;
+        e.preventDefault();e.stopPropagation();
+        if(e.key==='Escape'){stopCapture();return;}
+        if(e.key==='Backspace'){const{it,el}=capturing;capturing=null;document.removeEventListener('keydown',onKey,true);saveCombo(it,el,'');return;}
+        const combo=comboFrom(e);
+        if(!combo)return; // esperar a la tecla final
+        const{it,el}=capturing;capturing=null;document.removeEventListener('keydown',onKey,true);
+        el.style.background='var(--bg2,rgba(128,128,128,.12))';
+        saveCombo(it,el,combo);
+    };
+    const startCapture=(it,el)=>{
+        stopCapture();
+        capturing={it,el};
+        el.textContent=_tr('Pulsa la combinación…');
+        el.style.background='var(--blue)';
+        document.addEventListener('keydown',onKey,true);
+    };
+    flat.forEach((it,i)=>{
+        document.getElementById(`sc-${i}`)?.addEventListener('click',()=>startCapture(it,document.getElementById(`sc-${i}-v`)));
+    });
+
+    // Personalizados: re-capturar combo al tocar la fila, borrar con la papelera
+    customs.forEach((cs,j)=>{
+        const it={groups:['services',cs.id],key:'_launch',simple:true,raw:cs.combo||'none',cur:cs.combo||''};
+        document.getElementById(`scc-${j}`)?.addEventListener('click',e=>{
+            if(e.target.closest(`#scc-${j}-del`))return;
+            startCapture(it,document.getElementById(`scc-${j}-v`));
+        });
+        document.getElementById(`scc-${j}-del`)?.addEventListener('click',()=>{
+            showDialog(_tr('Eliminar atajo'),`"${esc(cs.name)}"`,{
+                confirmText:_tr('Eliminar'),confirmClass:'cancel',
+                onConfirm:async()=>{
+                    try{await tauriInvoke('delete_custom_shortcut',{id:cs.id});toast(_tr('Atajo eliminado'));}
+                    catch(e){toast(_tr('Error al aplicar'),'❌');}
+                    renderShortcutsPage(c);
+                },
+            });
+        });
+    });
+
+    // Diálogo de creación: nombre + comando + captura de combinación
+    document.getElementById('sc-add')?.addEventListener('click',()=>{
+        stopCapture();
+        const ov=document.createElement('div');ov.className='bk-overlay';
+        ov.innerHTML=`<div class="bk-dialog"><div class="bk-dialog-title">${_tr('Añadir atajo')}</div>
+            <input type="text" id="cs-name" class="sel" style="width:100%;margin:10px 0 8px;box-sizing:border-box" placeholder="${_tr('Nombre')}">
+            <input type="text" id="cs-cmd" class="sel" style="width:100%;margin:0 0 8px;box-sizing:border-box;font-family:monospace" placeholder="${_tr('Comando (ej: konsole)')}">
+            <button id="cs-combo" class="sel" style="width:100%;margin:0 0 14px;box-sizing:border-box;cursor:pointer;text-align:center;font-family:monospace">${_tr('Pulsar para capturar combinación')}</button>
+            <div class="bk-dialog-btns"><button class="bk-dbtn cancel" id="cs-c">${t('cancel')}</button><button class="bk-dbtn confirm" id="cs-o">${t('save')}</button></div></div>`;
+        document.body.appendChild(ov);
+        let combo='';
+        const btn=ov.querySelector('#cs-combo');
+        const onDlgKey=e=>{
+            e.preventDefault();e.stopPropagation();
+            if(e.key==='Escape'){btn.textContent=combo||_tr('Pulsar para capturar combinación');document.removeEventListener('keydown',onDlgKey,true);return;}
+            const cmb=comboFrom(e);
+            if(!cmb)return;
+            combo=cmb;btn.textContent=cmb;
+            document.removeEventListener('keydown',onDlgKey,true);
+        };
+        btn.addEventListener('click',()=>{
+            btn.textContent=_tr('Pulsa la combinación…');
+            document.addEventListener('keydown',onDlgKey,true);
+        });
+        const closeDlg=()=>{document.removeEventListener('keydown',onDlgKey,true);ov.remove();};
+        ov.querySelector('#cs-c').onclick=closeDlg;
+        ov.addEventListener('click',e=>{if(e.target===ov)closeDlg();});
+        ov.querySelector('#cs-o').onclick=async()=>{
+            const name=ov.querySelector('#cs-name').value.trim();
+            const cmd=ov.querySelector('#cs-cmd').value.trim();
+            if(!name||!cmd||!combo){toast(_tr('Completa nombre, comando y combinación'),'ℹ');return;}
+            try{
+                await tauriInvoke('create_custom_shortcut',{name,command:cmd,combo});
+                closeDlg();toast(_tr('Atajo creado'));renderShortcutsPage(c);
+            }catch(e){toast(_tr('Error al aplicar')+': '+e,'❌');}
+        };
+    });
+}
+
+// ── Opciones avanzadas de energía (powerdevilrc) ───────────────────────
+export async function renderPowerAdvanced(c){
+    const title=_tr('Opciones avanzadas de energía');
+    c.innerHTML=renderHeader(title)+renderSkeleton(3);
+
+    // kreadconfig6/kwriteconfig6 sobre powerdevilrc (grupos anidados AC/Battery)
+    const rcRead=async(groups,key,def='')=>{
+        try{
+            const args=['--file','powerdevilrc'];groups.forEach(g=>args.push('--group',g));args.push('--key',key,'--default',def);
+            const r=JSON.parse(await tauriInvoke('run_command',{cmd:'kreadconfig6',args}));
+            return (r.output||'').trim();
+        }catch(e){return def;}
+    };
+    const rcWrite=async(groups,key,val)=>{
+        const args=['--file','powerdevilrc'];groups.forEach(g=>args.push('--group',g));args.push('--key',key,String(val));
+        await tauriInvoke('run_command',{cmd:'kwriteconfig6',args}).catch(()=>{});
+    };
+    const reload=async()=>{
+        await tauriInvoke('run_command',{cmd:'qdbus6',args:['org.kde.Solid.PowerManagement','/org/kde/Solid/PowerManagement','org.kde.Solid.PowerManagement.reparseConfiguration']}).catch(()=>{});
+    };
+
+    // powerdevil action codes: 0 nada · 1 suspender · 8 apagar · 32 bloquear · 64 apagar pantalla
+    const LID_OPTS=[
+        {val:'1',label:_tr('Suspender')},
+        {val:'64',label:_tr('Apagar la pantalla')},
+        {val:'32',label:_tr('Bloquear')},
+        {val:'8',label:_tr('Apagar el equipo')},
+        {val:'0',label:_tr('No hacer nada')},
+    ];
+    const CRIT_OPTS=[
+        {val:'1',label:_tr('Suspender')},
+        {val:'2',label:_tr('Hibernar')},
+        {val:'8',label:_tr('Apagar el equipo')},
+        {val:'0',label:_tr('No hacer nada')},
+    ];
+    const SUSP_MIN=[{val:'0',label:_tr('Nunca')},{val:'15',label:'15 min'},{val:'30',label:'30 min'},{val:'60',label:'1 h'},{val:'120',label:'2 h'}];
+    const OFF_MIN=[{val:'0',label:_tr('Nunca')},{val:'5',label:'5 min'},{val:'10',label:'10 min'},{val:'15',label:'15 min'},{val:'30',label:'30 min'}];
+    const lbl=(opts,v)=>(opts.find(o=>o.val===String(v))||{}).label||String(v);
+
+    const[lidBat,lidAC,suspBat,suspAC,offBat,offAC,critAct,critLvl]=await Promise.all([
+        rcRead(['Battery','SuspendAndShutdown'],'LidAction','1'),
+        rcRead(['AC','SuspendAndShutdown'],'LidAction','1'),
+        rcRead(['Battery','SuspendAndShutdown'],'AutoSuspendIdleTimeoutSec','900'),
+        rcRead(['AC','SuspendAndShutdown'],'AutoSuspendIdleTimeoutSec','0'),
+        rcRead(['Battery','Display'],'TurnOffDisplayIdleTimeoutSec','600'),
+        rcRead(['AC','Display'],'TurnOffDisplayIdleTimeoutSec','0'),
+        rcRead(['BatteryManagement'],'BatteryCriticalAction','1'),
+        rcRead(['BatteryManagement'],'BatteryCriticalLevel','5'),
+    ]);
+    const secToMin=s=>{const n=parseInt(s)||0;return n<=0?'0':String(Math.round(n/60));};
+    const state={
+        lidBat:String(parseInt(lidBat)||0),lidAC:String(parseInt(lidAC)||0),
+        suspBat:secToMin(suspBat),suspAC:secToMin(suspAC),
+        offBat:secToMin(offBat),offAC:secToMin(offAC),
+        critAct:String(parseInt(critAct)||0),critLvl:String(parseInt(critLvl)||5),
+    };
+
+    const selRow=(id,label,valueLabel)=>`<div class="detail-item" style="cursor:pointer" id="${id}">
+        <span class="dt">${label}</span>
+        <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px" id="${id}-l">${valueLabel}</span>${chevron()}</div>
+    </div>`;
+
+    let h=renderHeader(title);
+    h+=renderSection(_tr('Con batería'));
+    h+=renderCard([
+        selRow('pa-lid-bat',_tr('Al cerrar la tapa'),lbl(LID_OPTS,state.lidBat)),
+        selRow('pa-susp-bat',_tr('Suspender tras inactividad'),lbl(SUSP_MIN,state.suspBat)),
+        selRow('pa-off-bat',_tr('Apagar pantalla tras'),lbl(OFF_MIN,state.offBat)),
+    ]);
+    h+=renderSection(_tr('Enchufado'));
+    h+=renderCard([
+        selRow('pa-lid-ac',_tr('Al cerrar la tapa'),lbl(LID_OPTS,state.lidAC)),
+        selRow('pa-susp-ac',_tr('Suspender tras inactividad'),lbl(SUSP_MIN,state.suspAC)),
+        selRow('pa-off-ac',_tr('Apagar pantalla tras'),lbl(OFF_MIN,state.offAC)),
+    ]);
+    h+=renderSection(_tr('Batería crítica'));
+    h+=renderCard([
+        selRow('pa-crit-act',_tr('Acción con batería crítica'),lbl(CRIT_OPTS,state.critAct)),
+        selRow('pa-crit-lvl',_tr('Nivel crítico'),state.critLvl+'%'),
+    ]);
+    c.innerHTML=h;
+
+    const _setLbl=(id,txt)=>{const e=document.getElementById(id+'-l');if(e)e.textContent=txt;};
+    const wire=(id,opts,cur,onPick)=>{
+        document.getElementById(id)?.addEventListener('click',e=>{
+            popoverSelect(e.currentTarget,{options:opts,current:cur(),onSelect:async v=>{
+                await onPick(String(v));await reload();_setLbl(id,lbl(opts,v));toast(_tr('Guardado'));
+            }});
+        });
+    };
+    wire('pa-lid-bat',LID_OPTS,()=>state.lidBat,async v=>{state.lidBat=v;await rcWrite(['Battery','SuspendAndShutdown'],'LidAction',v);});
+    wire('pa-lid-ac',LID_OPTS,()=>state.lidAC,async v=>{state.lidAC=v;await rcWrite(['AC','SuspendAndShutdown'],'LidAction',v);});
+    wire('pa-susp-bat',SUSP_MIN,()=>state.suspBat,async v=>{
+        state.suspBat=v;
+        await rcWrite(['Battery','SuspendAndShutdown'],'AutoSuspendAction',v==='0'?'0':'1');
+        if(v!=='0')await rcWrite(['Battery','SuspendAndShutdown'],'AutoSuspendIdleTimeoutSec',parseInt(v)*60);
+    });
+    wire('pa-susp-ac',SUSP_MIN,()=>state.suspAC,async v=>{
+        state.suspAC=v;
+        await rcWrite(['AC','SuspendAndShutdown'],'AutoSuspendAction',v==='0'?'0':'1');
+        if(v!=='0')await rcWrite(['AC','SuspendAndShutdown'],'AutoSuspendIdleTimeoutSec',parseInt(v)*60);
+    });
+    wire('pa-off-bat',OFF_MIN,()=>state.offBat,async v=>{
+        state.offBat=v;
+        await rcWrite(['Battery','Display'],'TurnOffDisplayWhenIdle',v==='0'?'false':'true');
+        if(v!=='0')await rcWrite(['Battery','Display'],'TurnOffDisplayIdleTimeoutSec',parseInt(v)*60);
+    });
+    wire('pa-off-ac',OFF_MIN,()=>state.offAC,async v=>{
+        state.offAC=v;
+        await rcWrite(['AC','Display'],'TurnOffDisplayWhenIdle',v==='0'?'false':'true');
+        if(v!=='0')await rcWrite(['AC','Display'],'TurnOffDisplayIdleTimeoutSec',parseInt(v)*60);
+    });
+    wire('pa-crit-act',CRIT_OPTS,()=>state.critAct,async v=>{state.critAct=v;await rcWrite(['BatteryManagement'],'BatteryCriticalAction',v);});
+    const LVL_OPTS=[3,5,7,10].map(n=>({val:String(n),label:n+'%'}));
+    wire('pa-crit-lvl',LVL_OPTS,()=>state.critLvl,async v=>{state.critLvl=v;await rcWrite(['BatteryManagement'],'BatteryCriticalLevel',v);});
+}
+
+// ── Pantallas externas (kscreen-doctor) ────────────────────────────────
+export async function renderExternalDisplays(c){
+    const title=_tr('Pantallas externas');
+    c.innerHTML=renderHeader(title)+renderSkeleton(2);
+
+    let cfg=null;
+    try{cfg=JSON.parse(await tauriInvoke('kscreen_get'));}catch(e){}
+    const outputs=(cfg?.outputs||[]).filter(o=>o.connected);
+    const isInternal=o=>/^(eDP|LVDS|DSI)/i.test(o.name||'');
+    const internal=outputs.find(isInternal)||outputs[0];
+    const externals=outputs.filter(o=>o!==internal);
+
+    const apply=async(args)=>{
+        try{
+            const r=JSON.parse(await tauriInvoke('kscreen_set',{args}));
+            if(!r.ok){toast(_tr('Error al aplicar')+(r.error?': '+r.error:''),'❌');return false;}
+            return true;
+        }catch(e){toast(_tr('Error al aplicar'),'❌');return false;}
+    };
+    const rerender=()=>setTimeout(()=>renderExternalDisplays(c),400);
+
+    let h=renderHeader(title);
+    if(!externals.length){
+        h+=renderCard([
+            `<div class="detail-item"><span class="dt">${_tr('No hay pantallas externas conectadas')}</span><span class="ds">${_tr('Conecta un monitor por HDMI o USB-C y aparecerá aquí')}</span></div>`,
+        ]);
+    }
+    // Logical size (physical / scale) — kscreen positions use logical coords on Wayland
+    const logicalW=o=>Math.round(((o?.size?.width)||1920)/((o?.scale)||1));
+    const logicalH=o=>Math.round(((o?.size?.height)||1080)/((o?.scale)||1));
+    const intW=logicalW(internal),intH=logicalH(internal);
+
+    const listRows=(o,idx)=>{
+        const p=`xd${idx}`;
+        const rows=[];
+        rows.push(renderRowItem(esc(o.name),o.enabled?_tr('Activada'):_tr('Desactivada'),renderToggle(`${p}-en`,o.enabled)));
+        if(o.enabled){
+            const cur=(o.modes||[]).find(m=>m.id===o.currentModeId);
+            const curRes=(cur?.name||'').split('@')[0],curHz=(cur?.name||'').split('@')[1]||'';
+            rows.push(`<div class="detail-item" style="cursor:pointer" id="${p}-mode">
+                <span class="dt">${_tr('Resolución')}</span>
+                <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px">${esc(curRes)}</span>${chevron()}</div>
+            </div>`);
+            // Tasas de refresco disponibles para la resolución actual
+            const hzOpts=[...new Set((o.modes||[]).filter(m=>m.name.startsWith(curRes+'@')).map(m=>m.name.split('@')[1]))];
+            if(hzOpts.length>1)rows.push(`<div class="detail-item" style="cursor:pointer" id="${p}-hz">
+                <span class="dt">${_tr('Tasa de refresco')}</span>
+                <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px">${esc(curHz)} Hz</span>${chevron()}</div>
+            </div>`);
+            rows.push(`<div class="detail-item" style="cursor:pointer" id="${p}-scale">
+                <span class="dt">${_tr('Escala')}</span>
+                <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px">${Math.round((o.scale||1)*100)}%</span>${chevron()}</div>
+            </div>`);
+            if(o!==internal){
+                const dx=(o.pos?.x||0)-(internal?.pos?.x||0),dy=(o.pos?.y||0)-(internal?.pos?.y||0);
+                const posLabel=(dx===0&&dy===0)?_tr('Duplicada')
+                    :(Math.abs(dy)>Math.abs(dx))?(dy<0?_tr('Arriba'):_tr('Abajo'))
+                    :(dx<0?_tr('A la izquierda'):_tr('A la derecha'));
+                rows.push(`<div class="detail-item" style="cursor:pointer" id="${p}-pos">
+                    <span class="dt">${_tr('Posición')}</span>
+                    <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px">${posLabel}</span>${chevron()}</div>
+                </div>`);
+            }
+            if(o.priority!==1)rows.push(`<div class="detail-item" style="cursor:pointer" id="${p}-primary"><span class="dt" style="color:var(--blue)">${_tr('Establecer como principal')}</span></div>`);
+        }
+        return rows;
+    };
+
+    const all=[internal,...externals].filter(Boolean);
+    all.forEach((o,idx)=>{
+        h+=renderSection(o===internal?_tr('Pantalla del portátil'):_tr('Pantalla externa'));
+        h+=renderCard(listRows(o,idx));
+    });
+    c.innerHTML=h;
+
+    all.forEach((o,idx)=>{
+        const p=`xd${idx}`;
+        setupToggle(`${p}-en`,async a=>{
+            // Never disable the last enabled output
+            const enabledCount=all.filter(x=>x.enabled).length;
+            if(!a&&enabledCount<=1){toast(_tr('No puedes desactivar la única pantalla'),'❌');rerender();return;}
+            if(await apply([`output.${o.name}.${a?'enable':'disable'}`]))rerender();
+        });
+        document.getElementById(`${p}-mode`)?.addEventListener('click',e=>{
+            const modes=(o.modes||[]);
+            const curName=(modes.find(m=>m.id===o.currentModeId)||{}).name||'';
+            const curHz=curName.split('@')[1]||'';
+            const uniqueRes=[...new Set(modes.map(m=>m.name.split('@')[0]))];
+            popoverSelect(e.currentTarget,{
+                title:_tr('Resolución'),
+                options:uniqueRes.map(r=>({val:r,label:r})),
+                current:curName.split('@')[0],
+                onSelect:async v=>{
+                    // conservar Hz actual si existe para la nueva resolución
+                    const target=modes.find(m=>m.name===`${v}@${curHz}`)||modes.find(m=>m.name.startsWith(v+'@'))||{name:v};
+                    if(await apply([`output.${o.name}.mode.${target.name}`]))rerender();
+                },
+            });
+        });
+        document.getElementById(`${p}-hz`)?.addEventListener('click',e=>{
+            const modes=(o.modes||[]);
+            const curName=(modes.find(m=>m.id===o.currentModeId)||{}).name||'';
+            const curRes=curName.split('@')[0];
+            const hzs=[...new Set(modes.filter(m=>m.name.startsWith(curRes+'@')).map(m=>m.name.split('@')[1]))];
+            popoverSelect(e.currentTarget,{
+                title:_tr('Tasa de refresco'),
+                options:hzs.map(hz=>({val:hz,label:hz+' Hz'})),
+                current:curName.split('@')[1]||'',
+                onSelect:async v=>{if(await apply([`output.${o.name}.mode.${curRes}@${v}`]))rerender();},
+            });
+        });
+        document.getElementById(`${p}-scale`)?.addEventListener('click',e=>{
+            popoverSelect(e.currentTarget,{
+                title:_tr('Escala'),
+                options:[100,125,150,175,200].map(s=>({val:s,label:s+'%'})),
+                current:Math.round((o.scale||1)*100),
+                onSelect:async v=>{if(await apply([`output.${o.name}.scale.${v/100}`]))rerender();},
+            });
+        });
+        document.getElementById(`${p}-pos`)?.addEventListener('click',e=>{
+            popoverSelect(e.currentTarget,{
+                title:_tr('Posición'),
+                options:[
+                    {val:'right',label:_tr('A la derecha')},
+                    {val:'left',label:_tr('A la izquierda')},
+                    {val:'above',label:_tr('Arriba')},
+                    {val:'below',label:_tr('Abajo')},
+                    {val:'mirror',label:_tr('Duplicar pantalla')},
+                ],
+                current:'',
+                onSelect:async v=>{
+                    const oW=logicalW(o),oH=logicalH(o);
+                    const args=v==='mirror'?[`output.${o.name}.position.${internal?.pos?.x||0},${internal?.pos?.y||0}`]
+                        :v==='left'?[`output.${o.name}.position.0,0`,`output.${internal.name}.position.${oW},0`]
+                        :v==='above'?[`output.${o.name}.position.0,0`,`output.${internal.name}.position.0,${oH}`]
+                        :v==='below'?[`output.${internal.name}.position.0,0`,`output.${o.name}.position.0,${intH}`]
+                        :[`output.${internal.name}.position.0,0`,`output.${o.name}.position.${intW},0`];
+                    if(await apply(args))rerender();
+                },
+            });
+        });
+        document.getElementById(`${p}-primary`)?.addEventListener('click',async()=>{
+            if(await apply([`output.${o.name}.priority.1`]))rerender();
+        });
+    });
+}
+
+// ── Touchpad y ratón (KWin libinput vía DBus) — página del sidebar ─────
+export async function renderTouchpadMouse(c){
+    const title=_tr('Touchpad y ratón');
+    c.innerHTML=renderHeader(title)+renderSkeleton(2);
+
+    let devices=[];
+    try{devices=JSON.parse(await tauriInvoke('list_input_devices'));}catch(e){}
+    const touchpads=devices.filter(d=>d.touchpad);
+    const mice=devices.filter(d=>!d.touchpad);
+
+    let h=renderHeader(title);
+    let idx=0;
+    const deviceRows=(d,isTouchpad)=>{
+        const p=`ind${idx++}`;
+        const rows=[];
+        rows.push(renderRowItem(_tr('Activado'),'',renderToggle(`${p}-enabled`,d.enabled)));
+        if(isTouchpad)rows.push(renderRowItem(_tr('Tocar para hacer clic'),_tr('Un toque equivale a clic izquierdo'),renderToggle(`${p}-tap`,d.tap_to_click)));
+        rows.push(renderRowItem(_tr('Desplazamiento natural'),_tr('El contenido sigue el movimiento de los dedos'),renderToggle(`${p}-nat`,d.natural_scroll)));
+        if(isTouchpad&&d.supports_disable_while_typing)rows.push(renderRowItem(_tr('Desactivar al escribir'),'',renderToggle(`${p}-dwt`,d.disable_while_typing)));
+        rows.push(renderRowItem(_tr('Botones para zurdos'),_tr('Intercambia clic izquierdo y derecho'),renderToggle(`${p}-left`,d.left_handed)));
+        // Aceleración: -1..1 → slider 0..100
+        const accelPct=Math.round((d.pointer_acceleration+1)*50);
+        rows.push(`<div class="detail-item"><span class="dt">${_tr('Velocidad del puntero')}</span>${renderSlider(`${p}-accel`,accelPct,0,100)}</div>`);
+        // Scroll: factor 0.2..3.0 → slider 10..150 (50 = 1.0x)
+        const scrollPct=Math.max(10,Math.min(150,Math.round((d.scroll_factor||1)*50)));
+        rows.push(`<div class="detail-item"><span class="dt">${_tr('Velocidad de desplazamiento')}</span>${renderSlider(`${p}-scroll`,scrollPct,10,150)}</div>`);
+        rows.push(renderRowItem(_tr('Aceleración adaptativa'),_tr('Desactívala para precisión constante (gaming)'),renderToggle(`${p}-adaptive`,!d.accel_profile_flat)));
+        if(isTouchpad&&d.supports_click_methods)
+            rows.push(renderRowItem(_tr('Clic derecho con dos dedos'),_tr('Desactivado: clic derecho en la esquina inferior derecha'),renderToggle(`${p}-clickf`,d.click_method_clickfinger)));
+        return {p,rows};
+    };
+
+    const wired=[];
+    h+=renderSection(_tr('Touchpad'));
+    if(!touchpads.length){
+        h+=renderCard([`<div class="detail-item"><span class="dt">${_tr('No se detectó ningún touchpad')}</span></div>`]);
+    }else touchpads.forEach(d=>{
+        if(touchpads.length>1)h+=renderSection(esc(d.name));
+        const r=deviceRows(d,true);wired.push({d,p:r.p,isTouchpad:true});h+=renderCard(r.rows);
+    });
+    h+=renderSection(_tr('Ratón'));
+    if(!mice.length){
+        h+=renderCard([`<div class="detail-item"><span class="dt">${_tr('No se detectó ningún ratón')}</span><span class="ds">${_tr('Conecta un ratón USB o Bluetooth')}</span></div>`]);
+    }else mice.forEach(d=>{
+        if(mice.length>1)h+=renderSection(esc(d.name));
+        const r=deviceRows(d,false);wired.push({d,p:r.p,isTouchpad:false});h+=renderCard(r.rows);
+    });
+    c.innerHTML=h;
+
+    const setProp=async(sys,prop,value)=>{
+        try{await tauriInvoke('set_input_device_prop',{sysName:sys,prop,value:String(value)});}
+        catch(e){toast(_tr('Error al aplicar'),'❌');}
+    };
+    wired.forEach(({d,p,isTouchpad})=>{
+        setupToggle(`${p}-enabled`,a=>setProp(d.sys_name,'enabled',a));
+        if(isTouchpad)setupToggle(`${p}-tap`,a=>setProp(d.sys_name,'tapToClick',a));
+        setupToggle(`${p}-nat`,a=>setProp(d.sys_name,'naturalScroll',a));
+        if(isTouchpad&&d.supports_disable_while_typing)setupToggle(`${p}-dwt`,a=>setProp(d.sys_name,'disableWhileTyping',a));
+        setupToggle(`${p}-left`,a=>setProp(d.sys_name,'leftHanded',a));
+        setupSlider(`${p}-accel`,v=>{const accel=(v/50)-1;setProp(d.sys_name,'pointerAcceleration',accel.toFixed(2));});
+        setupSlider(`${p}-scroll`,v=>{setProp(d.sys_name,'scrollFactor',(v/50).toFixed(2));});
+        setupToggle(`${p}-adaptive`,a=>setProp(d.sys_name,a?'pointerAccelerationProfileAdaptive':'pointerAccelerationProfileFlat','true'));
+        if(isTouchpad&&d.supports_click_methods)
+            setupToggle(`${p}-clickf`,a=>setProp(d.sys_name,a?'clickMethodClickfinger':'clickMethodAreas','true'));
+    });
+}
+
+// ── Teclado — página del sidebar ───────────────────────────────────────
+export async function renderTeclado(c){
+    const title=_tr('Teclado');
+    c.innerHTML=renderHeader(title)+renderSkeleton(2);
+
+    let loc={locale:'',keymap:''},keymaps=[];
+    const rcRead=async(key,def)=>{
+        try{
+            const r=JSON.parse(await tauriInvoke('run_command',{cmd:'kreadconfig6',args:['--file','kcminputrc','--group','Keyboard','--key',key,'--default',def]}));
+            return parseInt((r.output||'').trim())||parseInt(def);
+        }catch(e){return parseInt(def);}
+    };
+    let repeatDelay=600,repeatRate=25,keymapNames=[];
+    try{
+        [loc,keymaps,repeatDelay,repeatRate,keymapNames]=await Promise.all([
+            tauriInvoke('get_locale_info').then(JSON.parse).catch(()=>({locale:'',keymap:''})),
+            tauriInvoke('get_available_keymaps').then(JSON.parse).catch(()=>[]),
+            rcRead('RepeatDelay','600'),
+            rcRead('RepeatRate','25'),
+            tauriInvoke('list_keymaps_pretty').then(JSON.parse).catch(()=>[]),
+        ]);
+    }catch(e){}
+    // "es" → "Spanish (es)"; unknown codes stay as-is
+    const _kmMap={};keymapNames.forEach(k=>{_kmMap[k.id]=k.name;});
+    const prettyKm=code=>_kmMap[code]?`${_kmMap[code]} (${code})`:code;
+
+    const DELAY_OPTS=[200,400,600,800,1000].map(v=>({val:String(v),label:v+' ms'}));
+    const RATE_OPTS=[15,25,40,60].map(v=>({val:String(v),label:v+'/s'}));
+    const lbl=(opts,v)=>(opts.find(o=>o.val===String(v))||{}).label||String(v);
+
+    let h=renderHeader(title);
+    h+=renderSection(_tr('Distribución'));
+    h+=renderCard([
+        `<div class="detail-item detail-item-row" id="btn-key" style="cursor:pointer">
+            <div class="detail-texts"><span class="dt">${t('label_keyboard_layout')}</span><span class="ds" id="key-cur">${esc(loc.keymap?prettyKm(loc.keymap):t('default'))}</span></div>
+            <div style="color:var(--tx2);font-size:18px">›</div>
+        </div>`,
+        `<div id="key-list" style="display:none;padding:0 20px 16px"><div class="res-list" style="margin-bottom:0">
+            ${keymaps.map(k=>`<div class="res-item ${k===loc.keymap?'active':''}" data-key="${esc(k)}"><span>${esc(prettyKm(k))}</span></div>`).join('')}
+        </div></div>`,
+    ]);
+    h+=renderSection(_tr('Atajos'));
+    h+=renderCard([
+        `<div class="detail-item detail-item-row" style="cursor:pointer" id="open-kde-shortcuts">
+            <div class="detail-texts"><span class="dt">${_tr('Atajos de teclado')}</span><span class="ds">${_tr('Ver y cambiar los atajos del sistema')}</span></div>
+            ${chevron()}
+        </div>`,
+    ]);
+    h+=renderSection(_tr('Repetición de teclas'));
+    h+=renderCard([
+        `<div class="detail-item" style="cursor:pointer" id="kb-delay">
+            <span class="dt">${_tr('Retardo antes de repetir')}</span>
+            <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px" id="kb-delay-l">${repeatDelay} ms</span>${chevron()}</div>
+        </div>`,
+        `<div class="detail-item" style="cursor:pointer" id="kb-rate">
+            <span class="dt">${_tr('Velocidad de repetición')}</span>
+            <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px" id="kb-rate-l">${repeatRate}/s</span>${chevron()}</div>
+        </div>`,
+    ]);
+    c.innerHTML=h;
+
+    document.getElementById('btn-key')?.addEventListener('click',()=>{const el=document.getElementById('key-list');el.style.display=el.style.display==='none'?'block':'none';});
+    document.querySelectorAll('[data-key]').forEach(b=>b.addEventListener('click',async()=>{
+        try{
+            await tauriInvoke('set_keymap',{layout:b.dataset.key});
+            document.querySelectorAll('[data-key]').forEach(x=>x.classList.remove('active'));
+            b.classList.add('active');
+            const cur=document.getElementById('key-cur');if(cur)cur.textContent=prettyKm(b.dataset.key);
+            toast(t('tst_keyboard_changed'));
+        }catch(e){}
+    }));
+    document.getElementById('open-kde-shortcuts')?.addEventListener('click',()=>{
+        if(window.pushSubNav)window.pushSubNav(()=>renderTeclado(c));
+        window.clearPageIntervals?.();
+        renderShortcutsPage(c);
+    });
+    const rcWrite=async(key,val)=>{
+        await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','kcminputrc','--group','Keyboard','--key',key,String(val)]}).catch(()=>{});
+    };
+    document.getElementById('kb-delay')?.addEventListener('click',e=>{
+        popoverSelect(e.currentTarget,{options:DELAY_OPTS,current:String(repeatDelay),onSelect:async v=>{
+            repeatDelay=parseInt(v);await rcWrite('RepeatDelay',v);
+            const l=document.getElementById('kb-delay-l');if(l)l.textContent=v+' ms';
+            toast(_tr('Guardado — se aplica al iniciar sesión'));
+        }});
+    });
+    document.getElementById('kb-rate')?.addEventListener('click',e=>{
+        popoverSelect(e.currentTarget,{options:RATE_OPTS,current:String(repeatRate),onSelect:async v=>{
+            repeatRate=parseInt(v);await rcWrite('RepeatRate',v);
+            const l=document.getElementById('kb-rate-l');if(l)l.textContent=v+'/s';
+            toast(_tr('Guardado — se aplica al iniciar sesión'));
+        }});
+    });
 }
 
 // ── Book AI ────────────────────────────────────────────────────────────

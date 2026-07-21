@@ -23,6 +23,7 @@ mod bluez_profile;
 mod quickshare;
 mod p2p;
 mod search;
+mod system_extras;
 
 // ── Estado global de actualización ───────────────────────────────────────────
 #[derive(Clone, serde::Serialize)]
@@ -2719,16 +2720,22 @@ fn detect_pkg_mgr() -> &'static str {
     use std::io::Write;
     let conf = format!("[Theme]\nCurrent={}\n", theme);
     // Write to /etc/sddm.conf.d/bookos.conf via sudo tee
-    let mut child = StdCommand::new("sudo")
+    let mut child = match StdCommand::new("sudo")
         .args(["-S", "tee", "/etc/sddm.conf.d/bookos-theme.conf"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn().expect("spawn failed");
+        .spawn() {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    };
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(format!("{}\n{}", password, conf).as_bytes());
     }
-    let output = child.wait_with_output().unwrap();
+    let output = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    };
     format!(r#"{{"ok":{}}}"#, output.status.success())
 }
 
@@ -3216,11 +3223,14 @@ fn lockscreen_source() -> Option<String> {
     }
 });"#;
     use tokio::io::AsyncWriteExt;
-    let mut child = Command::new("pkexec")
+    let mut child = match Command::new("pkexec")
         .args(["tee", "/etc/polkit-1/rules.d/51-bookos-hw.rules"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .spawn().unwrap();
+        .spawn() {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    };
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(rule.as_bytes()).await;
     }
@@ -3302,18 +3312,24 @@ fn lockscreen_source() -> Option<String> {
 
 #[tauri::command] async fn run_sudo_command(cmd: String, args: Vec<String>, password: String) -> String {
     use tokio::io::AsyncWriteExt;
-    let mut child = Command::new("sudo")
+    let mut child = match Command::new("sudo")
         .arg("-k").arg("-S")
         .arg(&cmd)
         .args(&args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn().expect("failed to spawn sudo");
+        .spawn() {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"ok":false,"stdout":"","stderr":"{}"}}"#, esc(&e.to_string())),
+    };
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(format!("{}\n", password).as_bytes()).await;
     }
-    let output = child.wait_with_output().await.unwrap();
+    let output = match child.wait_with_output().await {
+        Ok(o) => o,
+        Err(e) => return format!(r#"{{"ok":false,"stdout":"","stderr":"{}"}}"#, esc(&e.to_string())),
+    };
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     format!(r#"{{"ok":{},"stdout":"{}","stderr":"{}"}}"#, output.status.success(), esc(&stdout), esc(&stderr))
@@ -3705,16 +3721,22 @@ fn default_app_roles() -> Vec<(&'static str, &'static str, &'static str, &'stati
 #[tauri::command] fn change_password(username: String, old_pwd: String, new_pwd: String) -> String {
     use std::io::Write;
     // Use chpasswd: feed "user:newpwd" via stdin, authenticated with sudo -S
-    let mut child = StdCommand::new("sudo")
+    let mut child = match StdCommand::new("sudo")
         .args(["-k", "-S", "--", "chpasswd"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn().expect("spawn");
+        .spawn() {
+        Ok(c) => c,
+        Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    };
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(format!("{}\n{}:{}\n", old_pwd, esc(&username), esc(&new_pwd)).as_bytes());
     }
-    let out = child.wait_with_output().unwrap();
+    let out = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    };
     format!(r#"{{"ok":{}}}"#, out.status.success())
 }
 
@@ -4802,6 +4824,25 @@ async fn handle_buds_appeared(app: &tauri::AppHandle, mac: &str, name: &str) {
     }
 }
 
+/// Open an external https URL in the user's default browser. Only https URLs
+/// on the bookos.es domain are allowed (changelog, docs) to avoid this becoming
+/// an arbitrary-launch primitive.
+#[tauri::command] async fn open_external_url(url: String) -> String {
+    let ok = url.starts_with("https://")
+        && url.len() < 300
+        && !url.contains(['"', '\'', ' ', '\n', '\t', '`', '$', ';'])
+        && url.split('/').nth(2)
+            .map(|host| host == "bookos.es" || host.ends_with(".bookos.es"))
+            .unwrap_or(false);
+    if !ok {
+        return r#"{"ok":false,"error":"url not allowed"}"#.into();
+    }
+    match std::process::Command::new("xdg-open").arg(&url).spawn() {
+        Ok(_)  => r#"{"ok":true}"#.into(),
+        Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    }
+}
+
 #[tauri::command] async fn which_app(app: String) -> String {
     let allowed = ["rquickshare", "quick-share", "gs-connect", "galaxy-buds-client", "GalaxyBudsClient", "kdeconnect-app"];
     if !allowed.contains(&app.as_str()) {
@@ -4929,10 +4970,17 @@ fn main() {
             {
                 let home = std::env::var("HOME").unwrap_or_default();
                 let desktop_path = format!("{}/.config/autostart/bookos-settings.desktop", home);
-                if !std::path::Path::new(&autostart_optout_path()).exists()
-                    && !std::path::Path::new(&desktop_path).exists() {
-                    let _ = std::fs::create_dir_all(format!("{}/.config/autostart", home));
-                    let _ = std::fs::write(&desktop_path, AUTOSTART_DESKTOP);
+                if !std::path::Path::new(&autostart_optout_path()).exists() {
+                    // (Re)write when missing OR stale — old installs lacked
+                    // `--hidden` in Exec, so autostart opened the window instead
+                    // of starting as a background service.
+                    let stale = std::fs::read_to_string(&desktop_path)
+                        .map(|cur| cur != AUTOSTART_DESKTOP)
+                        .unwrap_or(true);
+                    if stale {
+                        let _ = std::fs::create_dir_all(format!("{}/.config/autostart", home));
+                        let _ = std::fs::write(&desktop_path, AUTOSTART_DESKTOP);
+                    }
                 }
             }
             // Background earbud-detection daemon: notifies on new buds/headset connect.
@@ -5266,6 +5314,14 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             open_main_window,
+            system_extras::list_input_devices,system_extras::set_input_device_prop,
+            system_extras::kscreen_get,system_extras::kscreen_set,
+            system_extras::list_cursor_themes,system_extras::list_icon_themes,
+            system_extras::apply_cursor_theme,system_extras::apply_icon_theme,
+            system_extras::restart_kglobalaccel,
+            system_extras::list_keymaps_pretty,system_extras::set_global_shortcut,
+            system_extras::list_custom_shortcuts,system_extras::create_custom_shortcut,system_extras::delete_custom_shortcut,
+            system_extras::set_avatar_data,
             get_user_info,set_display_name,set_hostname,get_system_info,get_default_hostname,get_bookos_release,refresh_bookos_release,get_update_channel,set_update_channel,apply_bookos_release,list_bookos_snapshots,rollback_bookos_snapshot,get_snapshot_support,get_bookos_repo_status,set_bookos_repo,
             check_hw_features,set_performance_mode,set_charge_limit,set_background_throttle,predict_battery_runtime,
             get_wifi_status,toggle_wifi,get_wifi_list,connect_wifi,wifi_rescan,
@@ -5299,7 +5355,7 @@ fn main() {
             get_available_kvantum_themes,get_available_plasma_themes,get_style_themes,set_style_themes,
             get_bt_device_battery,get_kdeconnect_devices,
             get_audio_devices,set_default_sink,set_default_source,get_app_audio,set_app_volume,get_sink_descriptions,
-            get_location_status,set_location_enabled,run_command,launch_app,which_app,
+            get_location_status,set_location_enabled,run_command,launch_app,which_app,open_external_url,
             hardware_control::aplicar_perfil_termico,
             hardware_control::set_fan_mode,
             hardware_control::check_book_hw,
