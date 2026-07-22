@@ -314,17 +314,27 @@ async fn get_snapshot_support() -> String {
     format!(r#"{{"supported":{},"fs":"{}","snapper":{}}}"#, fs=="btrfs" && snapper, esc(&fs), snapper)
 }
 
-/// List btrfs/snapper snapshots (rollback points). Returns [] if snapper
-/// isn't installed or the system isn't on btrfs.
+/// List btrfs/snapper snapshots (rollback points).
+/// Returns {"ok":bool,"error":"permission"|"missing"|"error"|"","snapshots":[...]}.
+/// snapper denies listing to non-root users unless ALLOW_USERS is configured
+/// (see enable_snapshot_access), so we surface "permission" distinctly from
+/// a genuinely empty list — the old code returned [] for both, which is why
+/// the Recovery page always looked empty.
 #[tauri::command]
 async fn list_bookos_snapshots() -> String {
     let out = match Command::new("snapper").args(["-c","root","--machine-readable","csv","list"]).output().await {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return "[]".into(),
+        Ok(o) => o,
+        Err(_) => return r#"{"ok":false,"error":"missing","snapshots":[]}"#.into(),
     };
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).to_lowercase();
+        let kind = if err.contains("permis") || err.contains("denied") { "permission" } else { "error" };
+        return format!(r#"{{"ok":false,"error":"{}","snapshots":[]}}"#, kind);
+    }
+    let body = String::from_utf8_lossy(&out.stdout).to_string();
     // CSV header first; columns include number, date, description.
     let mut items: Vec<String> = Vec::new();
-    for (i, line) in out.lines().enumerate() {
+    for (i, line) in body.lines().enumerate() {
         if i == 0 || line.trim().is_empty() { continue; }
         let cols: Vec<&str> = line.split(',').collect();
         // snapper csv: config,subvolume,number,default,active,date,user,cleanup,description,...
@@ -334,7 +344,54 @@ async fn list_bookos_snapshots() -> String {
         if num.is_empty() || num == "0" { continue; }
         items.push(format!(r#"{{"number":"{}","date":"{}","description":"{}"}}"#, esc(num), esc(date), esc(desc)));
     }
-    format!("[{}]", items.join(","))
+    format!(r#"{{"ok":true,"error":"","snapshots":[{}]}}"#, items.join(","))
+}
+
+/// One-time setup: allow the current user to read/create snapshots without root
+/// (snapper ALLOW_USERS + SYNC_ACL). Needs the password once; afterwards listing
+/// and manual snapshots work with no prompt.
+#[tauri::command]
+async fn enable_snapshot_access(password: String) -> String {
+    let user = std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).unwrap_or_default();
+    if user.is_empty() || !user.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return r#"{"ok":false,"error":"bad user"}"#.into();
+    }
+    let cmd = format!("snapper -c root set-config ALLOW_USERS={user} SYNC_ACL=yes");
+    let out = Command::new("sudo").args(["-k","-S","sh","-c",&cmd])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match out { Ok(c) => c, Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())) };
+    if let Some(mut sin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = sin.write_all(format!("{}\n", password).as_bytes()).await;
+    }
+    match child.wait_with_output().await {
+        Ok(o) if o.status.success() => r#"{"ok":true}"#.into(),
+        Ok(o) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    }
+}
+
+/// Create a manual snapshot. Runs as the user (works once ALLOW_USERS is set),
+/// returning {"ok":false,"error":"permission"} if access hasn't been enabled yet.
+#[tauri::command]
+async fn create_snapshot(description: String) -> String {
+    let desc: String = description.chars()
+        .filter(|c| !matches!(c, '"' | '\'' | '`' | '$' | ';' | '\n' | '\\'))
+        .take(80).collect();
+    let desc = if desc.trim().is_empty() { "Punto de restauración manual".to_string() } else { desc };
+    let out = Command::new("snapper").args(["-c","root","create","-d",&desc]).output().await;
+    match out {
+        Ok(o) if o.status.success() => r#"{"ok":true}"#.into(),
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr).to_lowercase();
+            let kind = if err.contains("permis") || err.contains("denied") { "permission" } else { "error" };
+            format!(r#"{{"ok":false,"error":"{}"}}"#, kind)
+        }
+        Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string())),
+    }
 }
 
 /// Roll the system back to a snapshot (needs reboot to take effect).
@@ -5322,7 +5379,7 @@ fn main() {
             system_extras::list_keymaps_pretty,system_extras::set_global_shortcut,
             system_extras::list_custom_shortcuts,system_extras::create_custom_shortcut,system_extras::delete_custom_shortcut,
             system_extras::set_avatar_data,
-            get_user_info,set_display_name,set_hostname,get_system_info,get_default_hostname,get_bookos_release,refresh_bookos_release,get_update_channel,set_update_channel,apply_bookos_release,list_bookos_snapshots,rollback_bookos_snapshot,get_snapshot_support,get_bookos_repo_status,set_bookos_repo,
+            get_user_info,set_display_name,set_hostname,get_system_info,get_default_hostname,get_bookos_release,refresh_bookos_release,get_update_channel,set_update_channel,apply_bookos_release,list_bookos_snapshots,rollback_bookos_snapshot,get_snapshot_support,enable_snapshot_access,create_snapshot,get_bookos_repo_status,set_bookos_repo,
             check_hw_features,set_performance_mode,set_charge_limit,set_background_throttle,predict_battery_runtime,
             get_wifi_status,toggle_wifi,get_wifi_list,connect_wifi,wifi_rescan,
             get_bluetooth_status,toggle_bluetooth,get_bluetooth_devices,connect_bluetooth,disconnect_bluetooth,bluetooth_scan,

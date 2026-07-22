@@ -1736,6 +1736,17 @@ const _UI_TR_EN = {
     'Velocidad de repetición':'Repeat rate',
     'Guardado — se aplica al iniciar sesión':'Saved — applies at next login',
     'Ver el registro de cambios':'View changelog',
+    // ── Recovery / snapshots ──
+    'Acceso a instantáneas no habilitado':'Snapshot access not enabled',
+    'Btrfs y Snapper están listos, pero falta permitir que tu usuario lea los puntos de restauración.':'Btrfs and Snapper are ready, but your user still needs permission to read restore points.',
+    'Habilitar acceso':'Enable access',
+    'Habilita el acceso para ver tus puntos de restauración.':'Enable access to see your restore points.',
+    'Habilita el acceso primero':'Enable access first',
+    'Acceso habilitado':'Access enabled',
+    'Crear ahora':'Create now',
+    'Creando punto de restauración…':'Creating restore point…',
+    'Punto de restauración creado':'Restore point created',
+    'Error al crear el punto':'Failed to create restore point',
     // ── Touchpad extras / display extras / custom shortcuts / avatar crop ──
     'Velocidad de desplazamiento':'Scroll speed',
     'Clic derecho con dos dedos':'Two-finger right click',

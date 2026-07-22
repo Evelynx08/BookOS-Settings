@@ -3102,10 +3102,12 @@ export async function renderBloqueo(c){
 // ── Recovery / snapshots sub-page (below Updates) ───────────────────────
 export async function renderSnapshots(c){
     c.innerHTML=renderHeader('Recuperación')+renderSkeleton(2);
-    const [support,snaps]=await Promise.all([
+    const [support,snapRes]=await Promise.all([
         tauriInvoke('get_snapshot_support').then(JSON.parse).catch(()=>({supported:false,fs:''})),
-        tauriInvoke('list_bookos_snapshots').then(JSON.parse).catch(()=>[]),
+        tauriInvoke('list_bookos_snapshots').then(JSON.parse).catch(()=>({ok:false,error:'error',snapshots:[]})),
     ]);
+    const snaps=snapRes.snapshots||[];
+    const needsAccess=snapRes.error==='permission';
     const policy=await getSetting('SnapshotPolicy','osupdate');
     const opt=(val,label,sub)=>`<div class="detail-item detail-item-row" data-snappol="${val}" style="cursor:pointer">
         <div class="detail-texts"><span class="dt">${_tr(label)}</span><span class="ds">${_tr(sub)}</span></div>
@@ -3122,8 +3124,25 @@ export async function renderSnapshots(c){
     if(!support.supported){
         h+=`<div class="detail-card" style="padding:16px 20px;margin-top:4px"><span class="ds">${_tr('Las instantáneas requieren un sistema de archivos Btrfs.')}${support.fs?` (${esc(support.fs)})`:''}</span></div>`;
     }
-    h+=renderSection('Puntos de restauración');
-    if(!snaps.length){
+    // Sistema soportado pero snapper no deja leer al usuario todavía
+    if(support.supported && needsAccess){
+        h+=`<div class="detail-card" style="padding:16px 20px;margin-top:4px">
+            <span class="dt" style="display:block;margin-bottom:4px">${_tr('Acceso a instantáneas no habilitado')}</span>
+            <span class="ds" style="display:block;margin-bottom:12px">${_tr('Btrfs y Snapper están listos, pero falta permitir que tu usuario lea los puntos de restauración.')}</span>
+            <button class="btn btn-primary btn-sm" id="snap-enable">${_tr('Habilitar acceso')}</button>
+        </div>`;
+    }
+
+    // Cabecera de puntos de restauración con botón de crear (si hay acceso)
+    if(support.supported && !needsAccess){
+        h+=`<div class="section-header-row"><p class="section-header" style="margin:0">${_tr('Puntos de restauración')}</p>
+            <button class="refresh-btn" id="snap-create">+ ${_tr('Crear ahora')}</button></div>`;
+    }else{
+        h+=renderSection('Puntos de restauración');
+    }
+    if(needsAccess){
+        h+=renderCard([`<div class="detail-item"><span class="ds">${_tr('Habilita el acceso para ver tus puntos de restauración.')}</span></div>`]);
+    }else if(!snaps.length){
         h+=renderCard([`<div class="detail-item"><span class="ds">${_tr('No hay capturas todavía.')}</span></div>`]);
     }else{
         h+=renderCard(snaps.map(s=>`<div class="detail-item detail-item-row">
@@ -3132,6 +3151,20 @@ export async function renderSnapshots(c){
         </div>`));
     }
     c.innerHTML=h;
+
+    document.getElementById('snap-enable')?.addEventListener('click',async()=>{
+        const pwd=await promptUpdatePassword('BookOS'); if(!pwd)return;
+        const r=JSON.parse(await tauriInvoke('enable_snapshot_access',{password:pwd}).catch(()=>({ok:false})));
+        if(r.ok){toast(_tr('Acceso habilitado'),'✅');renderSnapshots(c);}
+        else toast(_tr('Error')+': '+(r.error||''),'❌');
+    });
+    document.getElementById('snap-create')?.addEventListener('click',async()=>{
+        toast(_tr('Creando punto de restauración…'),'⏳');
+        const r=JSON.parse(await tauriInvoke('create_snapshot',{description:'Punto manual desde Ajustes'}).catch(()=>({ok:false,error:'error'})));
+        if(r.ok){toast(_tr('Punto de restauración creado'),'✅');renderSnapshots(c);}
+        else if(r.error==='permission'){toast(_tr('Habilita el acceso primero'),'ℹ');renderSnapshots(c);}
+        else toast(_tr('Error al crear el punto'),'❌');
+    });
 
     c.querySelectorAll('[data-snappol]').forEach(el=>el.addEventListener('click',()=>{
         setSetting('SnapshotPolicy',el.dataset.snappol);
