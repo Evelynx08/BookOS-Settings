@@ -14,8 +14,26 @@ import org.kde.plasma.private.mpris as Mpris
 
 Item {
     id: bookBar
-    implicitWidth: modes.length > 0 ? barRow.implicitWidth : 0
+    implicitWidth: (modes.length > 0 && !dismissed) ? barRow.implicitWidth : 0
     implicitHeight: centerPill.visible ? centerPill.height : 56
+
+    // ── Cerrar la now bar (× y deslizar). Reaparece al cambiar de canción. ──
+    property bool dismissed: false
+    // Opacidad de la píldora que pide el editor (pillOpacity, 0-100) y permiso
+    // para mostrarse (showBookBar / bookBarShow). Se combinan aquí en vez de
+    // sobrescribir `visible` desde fuera, que rompería el cierre de la now bar.
+    property real pillOpacity: 1.0
+    // Textos de la tarjeta de rutina, ya traducidos desde theme.conf (los
+    // escribe BookOS Settings en el idioma de la app). Estaban en inglés fijo
+    // dentro de una interfaz en español.
+    property string strStarted: "Inicio"
+    property string strFinish: "Fin"
+    property string strObjective: "Objetivo"
+    property string strDeactivateRoutine: "Desactivar rutina"
+    property bool allowShow: true
+    opacity: (dismissed || !allowShow) ? 0 : pillOpacity
+    visible: opacity > 0
+    Behavior on opacity { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
 
     // ── Dynamic theme ────────────────────────────────────────────────────
     readonly property bool darkTheme: {
@@ -235,11 +253,21 @@ Item {
     property bool expanded: false
     property bool pendingExpand: false
 
+    // ── Filtros del editor de la pantalla de acceso ───────────────────────
+    // Los inyecta LockScreenUi desde theme.conf. Por defecto todo permitido,
+    // así que la píldora se comporta igual que antes si nadie los toca.
+    property string allowedContent: "battery;media;routine"
+    property bool   allowBattery: true
+    // "media" en el .conf es el modo "music" de aquí.
+    function bbAllows(kind) {
+        return allowedContent === "" || allowedContent.indexOf(kind) !== -1
+    }
+
     function updateModes() {
         var m = []
-        if (hasMusic && songTitle !== "")        m.push("music")
-        if (routine !== null && routine.active)  m.push("routine")
-        if (hasBattery)                          m.push("battery")
+        if (hasMusic && songTitle !== "" && bbAllows("media"))   m.push("music")
+        if (routine !== null && routine.active && bbAllows("routine")) m.push("routine")
+        if (hasBattery && allowBattery && bbAllows("battery"))   m.push("battery")
         modes = m
         if (modes.length === 0) { expanded = false; return }
         if (modeIdx >= modes.length) modeIdx = modes.length - 1
@@ -249,7 +277,7 @@ Item {
         updateModes()
         if (!hasMusic || artUrl === "") artColor = "#2D2B6B"
     }
-    onSongTitleChanged: updateModes()
+    onSongTitleChanged: { updateModes(); if (songTitle !== "") dismissed = false }
     Component.onCompleted: updateModes()
 
     readonly property string curMode:   modes.length > 0 ? modes[modeIdx] : ""
@@ -266,10 +294,29 @@ Item {
         return "#1c1c1e"
     }
 
+    // Re-extraer color al cambiar de portada aunque la URL se repita
+    // (Spotify reusa URLs, Qt a veces no recarga). Igual que com.bookos.bookbar.
+    property int artReloadTick: 0
+    onArtUrlChanged: {
+        if (artUrl === "") { artColor = "#2D2B6B"; return }
+        artReloadTick++
+        artRetryTimer.restart()
+    }
+    Timer {
+        id: artRetryTimer; interval: 250; repeat: false
+        onTriggered: {
+            if (artThumb.status === Image.Ready) colorCanvas.requestPaint()
+            else if (artThumb.status === Image.Error) bookBar.artColor = "#2D2B6B"
+        }
+    }
     Image {
-        id: artThumb; visible: false; source: bookBar.artUrl
-        width: 16; height: 16; fillMode: Image.Stretch; cache: false
-        onStatusChanged: { if (status === Image.Ready) colorCanvas.requestPaint() }
+        id: artThumb; visible: false
+        source: bookBar.artUrl === "" ? "" : bookBar.artUrl + (bookBar.artUrl.indexOf("#") < 0 ? "#" : "&") + "t=" + bookBar.artReloadTick
+        width: 16; height: 16; fillMode: Image.Stretch; cache: false; asynchronous: true
+        onStatusChanged: {
+            if (status === Image.Ready) colorCanvas.requestPaint()
+            else if (status === Image.Error) bookBar.artColor = "#2D2B6B"
+        }
     }
     Canvas {
         id: colorCanvas; visible: false; width: 16; height: 16
@@ -378,7 +425,7 @@ Item {
                     anchors.left: parent.left; anchors.top: parent.top
                     anchors.leftMargin: -3; anchors.topMargin: -3
                     width: 15; height: 15; radius: 7.5
-                    color: "#0a84ff"
+                    color: Kirigami.Theme.highlightColor
                     Text { anchors.centerIn: parent; text: bookBar.playerCount; color: "white"
                         font.pixelSize: 9; font.weight: Font.Bold }
                 }
@@ -427,6 +474,30 @@ Item {
                 visible: bookBar.curMode === "battery" && !bookBar.expanded
                 source: chargeFillRaw
                 maskSource: chargeFillMask
+            }
+
+            // ── Fondo dinámico: portada difuminada + tinte (solo música) ────
+            Item {
+                anchors.fill: parent
+                visible: bookBar.curMode === "music" && bookBar.artUrl !== ""
+                layer.enabled: true
+                layer.effect: OpacityMask {
+                    maskSource: Rectangle { width: centerPill.width; height: centerPill.height; radius: centerPill.radius }
+                }
+                Image {
+                    id: coverBgImg
+                    anchors.fill: parent
+                    source: bookBar.artUrl
+                    fillMode: Image.PreserveAspectCrop
+                    asynchronous: true; cache: false; visible: false
+                }
+                FastBlur { anchors.fill: parent; source: coverBgImg; radius: bookBar.expanded ? 64 : 40 }
+                // tinte con el color dominante: cohesión + legibilidad del texto
+                Rectangle {
+                    anchors.fill: parent
+                    color: Qt.rgba(bookBar.artColor.r, bookBar.artColor.g, bookBar.artColor.b,
+                                   bookBar.expanded ? 0.42 : 0.58)
+                }
             }
 
             // ── Compact ───────────────────────────────────────────────────
@@ -676,7 +747,7 @@ Item {
                                         }
                                     }
                                     Text {
-                                        text: bookBar.audioOut; color: "white"; font.pixelSize: 10; font.weight: Font.SemiBold
+                                        text: bookBar.audioOut; color: "white"; font.pixelSize: 10; font.weight: Font.DemiBold
                                         anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight
                                         width: Math.max(40, centerPill.width - 80)
                                     }
@@ -802,11 +873,11 @@ Item {
                         Row {
                             anchors.centerIn: parent; spacing: 14
                             Column {
-                                Text { text: "Started"; color: "white"; opacity: 0.65; font.pixelSize: 9; font.weight: Font.Medium }
+                                Text { text: bookBar.strStarted; color: "white"; opacity: 0.65; font.pixelSize: 9; font.weight: Font.Medium }
                                 Text { text: bookBar.routine ? bookBar.routine.startTime : "--"; color: "white"; font.pixelSize: 14; font.weight: Font.Bold }
                             }
                             Column {
-                                Text { text: "Finish"; color: "white"; opacity: 0.65; font.pixelSize: 9; font.weight: Font.Medium }
+                                Text { text: bookBar.strFinish; color: "white"; opacity: 0.65; font.pixelSize: 9; font.weight: Font.Medium }
                                 Text { text: bookBar.routine ? bookBar.routine.endTime : "--"; color: "white"; font.pixelSize: 14; font.weight: Font.Bold }
                             }
                         }
@@ -815,7 +886,7 @@ Item {
                         width: (parent.width-8)/2; height: 62; radius: 12; color: "#22ffffff"
                         Column {
                             anchors.centerIn: parent; spacing: 2
-                            Text { text: "Objective"; color: "white"; opacity: 0.65; font.pixelSize: 9; font.weight: Font.Medium; anchors.horizontalCenter: parent.horizontalCenter }
+                            Text { text: bookBar.strObjective; color: "white"; opacity: 0.65; font.pixelSize: 9; font.weight: Font.Medium; anchors.horizontalCenter: parent.horizontalCenter }
                             Text { text: bookBar.routine ? bookBar.routine.objective : "--"; color: "white"; font.pixelSize: 22; font.weight: Font.Bold; anchors.horizontalCenter: parent.horizontalCenter }
                         }
                     }
@@ -825,7 +896,7 @@ Item {
                     width: parent.width; height: 34; radius: 17
                     color: deactMA.containsMouse ? "#33ffffff" : "#22ffffff"
                     Behavior on color { ColorAnimation { duration: 140 } }
-                    Text { anchors.centerIn: parent; text: "Deactivate routine"; color: "white"; font.pixelSize: 12; font.weight: Font.SemiBold }
+                    Text { anchors.centerIn: parent; text: bookBar.strDeactivateRoutine; color: "white"; font.pixelSize: 12; font.weight: Font.DemiBold }
                     MouseArea {
                         id: deactMA
                         anchors.fill: parent; hoverEnabled: true
@@ -840,9 +911,31 @@ Item {
                 anchors.fill: parent
                 z: -1
                 enabled: !bookBar.expanded
-                onClicked: mouse => {
-                    if (bookBar.curMode === "music" || bookBar.curMode === "routine") bookBar.expanded = true
-                    else mouse.accepted = false
+                property real _pressY: 0
+                onPressed: mouse => { _pressY = mouse.y }
+                onReleased: mouse => {
+                    var dy = mouse.y - _pressY
+                    if (dy > 45) {
+                        bookBar.dismissed = true            // deslizar abajo → cerrar
+                    } else if (Math.abs(dy) < 12 &&
+                               (bookBar.curMode === "music" || bookBar.curMode === "routine")) {
+                        bookBar.expanded = true              // tap → abrir
+                    }
+                }
+            }
+
+            // Botón × para cerrar (esquina; solo música)
+            Rectangle {
+                visible: bookBar.curMode === "music"
+                width: 22; height: 22; radius: 11
+                color: xMA.containsMouse ? "#66000000" : "#40000000"
+                anchors.top: parent.top; anchors.right: parent.right; anchors.margins: 6
+                z: 50
+                Behavior on color { ColorAnimation { duration: 120 } }
+                Text { anchors.centerIn: parent; text: "×"; color: "white"; font.pixelSize: 15; font.bold: true }
+                MouseArea {
+                    id: xMA; anchors.fill: parent; hoverEnabled: true
+                    onClicked: mouse => { bookBar.dismissed = true; mouse.accepted = true }
                 }
             }
         }
@@ -932,7 +1025,7 @@ Item {
                     anchors.left: parent.left; anchors.top: parent.top
                     anchors.leftMargin: -3; anchors.topMargin: -3
                     width: 15; height: 15; radius: 7.5
-                    color: "#0a84ff"
+                    color: Kirigami.Theme.highlightColor
                     Text { anchors.centerIn: parent; text: bookBar.playerCount; color: "white"
                         font.pixelSize: 9; font.weight: Font.Bold }
                 }

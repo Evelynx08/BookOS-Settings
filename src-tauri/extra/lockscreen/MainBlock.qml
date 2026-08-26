@@ -41,13 +41,25 @@ SessionManagementScreen {
     // User override at ~/.config/bookos-sddm-variant takes precedence (set by
     // BookOS Settings when theme switches, no sudo required).
     property var themeConf: ({})
-    function _readFile(url) {
-        try {
-            var xhr = new XMLHttpRequest()
-            xhr.open("GET", url, false)
-            xhr.send()
-            return xhr.responseText || ""
-        } catch(e) { return "" }
+    // Con `cat` y no con XMLHttpRequest: Qt 6 bloquea GET sobre file:// salvo
+    // QML_XHR_ALLOW_FILE_READ=1, que el greeter no define. Con XHR esto volvía
+    // siempre vacío y el panel se quedaba en los colores por defecto.
+    //
+    // Gana el último: theme.conf de fábrica → theme.conf.user que escribe
+    // Settings → ~/.config/bookos-sddm-variant (por usuario, sin sudo). Antes
+    // faltaba theme.conf.user, así que el panel ignoraba lo guardado en la app.
+    //
+    // Va en una property y no como hijo suelto: SessionManagementScreen es un
+    // layout y su default property solo admite Item, así que un DataSource
+    // declarado ahí aborta la carga del componente entero ("Cannot assign
+    // object of type DataSource to list property _children").
+    readonly property QtObject themeConfSrc: P5Support.DataSource {
+        engine: "executable"
+        connectedSources: ["sh -c 'cat /usr/share/sddm/themes/bookos/theme.conf 2>/dev/null; echo; cat /usr/share/sddm/themes/bookos/theme.conf.user 2>/dev/null; echo; cat $HOME/.config/bookos-sddm-variant 2>/dev/null; echo; printf \"sessionScheme=%s\\n\" \"$(kreadconfig6 --file kdeglobals --group General --key ColorScheme 2>/dev/null)\"'"]
+        interval: 0
+        onNewData: (src, data) => {
+            sessionManager.themeConf = sessionManager._parseConf(data["stdout"] || "")
+        }
     }
     function _parseConf(text) {
         var out = {}
@@ -61,33 +73,74 @@ SessionManagementScreen {
         }
         return out
     }
+    // La fuente ya lanza el `cat` al conectarse; esto solo relee si el .conf
+    // cambia con el bloqueo abierto.
     function readSddmConf() {
-        var sys = _parseConf(_readFile("file:///usr/share/sddm/themes/bookos/theme.conf"))
-        // Per-user override file
-        var home = (typeof kscreenlocker_userName !== "undefined") ? "/home/" + kscreenlocker_userName : ""
-        if (home !== "") {
-            var override = _parseConf(_readFile("file://" + home + "/.config/bookos-sddm-variant"))
-            // Override keys take precedence
-            for (var k in override) sys[k] = override[k]
-        }
-        themeConf = sys
+        var s = themeConfSrc.connectedSources[0]
+        themeConfSrc.disconnectSource(s)
+        themeConfSrc.connectSource(s)
     }
-    Component.onCompleted: readSddmConf()
 
-    readonly property bool isDark: (themeConf.variant || "dark") !== "light"
+    // Misma resolución que LockScreenUi: "auto" seguía al valor por defecto y
+    // se quedaba en oscuro pasara lo que pasara.
+    readonly property bool isDark: {
+        var v = themeConf.variant || "auto"
+        if (v === "light") return false
+        if (v === "dark")  return true
+        var s = (themeConf.sessionScheme || "").toLowerCase()
+        return s === "" ? true : s.indexOf("dark") !== -1
+    }
     readonly property color fgColor:    isDark ? "#ffffff" : "#000000"
     readonly property color fg2Color:   "#8e8e93"
-    readonly property color fieldBg:    isDark ? "#1c1c1e" : "#ffffff"
-    readonly property color enterBg:    isDark ? "#3a3a3c" : "#e5e5ea"
+    // Igual que en el tema SDDM: campo y botón translúcidos, con la misma
+    // opacidad configurable que las píldoras. Opacos quedaban como un parche
+    // sólido sobre el fondo desenfocado.
+    readonly property real pillOpacity: _mbNum(themeConf.pillOpacity, 80) / 100.0
+    readonly property color fieldBg:    isDark ? Qt.rgba(0.109, 0.109, 0.118, pillOpacity)
+                                               : Qt.rgba(1, 1, 1, pillOpacity)
+    readonly property color enterBg:    isDark ? Qt.rgba(0.227, 0.227, 0.235, pillOpacity)
+                                               : Qt.rgba(0.898, 0.898, 0.918, pillOpacity)
     readonly property color enterFg:    isDark ? "#ffffff" : "#3a3a3c"
     readonly property color accentColor: themeConf.accentColor || "#007aff"
 
+    // Medidas reales de la pantalla, que las pasa LockScreenUi: el StackView
+    // que contiene este bloque es más alto que la pantalla, así que su propio
+    // height no sirve para colocar nada por porcentaje.
+    property real screenW: sessionManager.width
+    property real screenH: sessionManager.height
+
+    // Centro del bloque en % de la pantalla, la misma clave que coloca el
+    // editor de la pantalla de acceso (usersX/usersY en theme.conf).
+    function _mbNum(v, def) {
+        var n = parseFloat(v)
+        if (isNaN(n)) return def
+        return Math.max(0, Math.min(100, n))
+    }
+    readonly property real usersXPct: _mbNum(themeConf.usersX, 50)
+    readonly property real usersYPct: _mbNum(themeConf.usersY, 52)
+
+    // SessionManagementScreen declara `default property alias _children:
+    // innerLayout.children`, así que todo hijo nuestro acaba dentro de un
+    // ColumnLayout limitado a 16 gridUnits de ancho. Un layout manda sobre x/y,
+    // de modo que las coordenadas de abajo se ignoraban y el bloque, más ancho
+    // que ese contenedor, se desbordaba hacia la derecha — el motivo del viejo
+    // parche `horizontalCenterOffset: -width * 0.04`.
+    // Reparentar al FocusScope raíz lo saca del layout y deja x/y en
+    // coordenadas de pantalla (este item se ancla a 0 en el StackView).
+    Component.onCompleted: mainCol.parent = sessionManager
+
+    // La lista de usuarios y la fila de acciones de Breeze no se usan: el bloque
+    // pinta su propio avatar y su propio campo. Dejarlas activas además hacía
+    // que SessionManagementScreen.qml:160 leyera `children[0].implicitWidth`
+    // sobre una fila vacía → "TypeError: Cannot read property 'implicitWidth'
+    // of undefined" en cada bloqueo.
+    showUserList: false
+    actionItemsVisible: false
+
     Column {
         id: mainCol
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.horizontalCenterOffset: -Math.round(sessionManager.width * 0.04)
-        anchors.verticalCenter: parent.verticalCenter
-        anchors.verticalCenterOffset: -Math.round(mainCol.height / 2) - Math.round(sessionManager.height * 0.05)
+        x: Math.round(sessionManager.screenW * sessionManager.usersXPct / 100 - width  / 2)
+        y: Math.round(sessionManager.screenH * sessionManager.usersYPct / 100 - height / 2)
         spacing: 14
 
         // ── Avatar circle ──────────────────────────────────────────────────
@@ -106,16 +159,21 @@ SessionManagementScreen {
                 cache: false
                 sourceSize.width: 256
                 sourceSize.height: 256
-                source: "file:///var/lib/AccountsService/icons/" + kscreenlocker_userName
+                // kscreenlocker_userImage es la ruta que YA resolvió Plasma, así
+                // que va primero. Las otras dos se construían con
+                // kscreenlocker_userName, que es el nombre MOSTRADO ("Evelyn"),
+                // no el de login ("evelyn"): en cuanto difieren en mayúsculas
+                // apuntan a rutas que no existen y el avatar se caía.
+                readonly property string byName: "file:///var/lib/AccountsService/icons/" + kscreenlocker_userName
+                readonly property string byHome: "file:///home/" + kscreenlocker_userName + "/.face.icon"
+                readonly property string byPlasma: kscreenlocker_userImage !== ""
+                    ? "file://" + kscreenlocker_userImage.split("/").map(encodeURIComponent).join("/") : ""
+                source: byPlasma !== "" ? byPlasma : byName
                 onStatusChanged: {
                     if (status === Image.Error) {
-                        var fb = "file:///home/" + kscreenlocker_userName + "/.face.icon"
-                        if (source.toString() !== fb) {
-                            source = fb
-                        } else if (kscreenlocker_userImage !== "") {
-                            var fb2 = "file://" + kscreenlocker_userImage.split("/").map(encodeURIComponent).join("/");
-                            if (source.toString() !== fb2) source = fb2;
-                        }
+                        var s = source.toString()
+                        if (s !== byName && s !== byHome) source = byName
+                        else if (s !== byHome) source = byHome
                     } else if (status === Image.Ready) {
                         parent.currentSrc = source.toString()
                         avatarCanvas.loadImage(parent.currentSrc)
@@ -278,7 +336,7 @@ SessionManagementScreen {
 
             Rectangle {
                 id: enterBtn
-                width: 56; height: 56; radius: 15
+                width: 56; height: 56; radius: width / 2
                 color: enterBtnArea.containsMouse ? sessionManager.accentColor : sessionManager.enterBg
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
@@ -352,7 +410,9 @@ SessionManagementScreen {
                 anchors.verticalCenter: parent.verticalCenter
             }
             Text {
-                text: "Bloqueo de mayúsculas activado"
+                // Ya traducido en theme.conf (lo escribe BookOS Settings en el
+                // idioma de la app); a la derecha el respaldo de fábrica.
+                text: sessionManager.themeConf.strCapsLock || "Bloqueo de mayúsculas activado"
                 font.pixelSize: 13
                 color: "#FF9500"
             }

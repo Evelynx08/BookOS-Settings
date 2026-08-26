@@ -1,4 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod palette;
+
 use tokio::process::Command;
 use std::process::Command as StdCommand;
 use std::fs;
@@ -24,6 +26,7 @@ mod quickshare;
 mod p2p;
 mod search;
 mod system_extras;
+mod bookos_desktop;
 
 // ── Estado global de actualización ───────────────────────────────────────────
 #[derive(Clone, serde::Serialize)]
@@ -70,6 +73,153 @@ async fn run_timeout(cmd: &str, args: &[&str], timeout_ms: u64) -> String {
 }
 fn read(p: &str) -> String { fs::read_to_string(p).unwrap_or_default().trim().to_string() }
 fn esc(s: &str) -> String { s.replace('\\',"\\\\").replace('"',"\\\"").replace('\n',"\\n").replace('\r',"") }
+
+// ── BookOS Desktop: pantalla de bloqueo nativa ──────────────────────────
+// Esta configuración pertenece al compositor, no a Plasma ni a SDDM. El
+// fichero sigue siendo texto para poder editarlo a mano y compartirlo con el
+// resto del shell sin añadir otra base de datos de ajustes.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct DesktopLockscreenConfig {
+    animaciones: bool,
+    fecha: bool,
+    medios: bool,
+    reloj_y: f32,
+    acceso_y: f32,
+    medios_y: f32,
+    reloj_tamano: f32,
+    avatar_tamano: f32,
+}
+
+impl Default for DesktopLockscreenConfig {
+    fn default() -> Self {
+        Self {
+            animaciones: true,
+            fecha: true,
+            medios: true,
+            reloj_y: 0.08,
+            acceso_y: 0.36,
+            medios_y: 0.68,
+            reloj_tamano: 144.0,
+            avatar_tamano: 132.0,
+        }
+    }
+}
+
+impl DesktopLockscreenConfig {
+    fn validada(mut self) -> Self {
+        let defaults = Self::default();
+        if !self.reloj_y.is_finite() { self.reloj_y = defaults.reloj_y; }
+        if !self.acceso_y.is_finite() { self.acceso_y = defaults.acceso_y; }
+        if !self.medios_y.is_finite() { self.medios_y = defaults.medios_y; }
+        if !self.reloj_tamano.is_finite() { self.reloj_tamano = defaults.reloj_tamano; }
+        if !self.avatar_tamano.is_finite() { self.avatar_tamano = defaults.avatar_tamano; }
+        self.reloj_y = self.reloj_y.clamp(0.02, 0.40);
+        self.acceso_y = self.acceso_y.clamp(0.18, 0.72);
+        self.medios_y = self.medios_y.clamp(0.42, 0.88);
+        self.reloj_tamano = self.reloj_tamano.clamp(72.0, 220.0);
+        self.avatar_tamano = self.avatar_tamano.clamp(64.0, 220.0);
+        self
+    }
+}
+
+fn desktop_panel_path() -> std::path::PathBuf {
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    std::path::PathBuf::from(home).join(".config/bookos/panel.conf")
+}
+
+fn parse_desktop_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "si" | "sí" | "true" | "1" | "on" => Some(true),
+        "no" | "false" | "0" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn read_desktop_lockscreen_config() -> DesktopLockscreenConfig {
+    let mut cfg = DesktopLockscreenConfig::default();
+    let text = fs::read_to_string(desktop_panel_path()).unwrap_or_default();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let key = key.trim();
+        let value = value.trim();
+        match key {
+            "bloqueo_animaciones" => if let Some(v) = parse_desktop_bool(value) { cfg.animaciones = v },
+            "bloqueo_fecha" => if let Some(v) = parse_desktop_bool(value) { cfg.fecha = v },
+            "bloqueo_medios" => if let Some(v) = parse_desktop_bool(value) { cfg.medios = v },
+            "bloqueo_reloj_y" => if let Ok(v) = value.parse() { cfg.reloj_y = v },
+            "bloqueo_acceso_y" => if let Ok(v) = value.parse() { cfg.acceso_y = v },
+            "bloqueo_medios_y" => if let Ok(v) = value.parse() { cfg.medios_y = v },
+            "bloqueo_reloj_tamano" => if let Ok(v) = value.parse() { cfg.reloj_tamano = v },
+            "bloqueo_avatar_tamano" => if let Ok(v) = value.parse() { cfg.avatar_tamano = v },
+            _ => {}
+        }
+    }
+    cfg.validada()
+}
+
+const DESKTOP_LOCK_KEYS: &[&str] = &[
+    "bloqueo_animaciones", "bloqueo_fecha", "bloqueo_medios",
+    "bloqueo_reloj_y", "bloqueo_acceso_y", "bloqueo_medios_y",
+    "bloqueo_reloj_tamano", "bloqueo_avatar_tamano",
+];
+
+fn write_desktop_lockscreen_config(cfg: DesktopLockscreenConfig) -> Result<(), String> {
+    let path = desktop_panel_path();
+    let dir = path.parent().ok_or("Ruta de configuración inválida")?;
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let old = fs::read_to_string(&path).unwrap_or_default();
+    let mut kept = old.lines().filter(|line| {
+        if line.trim() == "# Pantalla de bloqueo nativa (BookOS Settings)" {
+            return false;
+        }
+        line.split_once('=')
+            .map(|(key, _)| !DESKTOP_LOCK_KEYS.contains(&key.trim()))
+            .unwrap_or(true)
+    }).collect::<Vec<_>>().join("\n");
+    while kept.ends_with("\n\n") { kept.pop(); }
+    if !kept.is_empty() && !kept.ends_with('\n') { kept.push('\n'); }
+    kept.push_str("# Pantalla de bloqueo nativa (BookOS Settings)\n");
+    kept.push_str(&format!(
+        "bloqueo_animaciones = {}\nbloqueo_fecha = {}\nbloqueo_medios = {}\n\
+         bloqueo_reloj_y = {:.3}\nbloqueo_acceso_y = {:.3}\nbloqueo_medios_y = {:.3}\n\
+         bloqueo_reloj_tamano = {:.1}\nbloqueo_avatar_tamano = {:.1}\n",
+        if cfg.animaciones { "si" } else { "no" },
+        if cfg.fecha { "si" } else { "no" },
+        if cfg.medios { "si" } else { "no" },
+        cfg.reloj_y, cfg.acceso_y, cfg.medios_y, cfg.reloj_tamano, cfg.avatar_tamano,
+    ));
+    let tmp = dir.join(format!(".panel.conf.{}.tmp", std::process::id()));
+    fs::write(&tmp, kept).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+async fn reload_bookos_desktop_lockscreen() -> bool {
+    let Ok(conn) = zbus::Connection::session().await else { return false };
+    let Ok(proxy) = zbus::Proxy::new(
+        &conn,
+        "org.bookos.Desktop",
+        "/org/bookos/Desktop",
+        "org.bookos.Desktop",
+    ).await else { return false };
+    let result: zbus::Result<bool> = proxy.call("ReloadConfig", &("lockscreen",)).await;
+    result.unwrap_or(false)
+}
+
+#[tauri::command]
+fn get_desktop_lockscreen_config() -> String {
+    serde_json::to_string(&read_desktop_lockscreen_config()).unwrap_or_else(|_| "{}".into())
+}
+
+#[tauri::command]
+async fn set_desktop_lockscreen_config(config: DesktopLockscreenConfig) -> String {
+    let config = config.validada();
+    if let Err(error) = write_desktop_lockscreen_config(config) {
+        return serde_json::json!({"ok": false, "live": false, "error": error}).to_string();
+    }
+    let live = reload_bookos_desktop_lockscreen().await;
+    serde_json::json!({"ok": true, "live": live, "config": config}).to_string()
+}
 
 // ── User ─────────────────────────────────────────────────────────────────
 /// Locate user picture and return (path, base64-data-url) — searches the
@@ -154,7 +304,10 @@ fn regex_strip_rev(s: &str) -> String {
 ///   INSTALLED=BookOS 0.2 Preview
 /// Returns sensible defaults if file missing.
 /// Default upstream releases URL. Override via /etc/bookos-update.conf line `UPSTREAM=...`.
-const DEFAULT_UPSTREAM: &str = "https://bookos.es/api/releases.json";
+/// Se apunta al `.php` directamente: el rewrite de `/api/releases.json` solo
+/// existe en `router.php` (servidor de desarrollo), no en el Apache de
+/// producción, donde esa ruta devuelve 404 y `curl -fsSL` falla en silencio.
+const DEFAULT_UPSTREAM: &str = "https://bookos.es/api/releases.json.php";
 
 /// Read update config. /etc/bookos-update.conf is the system default;
 /// ~/.config/bookos-update.conf overrides per-user (no sudo to switch channel).
@@ -1655,6 +1808,30 @@ async fn logout_session() -> String {
 /// Sync the `variant=` line of the BookOS SDDM theme.conf so the lockscreen QML
 /// (which reads that file) picks up the user's chosen light/dark mode.
 /// Requires sudo cached or polkit rule; silent no-op if not writable.
+/// Sustituye (o añade) una línea `clave=valor` en un `theme.conf`-like,
+/// tirando de paso cualquier línea basura (self-heal: ni sección, ni
+/// comentario, ni `=`, p.ej. un "1408" suelto que corrompería el fichero).
+/// Compartida por `sync_sddm_variant` y `sync_sddm_accent` — antes cada una
+/// escribía el fichero de usuario a lo bruto (`fs::write` con una sola
+/// línea), así que la que corriera después borraba lo que hubiera puesto
+/// la otra.
+fn merge_conf_line(content: &str, key: &str, value: &str) -> String {
+    let prefix = format!("{}=", key);
+    let mut found = false;
+    let mut out: Vec<String> = content.lines().filter_map(|l| {
+        let trimmed = l.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with('[') && !trimmed.starts_with('#') && !trimmed.contains('=') {
+            return None;
+        }
+        if l.starts_with(&prefix) {
+            found = true;
+            Some(format!("{}{}", prefix, value))
+        } else { Some(l.to_string()) }
+    }).collect();
+    if !found { out.push(format!("{}{}", prefix, value)); }
+    out.join("\n") + "\n"
+}
+
 async fn sync_sddm_variant(is_dark: bool) {
     // Per-user override mirrors /usr/share/.../theme.conf but is writable without sudo.
     // Lockscreen QML reads /usr/share/sddm/themes/bookos/theme.conf; we use a separate
@@ -1664,32 +1841,53 @@ async fn sync_sddm_variant(is_dark: bool) {
     let home = match std::env::var("HOME") { Ok(h) => h, Err(_) => return };
     let user_override = format!("{}/.config/bookos-sddm-variant", home);
     let new_variant = if is_dark { "dark" } else { "light" };
-    let _ = std::fs::write(&user_override, format!("variant={}\n", new_variant));
+    let cur_override = std::fs::read_to_string(&user_override).unwrap_or_default();
+    let _ = std::fs::write(&user_override, merge_conf_line(&cur_override, "variant", new_variant));
 
     // Also try silent direct write to /usr/share if user already has perm (no prompt).
     let conf_path = "/usr/share/sddm/themes/bookos/theme.conf";
     if let Ok(cur) = std::fs::read_to_string(conf_path) {
-        let mut found = false;
-        let mut out: Vec<String> = cur.lines().filter_map(|l| {
-            let trimmed = l.trim();
-            // Self-heal: drop garbage lines (no '=', not a section header/comment),
-            // e.g. a stray "1408" that would corrupt the theme.conf.
-            if !trimmed.is_empty()
-                && !trimmed.starts_with('[')
-                && !trimmed.starts_with('#')
-                && !trimmed.contains('=') {
-                return None;
-            }
-            if l.starts_with("variant=") {
-                found = true;
-                Some(format!("variant={}", new_variant))
-            } else { Some(l.to_string()) }
-        }).collect();
-        if !found { out.push(format!("variant={}", new_variant)); }
-        let new_content = out.join("\n") + "\n";
+        let new_content = merge_conf_line(&cur, "variant", new_variant);
         if new_content != cur {
             // Only direct fs::write — no pkexec. If it fails, the per-user
             // override above is enough for the lockscreen.
+            let _ = std::fs::write(conf_path, &new_content);
+        }
+    }
+
+    // Self-heal: theme.conf.user takes precedence over the base file for the
+    // SDDM greeter. If it still has a literal "variant=auto" from before
+    // set_sddm_config stopped writing that line, it permanently shadows the
+    // live sync above — strip it so "auto" falls through to theme.conf.
+    if let Ok(cur_user) = std::fs::read_to_string(SDDM_CONF_USER) {
+        let filtered: Vec<&str> = cur_user.lines()
+            .filter(|l| l.trim() != "variant=auto")
+            .collect();
+        if filtered.len() != cur_user.lines().count() {
+            let new_user = filtered.join("\n") + "\n";
+            let _ = std::fs::write(SDDM_CONF_USER, &new_user);
+        }
+    }
+}
+
+/// Igual que `sync_sddm_variant`, pero para el acento de la paleta dinámica.
+/// El override de usuario (sin sudo) ya basta para que el lockscreen en vivo
+/// —que corre dentro de la sesión, no antes del login— lo recoja: MainBlock.qml
+/// ya lee `themeConf.accentColor` de esa cadena de ficheros. El saludo SDDM de
+/// verdad (pre-login) solo lo recibe si el intento silencioso sobre
+/// theme.conf tiene permisos (p.ej. tras "Instalar tema SDDM"); si no, se
+/// queda con el accent que dejó esa instalación hasta que el usuario la
+/// vuelva a correr — no se pide contraseña aquí por un cambio de fondo.
+async fn sync_sddm_accent(hex: &str) {
+    let home = match std::env::var("HOME") { Ok(h) => h, Err(_) => return };
+    let user_override = format!("{}/.config/bookos-sddm-variant", home);
+    let cur_override = std::fs::read_to_string(&user_override).unwrap_or_default();
+    let _ = std::fs::write(&user_override, merge_conf_line(&cur_override, "accentColor", hex));
+
+    let conf_path = "/usr/share/sddm/themes/bookos/theme.conf";
+    if let Ok(cur) = std::fs::read_to_string(conf_path) {
+        let new_content = merge_conf_line(&cur, "accentColor", hex);
+        if new_content != cur {
             let _ = std::fs::write(conf_path, &new_content);
         }
     }
@@ -2797,63 +2995,643 @@ fn detect_pkg_mgr() -> &'static str {
 }
 
 // Get BookOS SDDM theme config
-#[tauri::command] fn get_sddm_config() -> String {
-    let conf = fs::read_to_string("/usr/share/sddm/themes/bookos/theme.conf").unwrap_or_default();
-    let mut variant = "dark".to_string();
-    let mut background = "solid".to_string();
-    let mut bg_image = String::new();
-    let mut accent_color = "#007AFF".to_string();
-    let mut clock_format = "24h".to_string();
-    let mut clock_font   = "serif".to_string();
-    let mut blur_radius = "24".to_string();
-    let mut show_date = "true".to_string();
-    let mut show_battery = "true".to_string();
-    let mut show_bookbar = "true".to_string();
-    for line in conf.lines() {
+
+// ── Configuración del tema SDDM de BookOS ────────────────────────────────
+//
+// Los ajustes del usuario NO se escriben en theme.conf: ese fichero pertenece al
+// paquete bookos-branding y una actualización lo reemplaza, llevándose por
+// delante toda la personalización. SDDM superpone `theme.conf.user` encima de
+// `theme.conf`, así que ahí es donde escribimos — y como no está en el %files
+// del RPM, sobrevive a las actualizaciones.
+const SDDM_THEME_DIR:  &str = "/usr/share/sddm/themes/bookos";
+// Copia recién instalada por el paquete; origen de verdad de los QML del tema.
+const SDDM_THEME_STAGE: &str = "/usr/share/bookos-settings/sddm-theme";
+const SDDM_CONF_BASE:  &str = "/usr/share/sddm/themes/bookos/theme.conf";
+const SDDM_CONF_USER:  &str = "/usr/share/sddm/themes/bookos/theme.conf.user";
+
+/// Claves reconocidas y su valor por defecto, en el orden en que se escriben.
+/// Añadir una clave aquí es lo único necesario para que el editor la soporte.
+const SDDM_KEYS: &[(&str, &str)] = &[
+    ("variant",         "auto"),
+    ("accentColor",     "#007AFF"),
+    ("pillOpacity",     "80"),
+    ("overlayOpacity",  ""),
+    ("background",      "blur"),
+    ("bgImage",         "backgrounds/bookos.png"),
+    // Color del fondo en modo "solid". Vacío = el del tema (negro/gris claro).
+    ("bgColor",         ""),
+    ("blurRadius",      "30"),
+    ("clockX",          "50"),
+    ("clockY",          "14"),
+    ("clockScale",      "100"),
+    ("clockWeight",     "700"),
+    ("clockColor",      "auto"),
+    // Tinte sacado del fondo: lo calcula Settings al aplicar y lo usa el
+    // greeter cuando clockColor=auto, porque el QML no puede analizar la imagen.
+    ("clockTint",       ""),
+    // Opacidad del reloj, 20-100. Por debajo de 100 las cifras dejan ver el
+    // fondo a través: de sólido a cristal.
+    ("clockOpacity",    "100"),
+    // Estiramiento vertical de las cifras, 100-260 (100 = sin estirar).
+    ("clockStretch",    "100"),
+    // Tipografía adaptable: con "true" manda clockAdaptV, que Settings calcula
+    // midiendo el hueco libre del fondo cada vez que cambia la imagen.
+    ("clockAdapt",      "false"),
+    ("clockAdaptV",     ""),
+    // Profundidad: el sujeto del fondo se recorta y se pinta POR ENCIMA del
+    // reloj, que es lo que da la sensación de capas.
+    ("clockDepth",      "false"),
+    // Tracking del reloj en % del cuerpo (-8 a 8). Negativo aprieta las cifras,
+    // que es lo que pide el HIG en los tamaños grandes.
+    ("clockTracking",   "-2"),
+    // ── Fecha, con vida propia ───────────────────────────────────────────
+    ("dateScale",       "100"),
+    // Vacío = el mismo color del reloj. Un #RRGGBB lo fija.
+    ("dateColor",       ""),
+    ("dateWeight",      "500"),
+    // Separación entre el reloj y la fecha, en píxeles del diseño (0-40).
+    ("dateGap",         "4"),
+    ("clockFormat",     "24h"),
+    ("clockFont",       "serif"),
+    ("showSeconds",     "false"),
+    ("showDate",        "true"),
+    ("dateStyle",       "full"),
+    ("locale",          "es_ES"),
+    ("showBookBar",     "true"),
+    ("showBattery",     "true"),
+    ("bookBarPosition", "bottom"),
+    ("bookBarSize",     "normal"),
+    // Qué puede aparecer en la BookBar y cuándo se muestra.
+    ("bookBarContent",  "battery;media;routine"),
+    ("bookBarShow",     "always"),
+    ("userSwitcher",    "row"),
+    // Posición del bloque de acceso (avatares + nombre + contraseña).
+    ("usersX",          "50"),
+    ("usersY",          "52"),
+    // Widgets: lista separada por ';' (battery;weather;date) y su colocación.
+    ("widgets",         ""),
+    ("widgetsLayout",   "stack"),
+    ("widgetsX",        "50"),
+    ("widgetsY",        "34"),
+    // Posición individual de cada widget cuando widgetsLayout=free.
+    // Formato: "battery:12,20;weather:50,34" (centro en % de pantalla).
+    ("widgetPos",       ""),
+    // Escala individual (50-200 %) y variante de cada widget.
+    // Formato: "weather:large;battery:compact".
+    ("widgetScale",     ""),
+    ("widgetSize",      ""),
+    // Opacidad del fondo de cada widget, 20-100. Formato "battery:70;date:100".
+    // El tiempo no admite: su color ES el diseño.
+    ("widgetOpacity",   ""),
+    // Pantalla de bloqueo de Plasma (Win+L), no el greeter. Comparten fichero.
+    ("lockNotifications",      "true"),
+    ("lockNotificationContent", "false"),
+    // ── Textos traducidos ────────────────────────────────────────────────
+    // El greeter arranca ANTES de que haya sesión y la pantalla de bloqueo es
+    // un QML de Plasma: ninguno de los dos puede leer el idioma de BookOS
+    // Settings ni su diccionario. Así que el idioma viaja con el texto: el
+    // editor escribe aquí las cadenas ya traducidas al idioma en el que está
+    // la app al guardar, y el QML las pinta tal cual. Los valores de abajo son
+    // el respaldo en español para una instalación que nunca haya guardado.
+    ("strBattery",           "Batería"),
+    ("strCharging",          "Cargando"),
+    // %1 = minutos que faltan.
+    ("strToFull",            "%1 min para carga completa"),
+    ("strNoEvents",          "Sin eventos"),
+    ("strNotifications",     "NOTIFICACIONES"),
+    ("strNotification",      "Notificación"),
+    ("strWrongPassword",     "Contraseña incorrecta"),
+    ("strCapsLock",          "Bloqueo de mayúsculas activado"),
+    ("strSession",           "Sesión"),
+    ("strExit",              "✕  Salir (Esc)"),
+    ("strStarted",           "Inicio"),
+    ("strFinish",            "Fin"),
+    ("strObjective",         "Objetivo"),
+    ("strDeactivateRoutine", "Desactivar rutina"),
+];
+
+/// Lee un theme.conf y devuelve solo las claves que trae (sin defaults).
+fn sddm_parse(path: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let text = fs::read_to_string(path).unwrap_or_default();
+    for line in text.lines() {
         let line = line.trim();
-        if let Some(v) = line.strip_prefix("variant=")      { variant      = v.trim().to_string(); }
-        if let Some(v) = line.strip_prefix("background=")   { background   = v.trim().to_string(); }
-        if let Some(v) = line.strip_prefix("bgImage=")      { bg_image     = v.trim().to_string(); }
-        if let Some(v) = line.strip_prefix("accentColor=")  { accent_color = v.trim().to_string(); }
-        if let Some(v) = line.strip_prefix("clockFormat=")  { clock_format = v.trim().to_string(); }
-        if let Some(v) = line.strip_prefix("clockFont=")    { clock_font   = v.trim().to_string(); }
-        if let Some(v) = line.strip_prefix("blurRadius=")   { blur_radius  = v.trim().to_string(); }
-        if let Some(v) = line.strip_prefix("showDate=")     { show_date    = v.trim().to_string(); }
-        if let Some(v) = line.strip_prefix("showBattery=")  { show_battery = v.trim().to_string(); }
-        if let Some(v) = line.strip_prefix("showBookBar=")  { show_bookbar = v.trim().to_string(); }
+        if line.is_empty() || line.starts_with('#') || line.starts_with('[') { continue; }
+        if let Some((k, v)) = line.split_once('=') {
+            map.insert(k.trim().to_string(), v.trim().to_string());
+        }
     }
-    format!(r#"{{"variant":"{}","background":"{}","bgImage":"{}","accentColor":"{}","clockFormat":"{}","clockFont":"{}","blurRadius":"{}","showDate":"{}","showBattery":"{}","showBookBar":"{}"}}"#,
-        esc(&variant), esc(&background), esc(&bg_image),
-        esc(&accent_color), esc(&clock_format), esc(&clock_font), esc(&blur_radius),
-        esc(&show_date), esc(&show_battery), esc(&show_bookbar))
+    map
 }
 
-// Set BookOS SDDM theme config (requires sudo)
-#[tauri::command] async fn set_sddm_config(
-    variant: String, background: String, bg_image: String,
-    accent_color: String, clock_format: String, clock_font: String, blur_radius: String,
-    show_date: String, show_battery: String, show_bookbar: String,
-    password: String
-) -> String {
+/// Aclara un color hasta la luminosidad pedida (0-1) conservando su tono.
+fn lighten_to(r: u8, g: u8, b: u8, target: f64) -> (u8, u8, u8) {
+    let (rf, gf, bf) = (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+    let max = rf.max(gf).max(bf);
+    let min = rf.min(gf).min(bf);
+    let l = (max + min) / 2.0;
+    if l >= target { return (r, g, b); }
+    // Mezcla con blanco: mantiene el tono y sube la luminosidad, que es lo que
+    // hace falta para que el reloj se lea sobre su propio fondo.
+    let k = (target - l) / (1.0 - l).max(0.001);
+    let mix = |c: f64| ((c + (1.0 - c) * k) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (mix(rf), mix(gf), mix(bf))
+}
+
+/// Devuelve TODAS las claves del esquema, ya resueltas.
+///
+/// Precedencia (gana el último): theme.conf de fábrica → theme.conf.user que
+/// escribe Settings → ~/.config/bookos-sddm-variant, que es por usuario y no
+/// necesita sudo.
+#[tauri::command] fn get_sddm_config() -> String {
+    let mut vals: std::collections::HashMap<String, String> = SDDM_KEYS.iter()
+        .map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    for path in [SDDM_CONF_BASE.to_string(), SDDM_CONF_USER.to_string(),
+                 format!("{}/.config/bookos-sddm-variant",
+                         std::env::var("HOME").unwrap_or_default())] {
+        for (k, v) in sddm_parse(&path) {
+            if vals.contains_key(&k) { vals.insert(k, v); }
+        }
+    }
+    let body: Vec<String> = SDDM_KEYS.iter()
+        .map(|(k, _)| format!(r#""{}":"{}""#, k, esc(vals.get(*k).map(String::as_str).unwrap_or(""))))
+        .collect();
+    format!("{{{}}}", body.join(","))
+}
+
+
+// ── Tipografía adaptable del reloj ───────────────────────────────────────
+//
+// One UI 8 lo llama "Stretch Font": el reloj de la pantalla de bloqueo estira
+// sus cifras A LO ALTO hasta llenar el hueco que deja el sujeto del fondo, sin
+// taparlo. Samsung lo resuelve con segmentación por IA en el propio teléfono;
+// aquí se hace con una medida mucho más barata que da el mismo resultado en la
+// práctica para un wallpaper de escritorio: se mide cuánto DETALLE hay en cada
+// franja horizontal y se busca la banda tranquila que atraviesa el reloj. El
+// sujeto de una foto concentra los bordes; el cielo o la pared no tienen.
+//
+// Se calcula aquí y no en el QML porque ni el greeter de SDDM ni la pantalla de
+// bloqueo pueden analizar la imagen: el resultado viaja en clockAdaptV.
+#[tauri::command] fn sddm_clock_adapt(path: String, clock_y: f64, clock_scale: f64) -> String {
+    const ROWS: usize = 72;
+    let magick = if StdCommand::new("magick").arg("-version").output().is_ok() { "magick" } else { "convert" };
+    // 128x72 basta: se busca dónde está el sujeto, no sus detalles. El aplanado
+    // sobre negro no es cosmético: un PNG con canal alfa sale de `-edge` con el
+    // perfil entero a cero y el hueco mediría toda la pantalla.
+    let out = match StdCommand::new(magick)
+        .args([&path, "-background", "black", "-alpha", "remove", "-alpha", "off",
+               "-resize", "128x72!", "-colorspace", "Gray", "-edge", "2",
+               "-resize", &format!("1x{}!", ROWS), "-depth", "8", "txt:-"])
+        .output() {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+            _ => return r#"{"ok":false,"error":"ImageMagick no disponible"}"#.into(),
+        };
+
+    // Líneas "0,12: (34,34,34)  #222222  gray(34)". Basta el primer byte del hex.
+    let mut energy = vec![0.0f64; ROWS];
+    for line in out.lines() {
+        let (coord, rest) = match line.split_once(':') { Some(v) => v, None => continue };
+        let row: usize = match coord.split(',').nth(1).and_then(|r| r.trim().parse().ok()) {
+            Some(r) => r, None => continue,
+        };
+        if row >= ROWS { continue; }
+        let hex = match rest.split('#').nth(1) { Some(h) => h, None => continue };
+        if hex.len() < 2 { continue; }
+        energy[row] = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0) as f64 / 255.0;
+    }
+
+    let max = energy.iter().cloned().fold(0.0f64, f64::max);
+    if max <= 0.0 {
+        // Fondo liso: no hay sujeto que esquivar, así que tampoco hay hueco que
+        // medir. Sin estirar es la respuesta honesta.
+        return r#"{"ok":true,"stretch":100,"flat":true}"#.into();
+    }
+    // Umbral RELATIVO a propósito: una foto de estudio y una calle de noche
+    // tienen escalas de contraste incomparables en absoluto.
+    let quiet: Vec<bool> = energy.iter().map(|e| e / max < 0.35).collect();
+
+    let mut bands: Vec<(usize, usize)> = Vec::new();
+    let mut start: Option<usize> = None;
+    for i in 0..ROWS {
+        match (quiet[i], start) {
+            (true, None) => start = Some(i),
+            (false, Some(s)) => { bands.push((s, i)); start = None; }
+            _ => {}
+        }
+    }
+    if let Some(s) = start { bands.push((s, ROWS)); }
+    // Bandas de menos de 4 filas (~5 % de la altura) son ruido, no un hueco.
+    bands.retain(|(a, b)| b - a >= 4);
+    if bands.is_empty() {
+        return r#"{"ok":true,"stretch":100,"busy":true}"#.into();
+    }
+
+    // Manda la banda donde ESTÁ el reloj: estirarlo hacia un hueco que está en
+    // otra parte de la pantalla no lo acercaría a ese hueco, solo lo haría más
+    // grande encima del sujeto.
+    let clock_row = ((clock_y / 100.0) * ROWS as f64).round().clamp(0.0, (ROWS - 1) as f64) as usize;
+    let band = match bands.iter().find(|(a, b)| clock_row >= *a && clock_row < *b) {
+        Some(b) => *b,
+        None => return r#"{"ok":true,"stretch":100,"onSubject":true}"#.into(),
+    };
+    let band_h = (band.1 - band.0) as f64 / ROWS as f64;
+
+    // El reloj sin estirar ocupa el 11,5 % del alto por su escala. Se le deja
+    // llenar poco más de la mitad del hueco y como mucho 1,9x: el resto de la
+    // banda es el aire que pide el HIG y el sitio de la fecha y los widgets.
+    let base = 0.115 * (clock_scale / 100.0).clamp(0.4, 2.6);
+    let stretch = ((band_h * 0.55) / base).clamp(1.0, 1.9);
+    format!(r#"{{"ok":true,"stretch":{},"bandY":{},"bandH":{}}}"#,
+            (stretch * 100.0).round(),
+            (band.0 as f64 / ROWS as f64 * 100.0).round(),
+            (band_h * 100.0).round())
+}
+
+// ── Profundidad: el reloj DETRÁS del sujeto del fondo ────────────────────
+//
+// One UI recorta al sujeto del wallpaper y lo pinta por ENCIMA de las cifras,
+// de modo que el reloj parece estar detrás. Samsung lo hace con segmentación
+// por IA en el teléfono.
+//
+// Aquí no hay ni rembg ni OpenCV instalados, y meter un modelo ONNX en el
+// paquete por un efecto decorativo no sale a cuenta. Se hace con el método
+// clásico anterior a las redes: MODELO DE COLOR DEL FONDO. Se mira la franja
+// donde vive el reloj, se aprende de qué color es el fondo allí, y se marca
+// como sujeto todo lo que se aleje de ese color. Funciona bien justo en el caso
+// para el que existe el efecto — alguien o algo recortado contra cielo, pared o
+// degradado — y se rinde solo cuando la foto no da para eso.
+//
+// Rendirse es parte del diseño: una máscara mala recorta la cara del sujeto y
+// se ve peor que no hacer nada. Ante la duda, no se escribe recorte y el reloj
+// se queda delante, como siempre.
+
+/// Píxeles de una imagen leídos por ImageMagick en PPM binario (P6).
+struct Bitmap { w: usize, h: usize, px: Vec<u8> }   // px = RGB entrelazado
+
+fn read_ppm(path: &str, width: usize) -> Result<Bitmap, String> {
+    let magick = if StdCommand::new("magick").arg("-version").output().is_ok() { "magick" } else { "convert" };
+    let out = StdCommand::new(magick)
+        .args([path, "-background", "black", "-alpha", "remove", "-alpha", "off",
+               "-resize", &format!("{}x", width), "-colorspace", "sRGB", "-depth", "8", "ppm:-"])
+        .output().map_err(|e| format!("ImageMagick: {}", e))?;
+    if !out.status.success() { return Err("ImageMagick falló al leer la imagen".into()); }
+
+    // Cabecera P6: "P6 <w> <h> 255" separados por espacios en blanco, con
+    // comentarios (#) posibles entre campos — por eso se recorren tokens en vez
+    // de asumir tres líneas.
+    let buf = out.stdout;
+    let mut fields: Vec<usize> = Vec::new();
+    let mut cur = String::new();
+    let mut start = 0usize;
+    let mut in_comment = false;
+    for (i, &b) in buf.iter().enumerate() {
+        if in_comment { if b == b'\n' { in_comment = false; } continue; }
+        if b == b'#' { in_comment = true; continue; }
+        if b.is_ascii_whitespace() {
+            if !cur.is_empty() {
+                if cur != "P6" {
+                    fields.push(cur.parse().map_err(|_| "PPM ilegible")?);
+                }
+                cur.clear();
+                if fields.len() == 3 { start = i + 1; break; }
+            }
+            continue;
+        }
+        cur.push(b as char);
+    }
+    if fields.len() != 3 { return Err("PPM sin cabecera".into()); }
+    let (w, h) = (fields[0], fields[1]);
+    let need = w * h * 3;
+    if buf.len() < start + need { return Err("PPM incompleto".into()); }
+    Ok(Bitmap { w, h, px: buf[start..start + need].to_vec() })
+}
+
+/// Deja solo el componente conectado más grande de `mask`. Sin recursión: una
+/// foto de 480 px de ancho desborda la pila enseguida.
+fn keep_largest_blob(mask: &mut [bool], w: usize, h: usize) -> usize {
+    let mut seen = vec![false; mask.len()];
+    let mut best: Vec<usize> = Vec::new();
+    let mut stack: Vec<usize> = Vec::new();
+    for start in 0..mask.len() {
+        if !mask[start] || seen[start] { continue; }
+        let mut blob: Vec<usize> = Vec::new();
+        stack.push(start);
+        seen[start] = true;
+        while let Some(i) = stack.pop() {
+            blob.push(i);
+            let (x, y) = (i % w, i / w);
+            let push = |nx: usize, ny: usize, st: &mut Vec<usize>, sn: &mut Vec<bool>| {
+                let j = ny * w + nx;
+                if mask[j] && !sn[j] { sn[j] = true; st.push(j); }
+            };
+            if x > 0     { push(x - 1, y, &mut stack, &mut seen); }
+            if x + 1 < w { push(x + 1, y, &mut stack, &mut seen); }
+            if y > 0     { push(x, y - 1, &mut stack, &mut seen); }
+            if y + 1 < h { push(x, y + 1, &mut stack, &mut seen); }
+        }
+        if blob.len() > best.len() { best = blob; }
+    }
+    for m in mask.iter_mut() { *m = false; }
+    for &i in &best { mask[i] = true; }
+    best.len()
+}
+
+/// Erosión/dilatación por conteo de vecinos en una ventana de radio 1.
+fn morph(mask: &mut Vec<bool>, w: usize, h: usize, keep_if_at_least: usize) {
+    let src = mask.clone();
+    for y in 0..h {
+        for x in 0..w {
+            let mut n = 0;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 { continue; }
+                    if src[ny as usize * w + nx as usize] { n += 1; }
+                }
+            }
+            mask[y * w + x] = n >= keep_if_at_least;
+        }
+    }
+}
+
+/// Genera `<fondo>-cutout.png`: el sujeto con transparencia alrededor.
+/// `clock_y` es el centro del reloj en % — la franja de la que se aprende el
+/// color del fondo es la suya, que es donde el efecto tiene que colar.
+#[tauri::command] fn sddm_clock_depth(path: String, clock_y: f64) -> String {
+    const W: usize = 480;
+    let bm = match read_ppm(&path, W) {
+        Ok(b) => b,
+        Err(e) => return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e)),
+    };
+    let (w, h) = (bm.w, bm.h);
+    if w == 0 || h == 0 { return r#"{"ok":false,"error":"imagen vacía"}"#.into(); }
+
+    // 1. Color del fondo, aprendido de la franja del reloj. Media y desviación
+    //    por canal: un cielo con degradado tiene desviación alta y el umbral se
+    //    adapta solo, sin números mágicos por wallpaper.
+    let band_c = ((clock_y / 100.0) * h as f64) as usize;
+    let band_lo = band_c.saturating_sub(h / 12).min(h.saturating_sub(1));
+    let band_hi = (band_c + h / 12).min(h).max(band_lo + 1);
+    let mut sum = [0f64; 3];
+    let mut sq  = [0f64; 3];
+    let mut n = 0f64;
+    for y in band_lo..band_hi {
+        for x in 0..w {
+            let i = (y * w + x) * 3;
+            for c in 0..3 {
+                let v = bm.px[i + c] as f64;
+                sum[c] += v; sq[c] += v * v;
+            }
+            n += 1.0;
+        }
+    }
+    if n < 1.0 { return r#"{"ok":false,"error":"franja vacía"}"#.into(); }
+    let mut mean = [0f64; 3];
+    let mut std  = [0f64; 3];
+    for c in 0..3 {
+        mean[c] = sum[c] / n;
+        std[c]  = ((sq[c] / n) - mean[c] * mean[c]).max(0.0).sqrt();
+    }
+    // Tres desviaciones, con un suelo para que un fondo plano no marque como
+    // sujeto el ruido de compresión.
+    let thr: f64 = (3.0 * (std[0] + std[1] + std[2]) / 3.0).max(26.0);
+
+    let mut mask: Vec<bool> = (0..w * h).map(|i| {
+        let p = i * 3;
+        let d = (0..3).map(|c| (bm.px[p + c] as f64 - mean[c]).abs()).fold(0.0, f64::max);
+        d > thr
+    }).collect();
+
+    // 2. Limpieza: fuera la mota suelta (erosión) y a rellenar los huecos
+    //    pequeños (dilatación). Sin esto la máscara sale como una red.
+    morph(&mut mask, w, h, 6);
+    morph(&mut mask, w, h, 3);
+    let blob = keep_largest_blob(&mut mask, w, h);
+
+    // 3. Cordura. Un sujeto real ocupa una parte razonable y se apoya en el
+    //    borde inferior; si lo que sale es media pantalla o una nube suelta, NO
+    //    se escribe recorte: mejor sin efecto que con la cara cortada.
+    let cover = blob as f64 / (w * h) as f64;
+    let touches_bottom = (0..w).any(|x| mask[(h - 1) * w + x]);
+    if cover < 0.03 || cover > 0.60 || !touches_bottom {
+        return format!(r#"{{"ok":false,"reason":"sin sujeto claro","cover":{:.3}}}"#, cover);
+    }
+
+    // 4. Máscara a PGM y composición a tamaño real. El desenfoque del borde es
+    //    lo que evita el recorte "de tijera".
+    let mut pgm = format!("P5\n{} {}\n255\n", w, h).into_bytes();
+    pgm.extend(mask.iter().map(|&m| if m { 255u8 } else { 0u8 }));
+    let tmp = format!("/tmp/.bookos-cutout-{}.pgm", std::process::id());
+    if let Err(e) = std::fs::write(&tmp, &pgm) {
+        return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string()));
+    }
+    let out_path = match path.rsplit_once('.') {
+        Some((stem, _)) => format!("{}-cutout.png", stem),
+        None => format!("{}-cutout.png", path),
+    };
+    let magick = if StdCommand::new("magick").arg("-version").output().is_ok() { "magick" } else { "convert" };
+    // El tamaño real no se puede meter con %[fx:] dentro de un -resize, así que
+    // se pregunta antes y se sustituye. Un paso más, pero sin sorpresas.
+    let dims = StdCommand::new(magick)
+        .args([&path, "-format", "%wx%h", "info:"]).output().ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if dims.is_empty() {
+        let _ = std::fs::remove_file(&tmp);
+        return r#"{"ok":false,"error":"no se pudo medir la imagen"}"#.into();
+    }
+    let ok = StdCommand::new("sh").arg("-c").arg(format!(
+        "{m} '{src}' \\( '{mask}' -resize {dims}! -blur 0x2 \\) \
+         -alpha off -compose CopyOpacity -composite 'PNG32:{out}'",
+        m = magick, src = path, mask = tmp, dims = dims, out = out_path))
+        .status().map(|s| s.success()).unwrap_or(false);
+    let _ = std::fs::remove_file(&tmp);
+    if !ok { return r#"{"ok":false,"error":"no se pudo componer el recorte"}"#.into(); }
+    format!(r#"{{"ok":true,"cutout":"{}","cover":{:.3}}}"#, esc(&out_path), cover)
+}
+
+/// Acento y tinte del reloj sacados del wallpaper.
+///
+/// Se pondera por SUPERFICIE x saturación: antes ganaba el color más saturado
+/// aunque ocupara cuatro píxeles, así que un detalle chillón mandaba sobre el
+/// color que domina la imagen.
+#[tauri::command] fn sddm_accent_from_image(path: String) -> String {
+    let magick = if StdCommand::new("magick").arg("-version").output().is_ok() { "magick" } else { "convert" };
+    let out = match StdCommand::new(magick)
+        .args([&path, "-resize", "120x120!", "-colors", "16", "-format", "%c", "histogram:info:"])
+        .output() {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+            _ => return r#"{"ok":false,"error":"ImageMagick no disponible"}"#.into(),
+        };
+
+    let mut best: Option<(f64, u8, u8, u8)> = None;
+    for line in out.lines() {
+        // Formato: "   1234: ( 41, 62,110) #295A6E srgb(...)"
+        let count: f64 = line.trim().split(':').next()
+            .and_then(|c| c.trim().parse().ok()).unwrap_or(0.0);
+        let hex = match line.split('#').nth(1) { Some(h) => h, None => continue };
+        let hex: String = hex.chars().take(6).collect();
+        if hex.len() < 6 { continue; }
+        let (r, g, b) = match (u8::from_str_radix(&hex[0..2], 16),
+                               u8::from_str_radix(&hex[2..4], 16),
+                               u8::from_str_radix(&hex[4..6], 16)) {
+            (Ok(r), Ok(g), Ok(b)) => (r, g, b),
+            _ => continue,
+        };
+        let (rf, gf, bf) = (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+        let max = rf.max(gf).max(bf);
+        let min = rf.min(gf).min(bf);
+        let light = (max + min) / 2.0;
+        // Descarta extremos: no sirven como acento y arruinan el contraste.
+        if !(0.15..=0.85).contains(&light) { continue; }
+        let sat = if max == min { 0.0 } else { (max - min) / (1.0 - (2.0 * light - 1.0).abs()) };
+        // Peso base 0.25: un color casi gris pero dominante sigue siendo mejor
+        // acento que uno saturado que apenas aparece.
+        let score = count * (0.25 + sat);
+        if best.map_or(true, |(bs, _, _, _)| score > bs) { best = Some((score, r, g, b)); }
+    }
+    match best {
+        // r##""## porque el literal contiene `"#` (la almohadilla del color), que
+        // cerraría un raw string de un solo `#` a mitad de la cadena.
+        Some((_, r, g, b)) => {
+            // Dos colores del mismo tono para dos usos: `accent` tal cual sale
+            // de la imagen (anillos, botones) y `tint`, el mismo tono aclarado
+            // al 82 %, para el RELOJ sobre el fondo. El acento sin aclarar deja
+            // el reloj ilegible: es un color medio sobre una foto media.
+            let (tr, tg, tb) = lighten_to(r, g, b, 0.82);
+            format!(r##"{{"ok":true,"accent":"#{:02X}{:02X}{:02X}","tint":"#{:02X}{:02X}{:02X}"}}"##,
+                    r, g, b, tr, tg, tb)
+        }
+        None => r#"{"ok":false,"error":"sin color dominante utilizable"}"#.into(),
+    }
+}
+
+/// Cuentas que pueden iniciar sesión, para la fila de avatares del editor.
+///
+/// Se leen de /etc/passwd y no de AccountsService por D-Bus: el editor puede
+/// abrirse en una sesión donde ese servicio no esté, y aquí solo hacen falta
+/// tres datos. El rango 1000-60000 es el de usuarios reales en cualquier
+/// distribución; por debajo son cuentas de sistema.
+#[tauri::command] fn list_login_users() -> String {
+    let mut out: Vec<String> = Vec::new();
+    for line in fs::read_to_string("/etc/passwd").unwrap_or_default().lines() {
+        let f: Vec<&str> = line.split(':').collect();
+        if f.len() < 7 { continue; }
+        let uid: u32 = match f[2].parse() { Ok(v) => v, Err(_) => continue };
+        if !(1000..60000).contains(&uid) { continue; }
+        // Sin shell de verdad no es una cuenta con la que se entre.
+        if f[6].ends_with("nologin") || f[6].ends_with("/false") { continue; }
+        let name = f[0].to_string();
+        // GECOS: "Nombre Real,,,". Vacío = se usa el nombre de la cuenta.
+        let real = f[4].split(',').next().unwrap_or("").trim().to_string();
+        let real = if real.is_empty() { name.clone() } else { real };
+        // El avatar lo deja AccountsService aquí; si no hay, el QML pinta la
+        // inicial sobre un círculo de acento.
+        let icon = format!("/var/lib/AccountsService/icons/{}", name);
+        let icon = if std::path::Path::new(&icon).is_file() { icon }
+                   else { format!("{}/.face", f[5]) };
+        let icon = if std::path::Path::new(&icon).is_file() { icon } else { String::new() };
+        out.push(format!(r#"{{"name":"{}","realName":"{}","icon":"{}"}}"#,
+                         esc(&name), esc(&real), esc(&icon)));
+    }
+    format!("[{}]", out.join(","))
+}
+
+// Escribe theme.conf.user (requiere elevación) y regenera el blur precomputado.
+#[tauri::command] async fn set_sddm_config(cfg: String, password: String) -> String {
     use std::io::Write;
-    let conf = format!(
-        "[General]\nvariant={}\nbackground={}\nbgImage={}\naccentColor={}\nclockFormat={}\nclockFont={}\nblurRadius={}\nshowDate={}\nshowBattery={}\nshowBookBar={}\n",
-        variant, background, bg_image, accent_color, clock_format, clock_font, blur_radius, show_date, show_battery, show_bookbar
-    );
-    // Write to user tmp, then move into place with elevation.
+    // cfg es un JSON plano {clave:"valor"}; se filtra contra SDDM_KEYS para no
+    // volcar en el .conf nada que venga del frontend sin estar en el esquema.
+    let mut parsed: std::collections::HashMap<String, String> =
+        match serde_json::from_str(&cfg) {
+            Ok(m) => m,
+            Err(e) => return format!(r#"{{"ok":false,"error":"cfg inválido: {}"}}"#, esc(&e.to_string())),
+        };
+
+    // Fondo elegido por el usuario: el greeter corre como el usuario `sddm`, que
+    // no puede leer /home. Guardar la ruta original dejaba la pantalla de inicio
+    // sin fondo. Se copia dentro del tema y en el .conf va la ruta relativa.
+    let mut import_bg = String::new();
+    if let Some(src) = parsed.get("bgImage").cloned() {
+        if src.starts_with('/') && !src.starts_with(SDDM_THEME_DIR) && !src.contains('\'') {
+            let name = src.rsplit('/').next().unwrap_or("wallpaper.png").to_string();
+            if !name.is_empty() {
+                import_bg = format!(
+                    "mkdir -p {dir}/backgrounds; cp -f '{src}' '{dir}/backgrounds/{name}'; \
+                     chmod 644 '{dir}/backgrounds/{name}'; ",
+                    dir = SDDM_THEME_DIR, src = src, name = name
+                );
+                parsed.insert("bgImage".into(), format!("backgrounds/{}", name));
+            }
+        }
+    }
+
+    let mut conf = String::from("# Generado por BookOS Settings. Se superpone a theme.conf.\n[General]\n");
+    let mut bg_image = String::new();
+    let mut blur_radius = "30".to_string();
+    for (key, def) in SDDM_KEYS.iter() {
+        let val = parsed.get(*key).map(|s| s.as_str()).unwrap_or(def);
+        // Un valor con salto de línea partiría el .conf en dos.
+        if val.contains('\n') || val.contains('\r') { continue; }
+        // "variant=auto" en theme.conf.user tendría precedencia permanente
+        // sobre las actualizaciones en vivo que sync_sddm_variant() escribe
+        // en el theme.conf base, rompiendo el auto claro/oscuro. El archivo
+        // base ya es la fuente de verdad para "auto" — no la sombreamos aquí.
+        if *key == "variant" && val == "auto" { continue; }
+        if *key == "bgImage"    { bg_image = val.to_string(); }
+        if *key == "blurRadius" { blur_radius = val.to_string(); }
+        conf.push_str(&format!("{}={}\n", key, val));
+    }
+
     let tmp = format!("/tmp/.bookos-sddm-conf-{}", std::process::id());
     if let Err(e) = std::fs::write(&tmp, &conf) {
         return format!(r#"{{"ok":false,"error":"tmp write: {}"}}"#, esc(&e.to_string()));
     }
-    let script = format!(
-        "set -e; mkdir -p /usr/share/sddm/themes/bookos; cp '{tmp}' /usr/share/sddm/themes/bookos/theme.conf; chmod 644 /usr/share/sddm/themes/bookos/theme.conf; rm -f '{tmp}'",
-        tmp = tmp
-    );
-    eprintln!("[set_sddm_config] script:\n{}", script);
 
-    // Primary path: sudo -S with the provided password. Some Fedora/PAM setups
-    // reject password-over-stdin, so we fall back to pkexec (graphical polkit
-    // prompt) when sudo fails for any reason other than success.
+    // Blur precomputado: el greeter pinta <fondo>-blur.png en vez de desenfocar
+    // a pantalla completa en cada arranque. Se genera aquí, con el mismo comando
+    // que usa collect-branding.sh al empaquetar, para que ambos caminos den el
+    // mismo resultado.
+    let mut blur_cmd = String::new();
+    if !bg_image.is_empty() {
+        let abs = if bg_image.starts_with('/') { bg_image.clone() }
+                  else { format!("{}/{}", SDDM_THEME_DIR, bg_image) };
+        if let Some(stem) = abs.rsplit_once('.') {
+            // El desenfoque se calcula a 1440 de ancho y se entrega a 2560. Antes
+            // se guardaba a 720 y la GPU lo estiraba a pantalla completa: en un
+            // panel de 1080p o más eso son 2-3 aumentos de escala sobre un PNG de
+            // 8 bits, que es de donde venían el aspecto lavado y las bandas en los
+            // degradados. Blurrear a media resolución sigue siendo barato; el
+            // reescalado final lo hace ImageMagick con un filtro decente y ya no
+            // queda nada que estirar en runtime.
+            let sigma = blur_radius.parse::<f64>().unwrap_or(30.0) / 1.5;
+            blur_cmd = format!(
+                "if command -v magick >/dev/null 2>&1; then magick '{src}' -resize 1440x -blur 0x{sigma:.0} -resize 2560x -strip 'PNG24:{out}' || true; fi; ",
+                src = abs, out = format!("{}-blur.{}", stem.0, stem.1), sigma = sigma
+            );
+        }
+    }
+
+    // Refresco del tema instalado desde el stage del paquete. El interruptor de
+    // instalación solo mira si /etc/sddm.conf.d apunta a bookos, así que una vez
+    // activado nunca volvía a copiar los QML: el tema en /usr/share/sddm se
+    // quedaba con el Main.qml de la versión con la que se instaló. Guardar desde
+    // el editor lo pone al día. theme.conf.user se escribe DESPUÉS, y el fondo
+    // del usuario se reimporta después del cp para que no se lo lleve por delante.
+    let sync_stage = if std::path::Path::new(SDDM_THEME_STAGE).is_dir() {
+        format!("cp -rf '{stage}/.' {dir}/; chmod -R a+rX {dir}; ",
+                stage = SDDM_THEME_STAGE, dir = SDDM_THEME_DIR)
+    } else { String::new() };
+
+    let script = format!(
+        // El fondo se importa antes del blur: este lo genera a partir de la copia
+        // ya dentro del tema, no del original en /home.
+        "set -e; mkdir -p {dir}; {sync}{imp}cp '{tmp}' {dst}; chmod 644 {dst}; rm -f '{tmp}'; {blur}",
+        dir = SDDM_THEME_DIR, dst = SDDM_CONF_USER, tmp = tmp,
+        sync = sync_stage, imp = import_bg, blur = blur_cmd
+    );
+
     let try_sudo = |pw: &str| -> Result<bool, String> {
         let mut child = StdCommand::new("sudo")
             .args(["-S", "-p", "", "--", "sh", "-c", &script])
@@ -2879,7 +3657,6 @@ fn detect_pkg_mgr() -> &'static str {
             Err(e) => last_err = e,
         }
     }
-    // Fallback: pkexec shows its own polkit dialog (no password handling here).
     if !ok && std::path::Path::new(&tmp).exists() {
         match StdCommand::new("pkexec").args(["sh", "-c", &script]).status() {
             Ok(s) if s.success() => ok = true,
@@ -2905,6 +3682,22 @@ const LOCKSCREEN_FILES: &[&str] = &[
     "LockScreenUi.qml",
     "BookBar.qml",
     "MediaControls.qml",
+    // Notificaciones en la pantalla de bloqueo. Si falta este fichero,
+    // LockScreenUi.qml no encuentra el componente y la pantalla no carga.
+    "LockNotifications.qml",
+    // Widgets (batería/tiempo/fecha): el mismo componente que el tema SDDM.
+    // El paquete los deja en el stage del lockscreen desde sddm-theme/.
+    "GreeterWidgets.qml",
+    "WxIcon.qml",
+    // Siluetas de los dispositivos de la tarjeta de batería. Dibujadas en QML
+    // justo para que sea UN fichero más de esta lista y no una carpeta de
+    // imágenes que se queda fuera al instalar.
+    "DeviceIcon.qml",
+    // Glifos rellenos (play/pausa/anterior/siguiente) del widget de música.
+    "GlyphIcon.qml",
+    // Notificaciones y eventos: módulos que solo existen en la sesión, aislados
+    // aquí para que un import ausente no tumbe LockScreenUi.qml entero.
+    "LockWidgetData.qml",
 ];
 const LOCKSCREEN_DEST: &str = "/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen";
 const LOCKSCREEN_BACKUP: &str = "/usr/share/plasma/shells/org.kde.plasma.desktop/contents/lockscreen/.backup";
@@ -2916,6 +3709,26 @@ fn lockscreen_source() -> Option<String> {
     let local = format!("{}/.local/share/plasma/look-and-feel/BookOS-Light/contents/lockscreen", home);
     if std::path::Path::new(&local).is_dir() { return Some(local); }
     None
+}
+
+// Carpetas lockscreen/ de todos los paquetes look-and-feel de BookOS que haya
+// instalados, de usuario y de sistema. Se copian todas porque el nombre exacto
+// del paquete activo depende de la instalación.
+fn lockscreen_lnf_dirs() -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut out = Vec::new();
+    for base in [format!("{}/.local/share/plasma/look-and-feel", home),
+                 "/usr/share/plasma/look-and-feel".to_string()] {
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if !name.starts_with("BookOS") { continue; }
+                let d = format!("{}/{}/contents/lockscreen", base, name);
+                if std::path::Path::new(&d).is_dir() { out.push(d); }
+            }
+        }
+    }
+    out
 }
 
 #[tauri::command] fn is_lockscreen_theme_installed() -> String {
@@ -2959,6 +3772,18 @@ fn lockscreen_source() -> Option<String> {
         ));
     }
     script.push_str(&format!("touch '{}/.bookos-installed'", LOCKSCREEN_DEST));
+
+    // Además del paquete del shell, hay que refrescar los look-and-feel de
+    // BookOS: si kscreenlockerrc apunta a uno de ellos (lo hace en cuanto se
+    // aplica el tema global), KScreenLocker carga SU lockscreen y el del shell
+    // ni se mira — que es justo por lo que Win+L se quedaba con el diseño viejo.
+    for dir in lockscreen_lnf_dirs() {
+        // `cp x x` aborta el script (set -e) si el origen ES uno de estos.
+        if dir == src { continue; }
+        for f in LOCKSCREEN_FILES {
+            script.push_str(&format!(" ; cp '{src}/{file}' '{d}/{file}'", src=src, d=dir, file=f));
+        }
+    }
 
     eprintln!("[install_lockscreen] script:\n{}", script);
 
@@ -3055,15 +3880,17 @@ fn lockscreen_source() -> Option<String> {
     // etc. actually land (the old `if !dest exists` guard meant reinstalling never
     // updated an existing theme). Preserve the user's theme.conf across the refresh.
     if std::path::Path::new(staged).is_dir() {
+        // theme.conf es la BASE del tema y se reemplaza siempre: los ajustes del
+        // usuario viven en theme.conf.user, que SDDM superpone encima y que el
+        // `cp` de abajo no toca (no existe en el stage). Conservar la base vieja
+        // era lo que dejaba el tema instalado sin las claves nuevas.
         script.push_str(&format!(
-            "mkdir -p '{dest}'; \
-             if [ -f '{dest}/theme.conf' ]; then cp '{dest}/theme.conf' /tmp/.bookos-themeconf-keep; fi; \
-             cp -rf '{staged}/.' '{dest}/'; \
-             if [ -f /tmp/.bookos-themeconf-keep ]; then mv -f /tmp/.bookos-themeconf-keep '{dest}/theme.conf'; fi; ",
+            "mkdir -p '{dest}'; cp -rf '{staged}/.' '{dest}/'; \
+             chmod -R a+rX '{dest}'; ",
             staged = staged, dest = dest
         ));
     }
-    script.push_str(&format!("mkdir -p /etc/sddm.conf.d; mv '{}' /etc/sddm.conf.d/bookos-theme.conf; chmod 644 /etc/sddm.conf.d/bookos-theme.conf", tmp_conf));
+    script.push_str(&format!("mkdir -p /etc/sddm.conf.d; mv '{}' /etc/sddm.conf.d/zz-bookos-theme.conf; chmod 644 /etc/sddm.conf.d/zz-bookos-theme.conf", tmp_conf));
 
     eprintln!("[install_sddm] script:\n{}", script);
 
@@ -3095,7 +3922,10 @@ fn lockscreen_source() -> Option<String> {
 #[tauri::command] async fn uninstall_sddm_theme(password: String) -> String {
     use std::io::Write;
     let mut child = match StdCommand::new("sudo")
-        .args(["-k", "-S", "--", "rm", "-f", "/etc/sddm.conf.d/bookos-theme.conf"])
+        .args(["-k", "-S", "--", "rm", "-f",
+               "/etc/sddm.conf.d/zz-bookos-theme.conf",
+               // Nombre antiguo: se limpia por si viene de una instalación previa.
+               "/etc/sddm.conf.d/bookos-theme.conf"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -3480,6 +4310,12 @@ fn lockscreen_source() -> Option<String> {
     format!(r#"{{"ok":true,"added":{}}}"#, added)
 }
 #[tauri::command] async fn get_current_wallpaper() -> String {
+    let p = current_wallpaper_path();
+    format!(r#"{{"path":"{}"}}"#, esc(&p))
+}
+/// Ruta del fondo actual, sin envolver en JSON: la usa también el color
+/// dinámico, que necesita el path a secas para leer la imagen.
+fn current_wallpaper_path() -> String {
     // Plasma stores the wallpaper inside a Containment whose number varies.
     // Parse the appletsrc directly to find the first Wallpaper Image key.
     let cfg = std::env::var("HOME").map(|h| format!("{}/.config/plasma-org.kde.plasma.desktop-appletsrc", h)).unwrap_or_default();
@@ -3493,15 +4329,537 @@ fn lockscreen_source() -> Option<String> {
         }
         if in_image_general {
             if let Some(val) = l.strip_prefix("Image=") {
-                let path = val.trim().replace("file://", "");
-                return format!(r#"{{"path":"{}"}}"#, esc(&path));
+                return val.trim().replace("file://", "");
             }
         }
     }
-    r#"{"path":""}"#.into()
+    String::new()
 }
 #[tauri::command] async fn set_wallpaper(path: String) -> String {
     run("plasma-apply-wallpaperimage", &[&path]).await;
+    // Con el color dinámico en automático, cambiar de fondo recalcula la paleta
+    // con el MISMO estilo elegido. La semilla se recalcula porque es propiedad
+    // de la imagen; el estilo es una preferencia del usuario y se respeta.
+    if dynamic_color_enabled() {
+        let style = load_bookos_settings().get("DynamicColorStyle")
+            .and_then(|v| v.as_str()).unwrap_or("vibrant").to_string();
+        if let Ok(seeds) = palette::seeds_from_image(&path) {
+            if let Some(seed) = seeds.first() {
+                let _ = write_dynamic_palette(seed, &style).await;
+            }
+        }
+    }
+    r#"{"ok":true}"#.into()
+}
+
+// ── Caché de dispositivos ────────────────────────────────────────────────
+//
+// El widget de batería en su variante grande enseña TODOS los dispositivos del
+// ecosistema, no solo el portátil: móvil, tablet y auriculares. La lista sale
+// de UPower, que ya agrega las baterías que reporta BlueZ por Bluetooth.
+//
+// Se escribe en un fichero por el mismo motivo que el tiempo: el greeter de
+// SDDM arranca antes de que haya sesión y no puede lanzar procesos ni hablar
+// con el bus. Lee este fichero o no enseña nada.
+//
+// Un móvil emparejado por Book Link (aún sin implementar aquí) entrará por esta
+// misma vía en cuanto publique su batería en UPower o escriba en este caché.
+
+fn devices_cache_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join(".cache/bookos-devices.json")
+}
+
+/// Tipo de UPower → dibujo del widget. Los que no tienen dibujo (ratón,
+/// teclado, mando) se descartan: la tarjeta enseña el ecosistema, no cada
+/// periférico con pila.
+fn upower_kind(t: &str) -> Option<&'static str> {
+    match t {
+        "battery"                 => Some("laptop"),
+        "phone"                   => Some("phone"),
+        "tablet"                  => Some("tablet"),
+        "headset" | "headphones"  => Some("buds"),
+        _ => None,
+    }
+}
+
+/// Dispositivos emparejados y a la vista en BookOS Link, con su batería.
+///
+/// Interfaz (fork en BookOS-Link/kdeconnect-kde):
+///   org.kde.kdeconnect · /modules/kdeconnect
+///     → org.kde.kdeconnect.daemon.devices(onlyReachable, onlyPaired) → [id]
+///   /modules/kdeconnect/devices/<id>          → .device: name, type
+///   /modules/kdeconnect/devices/<id>/battery  → .device.battery: charge, isCharging
+///
+/// Devuelve (id, kind, nombre, %, cargando). Vacío si el demonio no responde:
+/// no tener Book Link es un estado normal, no un error que reportar.
+fn kdeconnect_devices() -> Vec<(String, String, String, i64, bool)> {
+    // `busctl` viene con systemd, así que está siempre; `qdbus` depende del
+    // paquete de Qt que haya instalado y en este equipo ni existe.
+    let call = |args: &[&str]| -> Option<String> {
+        let out = StdCommand::new("busctl").args(args).output().ok()?;
+        if !out.status.success() { return None; }
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    // Las respuestas vienen tipadas: `s "valor"`, `i 87`, `b true`.
+    let unquote = |s: &str| s.split_once(' ').map(|(_, v)| v.trim().trim_matches('"').to_string());
+
+    let ids = match call(&["--user", "call", "org.kde.kdeconnect", "/modules/kdeconnect",
+                          "org.kde.kdeconnect.daemon", "devices", "bb", "true", "true"]) {
+        Some(v) => v, None => return Vec::new(),
+    };
+    // Formato: `as 2 "id_uno" "id_dos"`.
+    let ids: Vec<String> = ids.split('"').skip(1).step_by(2).map(|s| s.to_string()).collect();
+
+    let mut out = Vec::new();
+    for id in ids {
+        let base = format!("/modules/kdeconnect/devices/{}", id);
+        let prop = |path: &str, iface: &str, name: &str| -> Option<String> {
+            call(&["--user", "get-property", "org.kde.kdeconnect", path, iface, name])
+                .and_then(|v| unquote(&v))
+        };
+        // El tipo lo da el propio móvil: "phone", "tablet", "desktop", "laptop".
+        // Un portátil emparejado NO entra: la tarjeta ya enseña este equipo y
+        // saldrían dos siluetas de portátil sin forma de distinguirlas.
+        let kind = match prop(&base, "org.kde.kdeconnect.device", "type").as_deref() {
+            Some("phone")  => "phone",
+            Some("tablet") => "tablet",
+            _ => continue,
+        };
+        let charge = prop(&format!("{}/battery", base),
+                          "org.kde.kdeconnect.device.battery", "charge")
+                     .and_then(|v| v.parse::<i64>().ok()).unwrap_or(-1);
+        // -1 es lo que devuelve el plugin antes de recibir el primer aviso del
+        // móvil. Enseñar un 0 % sería alarmar por un dato que no existe aún.
+        if charge < 0 { continue; }
+        let charging = prop(&format!("{}/battery", base),
+                            "org.kde.kdeconnect.device.battery", "isCharging")
+                       .map(|v| v == "true").unwrap_or(false);
+        let name = prop(&base, "org.kde.kdeconnect.device", "name").unwrap_or_default();
+        out.push((id, kind.to_string(), name, charge, charging));
+    }
+    out
+}
+
+/// Rehace ~/.cache/bookos-devices.json a partir de `upower -d`.
+#[tauri::command] fn refresh_devices_cache() -> String {
+    let out = match StdCommand::new("upower").arg("-d").output() {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return r#"{"ok":false,"error":"upower no disponible"}"#.into(),
+    };
+
+    // `upower -d` va en bloques "Device: …" y dentro, con dos espacios de
+    // sangría, una línea suelta con el TIPO ("battery", "phone", "headset") y
+    // debajo sus campos. Se recorre en orden guardando el bloque abierto.
+    #[derive(Default)]
+    struct Dev { kind: String, name: String, pct: i64, charging: bool }
+    let mut devs: Vec<Dev> = Vec::new();
+    let mut cur: Option<Dev> = None;
+
+    let flush = |cur: &mut Option<Dev>, devs: &mut Vec<Dev>| {
+        if let Some(d) = cur.take() {
+            if !d.kind.is_empty() { devs.push(d); }
+        }
+    };
+
+    for line in out.lines() {
+        let t = line.trim();
+        if line.starts_with("Device:") {
+            flush(&mut cur, &mut devs);
+            // DisplayDevice es el AGREGADO que UPower publica para las barras de
+            // tarea: repite la batería del portátil y saldría un segundo círculo
+            // idéntico en la tarjeta.
+            cur = if line.trim_end().ends_with("/DisplayDevice") { None }
+                  else { Some(Dev::default()) };
+            continue;
+        }
+        let d = match cur.as_mut() { Some(d) => d, None => continue };
+        if let Some(k) = upower_kind(t) { d.kind = k.to_string(); continue; }
+        if let Some(v) = t.strip_prefix("model:") { d.name = v.trim().to_string(); continue; }
+        if let Some(v) = t.strip_prefix("percentage:") {
+            d.pct = v.trim().trim_end_matches('%').replace(',', ".")
+                     .parse::<f64>().unwrap_or(0.0).round() as i64;
+            continue;
+        }
+        if let Some(v) = t.strip_prefix("state:") {
+            let v = v.trim();
+            // "pending-charge" NO es cargando: es lo que dice un portátil
+            // enchufado que ha llegado a su límite de carga. Pintarlo verde
+            // haría creer que sube cuando lleva horas parado en el mismo %.
+            d.charging = v == "charging";
+        }
+    }
+    flush(&mut cur, &mut devs);
+
+    // ── Móvil y tablet por BookOS Link ──
+    // UPower solo ve la batería de un móvil si BlueZ la publica, cosa que pasa
+    // con pocos y solo por Bluetooth clásico. BookOS Link (el fork de KDE
+    // Connect) la tiene siempre que el móvil esté emparejado y a la vista, por
+    // Wi-Fi o por Bluetooth, y además con el nombre real del aparato.
+    //
+    // Se pregunta con `busctl` y no con zbus para no arrastrar el bus de sesión
+    // hasta aquí: esto corre en un bucle de fondo y falla en silencio si el
+    // demonio no está — que es lo normal si el usuario no usa Book Link.
+    for (id, kind, name, pct, charging) in kdeconnect_devices() {
+        let _ = id;
+        // Si UPower ya lo trae (móvil por Bluetooth clásico), manda Book Link:
+        // su dato es más fiable y trae nombre.
+        devs.retain(|d| d.kind != kind);
+        devs.push(Dev { kind, name, pct, charging });
+    }
+
+    // El portátil primero SIEMPRE: es "este" dispositivo y la tarjeta lo marca
+    // como el activo. El resto queda en el orden en que los da UPower.
+    devs.sort_by_key(|d| if d.kind == "laptop" { 0 } else { 1 });
+    devs.truncate(4);   // caben cuatro círculos en la tarjeta
+
+    let items: Vec<String> = devs.iter().map(|d| format!(
+        r#"{{"kind":"{}","name":"{}","pct":{},"charging":{}}}"#,
+        d.kind, esc(&d.name), d.pct, d.charging)).collect();
+    let json = format!(r#"{{"devices":[{}]}}"#, items.join(","));
+
+    let path = devices_cache_path();
+    if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
+    if let Err(e) = std::fs::write(&path, &json) {
+        return format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e.to_string()));
+    }
+    json
+}
+
+// ── Caché del tiempo ─────────────────────────────────────────────────────
+//
+// El widget del tiempo de la pantalla de bloqueo (GreeterWidgets.qml) pinta lo
+// que encuentre en ~/.cache/bookos-weather.json y se esconde entero si no hay
+// nada. No había NADIE escribiendo ese fichero, así que el widget se podía
+// activar en el editor pero no aparecía nunca. Esto es ese productor.
+//
+// Sin claves de API y sin dependencias nuevas: geolocalización por IP y
+// Open-Meteo, ambos por `curl`, que ya se usa en el resto del binario.
+
+fn weather_cache_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join(".cache/bookos-weather.json")
+}
+
+/// Código WMO → (estado para WxIcon, emoji, descripción).
+/// WxIcon solo dibuja cinco formas (clear/partly/clouds/rain/night), así que
+/// la nieve y la niebla se agrupan en la más parecida: pintar gotas para una
+/// nevada engañaría más que un icono de nube.
+fn wmo_to_state(code: i64, is_day: bool) -> (&'static str, &'static str, &'static str) {
+    match code {
+        0        => if is_day { ("clear",  "☀", "Despejado") } else { ("night", "🌙", "Despejado") },
+        1        => if is_day { ("clear",  "☀", "Mayormente despejado") } else { ("night", "🌙", "Mayormente despejado") },
+        2        => ("partly", "⛅", "Parcialmente nublado"),
+        3        => ("clouds", "☁", "Nublado"),
+        45 | 48  => ("clouds", "🌫", "Niebla"),
+        51..=57  => ("rain",   "🌦", "Llovizna"),
+        61..=67  => ("rain",   "🌧", "Lluvia"),
+        71..=77  => ("clouds", "🌨", "Nieve"),
+        80..=82  => ("rain",   "🌧", "Chubascos"),
+        85 | 86  => ("clouds", "🌨", "Chubascos de nieve"),
+        95..=99  => ("rain",   "⛈", "Tormenta"),
+        _        => ("clouds", "☁", "—"),
+    }
+}
+
+/// Saca un número o una cadena de un JSON sin montar structs: la respuesta de
+/// Open-Meteo tiene arrays paralelos y aquí solo hacen falta cuatro campos.
+fn jnum(v: &serde_json::Value, path: &[&str]) -> Option<f64> {
+    let mut cur = v;
+    for k in path { cur = cur.get(k)?; }
+    cur.as_f64()
+}
+
+/// Rehace ~/.cache/bookos-weather.json. Devuelve el JSON escrito.
+/// Silencioso a propósito: sin red no hay tiempo, y el widget ya sabe
+/// esconderse; no es motivo para molestar al usuario con un aviso.
+#[tauri::command] async fn refresh_weather_cache() -> String {
+    let curl = |url: String| async move {
+        Command::new("curl")
+            .args(["-fsS", "--max-time", "8", &url])
+            .output().await.ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
+    };
+
+    // Ubicación por IP. Es aproximada (nivel ciudad), que es justo la precisión
+    // que necesita un widget que enseña un número y un icono.
+    let loc = match curl("http://ip-api.com/json/?fields=lat,lon,city".to_string()).await {
+        Some(v) => v,
+        None => return r#"{"ok":false,"error":"sin conexión"}"#.into(),
+    };
+    let (lat, lon) = match (jnum(&loc, &["lat"]), jnum(&loc, &["lon"])) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return r#"{"ok":false,"error":"no se pudo ubicar"}"#.into(),
+    };
+    let city = loc.get("city").and_then(|c| c.as_str()).unwrap_or("").to_string();
+
+    let url = format!(
+        "https://api.open-meteo.com/v1/forecast?latitude={:.4}&longitude={:.4}\
+         &current=temperature_2m,weather_code,is_day\
+         &daily=weather_code,temperature_2m_max&timezone=auto&forecast_days=7",
+        lat, lon);
+    let wx = match curl(url).await {
+        Some(v) => v,
+        None => return r#"{"ok":false,"error":"sin datos meteorológicos"}"#.into(),
+    };
+
+    let temp = jnum(&wx, &["current", "temperature_2m"]).unwrap_or(0.0).round() as i64;
+    let code = jnum(&wx, &["current", "weather_code"]).unwrap_or(3.0) as i64;
+    let is_day = jnum(&wx, &["current", "is_day"]).unwrap_or(1.0) > 0.5;
+    let (state, icon, desc) = wmo_to_state(code, is_day);
+
+    // Previsión: se salta HOY (índice 0), que ya es el número grande de arriba.
+    let mut days = Vec::new();
+    if let (Some(dates), Some(codes), Some(maxes)) = (
+        wx.pointer("/daily/time").and_then(|v| v.as_array()),
+        wx.pointer("/daily/weather_code").and_then(|v| v.as_array()),
+        wx.pointer("/daily/temperature_2m_max").and_then(|v| v.as_array()),
+    ) {
+        for i in 1..dates.len().min(codes.len()).min(maxes.len()) {
+            // "2026-07-29" → "29": la tarjeta solo tiene sitio para el día.
+            let d = dates[i].as_str().unwrap_or("").rsplit('-').next().unwrap_or("").to_string();
+            let c = codes[i].as_i64().unwrap_or(3);
+            let t = maxes[i].as_f64().unwrap_or(0.0).round() as i64;
+            days.push(serde_json::json!({ "d": d, "t": t.to_string(), "s": wmo_to_state(c, true).0 }));
+        }
+    }
+
+    let out = serde_json::json!({
+        "temp": temp, "desc": desc, "city": city,
+        "icon": icon, "state": state, "days": days,
+        "updated": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+    });
+    let body = out.to_string();
+    let path = weather_cache_path();
+    if let Some(dir) = path.parent() { let _ = fs::create_dir_all(dir); }
+    // Atómica: el greeter puede estar leyendo el fichero justo ahora y una
+    // lectura a medias le dejaría el widget sin temperatura hasta el siguiente
+    // bloqueo.
+    let tmp = path.with_extension("json.tmp");
+    if fs::write(&tmp, &body).is_ok() { let _ = fs::rename(&tmp, &path); }
+    format!(r#"{{"ok":true,"weather":{}}}"#, body)
+}
+
+/// Refresco periódico mientras Ajustes corre (arranca oculto con la sesión).
+/// Media hora: el tiempo no cambia más rápido y así no se castiga a las dos
+/// APIs públicas y gratuitas de las que cuelga esto.
+async fn weather_refresh_loop() {
+    loop {
+        refresh_weather_cache().await;
+        tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+    }
+}
+
+/// Igual para la lista de dispositivos del ecosistema. Cada dos minutos porque
+/// aquí lo que cambia no es un dato remoto sino QUÉ hay conectado: unos
+/// auriculares que se emparejan tienen que aparecer en el widget sin esperar
+/// media hora. Es una llamada local a UPower, no cuesta nada.
+async fn devices_refresh_loop() {
+    loop {
+        refresh_devices_cache();
+        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+    }
+}
+
+// ── Color dinámico (paleta desde el fondo de pantalla) ───────────────────
+//
+// La paleta se materializa en ~/.config/bookos/: un palette.css que cada app
+// de BookOS carga DESPUÉS de su propia hoja (misma especificidad, más tarde en
+// la cascada = gana) y un palette.json para quien prefiera leer los roles.
+// Ese fichero compartido es todo el contrato: Ajustes no necesita saber nada
+// de Reloj, Notas, Store, Player, Viewer o Shell para teñirlas.
+
+fn bookos_shared_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/bookos")
+}
+
+fn dynamic_color_enabled() -> bool {
+    load_bookos_settings().get("DynamicColor").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+/// Genera la paleta y la deja escrita. Devuelve el JSON de la paleta.
+async fn write_dynamic_palette(seed: &str, style: &str) -> Result<String, String> {
+    let st = palette::Style::from_str(style);
+    let scheme = palette::scheme_from_seed(seed, st);
+    let dir = bookos_shared_dir();
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Escritura atómica: una app leyendo el CSS a media escritura se quedaría
+    // con media paleta y una interfaz a dos colores hasta el siguiente arranque.
+    let write_atomic = |name: &str, body: &str| -> Result<(), String> {
+        let tmp = dir.join(format!(".{}.tmp", name));
+        fs::write(&tmp, body).map_err(|e| e.to_string())?;
+        fs::rename(&tmp, dir.join(name)).map_err(|e| e.to_string())
+    };
+    let js = palette::json(seed, st, &scheme);
+    write_atomic("palette.css", &palette::css(&scheme))?;
+    write_atomic("palette.json", &js)?;
+
+    let mut cfg = load_bookos_settings();
+    cfg["DynamicColorSeed"] = serde_json::Value::String(seed.to_string());
+    cfg["DynamicColorStyle"] = serde_json::Value::String(st.id().to_string());
+    save_bookos_settings(&cfg);
+
+    // Esquema de color nativo de Plasma: esto es lo que hace que apps y
+    // plasmoides que ya leen Kirigami.Theme/current-color-scheme (p.ej.
+    // KdeControlStation, el desktoptheme bookos-dark/light) sigan la paleta
+    // sin haberles tocado una línea. Opt-in y best-effort: nunca debe tumbar
+    // la escritura de palette.css/json, que es lo único de lo que dependen
+    // las apps de BookOS.
+    if cfg.get("DynamicColorPlasma").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let colors_dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+            .join(".local/share/color-schemes");
+        let _ = fs::create_dir_all(&colors_dir);
+        let _ = fs::write(colors_dir.join("BookOSDynamicDark.colors"), palette::kde_colors(&scheme, true));
+        let _ = fs::write(colors_dir.join("BookOSDynamicLight.colors"), palette::kde_colors(&scheme, false));
+        let is_dark = cfg.get("ThemeIsDark").and_then(|v| v.as_bool()).unwrap_or(true);
+        let variant = if is_dark { "BookOSDynamicDark" } else { "BookOSDynamicLight" };
+        run("plasma-apply-colorscheme", &[variant]).await;
+    }
+
+    // Kvantum: solo hay plantilla para bookos-dark-blue/bookos-light-blue,
+    // así que se escriben esos dos siempre que el flag esté activo, y solo
+    // se reaplica si es el tema Kvantum que el usuario tiene puesto ahora
+    // (si usa otra variante de color, la plantilla no le pisa nada).
+    if cfg.get("DynamicColorKvantum").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let home = std::env::var("HOME").unwrap_or_default();
+        // Instalado por el paquete; en dev (cargo run / tauri dev) cae a la
+        // plantilla del propio repo.
+        let staged = std::path::PathBuf::from("/usr/share/bookos-settings/kvantum");
+        let extra_dir = if staged.is_dir() { staged } else {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("extra/kvantum")
+        };
+        let write_kv = |name: &str, tmpl_file: &str, dark: bool| {
+            if let Ok(tmpl) = fs::read_to_string(extra_dir.join(tmpl_file)) {
+                let body = palette::kvantum_config(&tmpl, &scheme, dark);
+                let dir = std::path::PathBuf::from(&home).join(".config/Kvantum").join(name);
+                let _ = fs::create_dir_all(&dir);
+                let _ = fs::write(dir.join(format!("{}.kvconfig", name)), body);
+            }
+        };
+        write_kv("bookos-dark-blue", "bookos-dark-blue.kvconfig.tmpl", true);
+        write_kv("bookos-light-blue", "bookos-light-blue.kvconfig.tmpl", false);
+
+        let is_dark = cfg.get("ThemeIsDark").and_then(|v| v.as_bool()).unwrap_or(true);
+        let (kv, _) = get_kv_pt(&cfg, is_dark);
+        if kv == "bookos-dark-blue" || kv == "bookos-light-blue" {
+            run("kvantummanager", &["--set", &kv]).await;
+        }
+    }
+
+    // Lockscreen/SDDM: un único acento (no hay par claro/oscuro aquí, igual
+    // que el default fijo "#007AFF" que reemplaza), a medio camino entre el
+    // tono oscuro (80) y claro (42) que usa `roles()` para que se lea bien
+    // sobre cualquiera de los dos fondos del lockscreen.
+    if cfg.get("DynamicColorLockscreen").and_then(|v| v.as_bool()).unwrap_or(false) {
+        sync_sddm_accent(&scheme.primary.tone(58.0)).await;
+    }
+    Ok(js)
+}
+
+/// Colores candidatos del fondo actual (o de `path` si se pasa uno).
+#[tauri::command] fn dynamic_color_seeds(path: Option<String>) -> String {
+    let p = path.filter(|s| !s.is_empty()).unwrap_or_else(current_wallpaper_path);
+    if p.is_empty() { return r#"{"ok":false,"error":"no hay fondo de pantalla"}"#.into(); }
+    match palette::seeds_from_image(&p) {
+        Ok(seeds) => {
+            let list = seeds.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(",");
+            format!(r#"{{"ok":true,"wallpaper":"{}","seeds":[{}]}}"#, esc(&p), list)
+        }
+        Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e)),
+    }
+}
+
+/// Paleta de una semilla + estilo SIN aplicarla: es lo que pinta las fichas de
+/// previsualización de los cuatro estilos.
+#[tauri::command] fn dynamic_color_preview(seed: String, style: String) -> String {
+    let st = palette::Style::from_str(&style);
+    palette::json(&seed, st, &palette::scheme_from_seed(&seed, st))
+}
+
+/// Aplica la paleta: la escribe y deja el color dinámico activado.
+#[tauri::command] async fn dynamic_color_apply(seed: String, style: String) -> String {
+    let mut cfg = load_bookos_settings();
+    cfg["DynamicColor"] = serde_json::Value::Bool(true);
+    save_bookos_settings(&cfg);
+    match write_dynamic_palette(&seed, &style).await {
+        Ok(js) => format!(r#"{{"ok":true,"palette":{}}}"#, js),
+        Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, esc(&e)),
+    }
+}
+
+/// Estado guardado + la paleta en vigor, para repintar al abrir la página.
+#[tauri::command] fn dynamic_color_state() -> String {
+    let cfg = load_bookos_settings();
+    let seed = cfg.get("DynamicColorSeed").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let style = cfg.get("DynamicColorStyle").and_then(|v| v.as_str()).unwrap_or("vibrant").to_string();
+    let css = fs::read_to_string(bookos_shared_dir().join("palette.css")).unwrap_or_default();
+    let plasma = cfg.get("DynamicColorPlasma").and_then(|v| v.as_bool()).unwrap_or(false);
+    let kvantum = cfg.get("DynamicColorKvantum").and_then(|v| v.as_bool()).unwrap_or(false);
+    let lockscreen = cfg.get("DynamicColorLockscreen").and_then(|v| v.as_bool()).unwrap_or(false);
+    format!(r#"{{"enabled":{},"seed":"{}","style":"{}","css":"{}","plasma":{},"kvantum":{},"lockscreen":{}}}"#,
+            dynamic_color_enabled(), esc(&seed), esc(&style), esc(&css), plasma, kvantum, lockscreen)
+}
+
+/// Apaga o vuelve a encender el color dinámico. Al apagarlo se borra el CSS
+/// compartido, que es lo único que tiñe: las apps vuelven a sus colores.
+#[tauri::command] async fn dynamic_color_set_enabled(enabled: bool) -> String {
+    let mut cfg = load_bookos_settings();
+    cfg["DynamicColor"] = serde_json::Value::Bool(enabled);
+    let seed = cfg.get("DynamicColorSeed").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let style = cfg.get("DynamicColorStyle").and_then(|v| v.as_str()).unwrap_or("vibrant").to_string();
+    save_bookos_settings(&cfg);
+    if enabled {
+        if !seed.is_empty() { let _ = write_dynamic_palette(&seed, &style).await; }
+    } else {
+        let dir = bookos_shared_dir();
+        let _ = fs::remove_file(dir.join("palette.css"));
+        let _ = fs::remove_file(dir.join("palette.json"));
+    }
+    r#"{"ok":true}"#.into()
+}
+
+/// Enciende o apaga que la paleta también se aplique como esquema de color
+/// nativo de Plasma (KdeControlStation, desktoptheme). Independiente del
+/// interruptor de iconos: mismo patrón, cada uno se recuerda por su cuenta.
+#[tauri::command] async fn dynamic_color_set_plasma(enabled: bool) -> String {
+    let mut cfg = load_bookos_settings();
+    cfg["DynamicColorPlasma"] = serde_json::Value::Bool(enabled);
+    let seed = cfg.get("DynamicColorSeed").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let style = cfg.get("DynamicColorStyle").and_then(|v| v.as_str()).unwrap_or("vibrant").to_string();
+    save_bookos_settings(&cfg);
+    if enabled && dynamic_color_enabled() && !seed.is_empty() {
+        let _ = write_dynamic_palette(&seed, &style).await;
+    }
+    r#"{"ok":true}"#.into()
+}
+
+/// Igual que `dynamic_color_set_plasma`, pero para Kvantum (apps Qt que no
+/// leen Kirigami.Theme: Dolphin, Kate, VLC...).
+#[tauri::command] async fn dynamic_color_set_kvantum(enabled: bool) -> String {
+    let mut cfg = load_bookos_settings();
+    cfg["DynamicColorKvantum"] = serde_json::Value::Bool(enabled);
+    let seed = cfg.get("DynamicColorSeed").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let style = cfg.get("DynamicColorStyle").and_then(|v| v.as_str()).unwrap_or("vibrant").to_string();
+    save_bookos_settings(&cfg);
+    if enabled && dynamic_color_enabled() && !seed.is_empty() {
+        let _ = write_dynamic_palette(&seed, &style).await;
+    }
+    r#"{"ok":true}"#.into()
+}
+
+/// Igual que `dynamic_color_set_plasma`, pero para la pantalla de bloqueo
+/// (y, best-effort sin sudo, el saludo SDDM si ya tiene permisos).
+#[tauri::command] async fn dynamic_color_set_lockscreen(enabled: bool) -> String {
+    let mut cfg = load_bookos_settings();
+    cfg["DynamicColorLockscreen"] = serde_json::Value::Bool(enabled);
+    let seed = cfg.get("DynamicColorSeed").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let style = cfg.get("DynamicColorStyle").and_then(|v| v.as_str()).unwrap_or("vibrant").to_string();
+    save_bookos_settings(&cfg);
+    if enabled && dynamic_color_enabled() && !seed.is_empty() {
+        let _ = write_dynamic_palette(&seed, &style).await;
+    }
     r#"{"ok":true}"#.into()
 }
 
@@ -4976,7 +6334,41 @@ fn acquire_instance_lock() -> bool {
     true
 }
 
+// KDE/Wayland fractional output scales (e.g. 1.75) make GTK negotiate the
+// wp-fractional-scale protocol: the compositor asks for a non-integer buffer
+// size, so every repainted tile needs an extra scale/blend pass. On Intel
+// iGPUs (esp. new Mesa drivers like Lunar Lake's) that's slow enough to tank
+// scroll fps on anything with clipped rounded corners. GTK's own scaling
+// knobs (GDK_SCALE, integer only; GDK_DPI_SCALE, the leftover fraction) skip
+// that protocol entirely — the window renders at a clean integer buffer scale
+// (cheap, tile-aligned) and DPI scaling shrinks the logical layout back down
+// to match, without touching the desktop-wide scale setting.
+fn fractional_scale_workaround() -> Option<(u32, f64)> {
+    let out = StdCommand::new("kscreen-doctor").arg("-j").output().ok()?;
+    if !out.status.success() { return None; }
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let scale = json.get("outputs")?.as_array()?.iter()
+        .find(|o| o.get("connected").and_then(|v| v.as_bool()).unwrap_or(false)
+                && o.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false))
+        .and_then(|o| o.get("scale"))
+        .and_then(|v| v.as_f64())?;
+    if scale <= 0.0 || scale.fract().abs() < 0.001 { return None; } // already integer
+    let gdk_scale = scale.ceil();
+    Some((gdk_scale as u32, scale / gdk_scale))
+}
+
 fn main() {
+    if let Some((gdk_scale, dpi_scale)) = fractional_scale_workaround() {
+        std::env::set_var("GDK_SCALE", gdk_scale.to_string());
+        std::env::set_var("GDK_DPI_SCALE", format!("{:.4}", dpi_scale));
+    }
+
+    // webkit2gtk's DMABUF renderer has a known perf/glitch regression on
+    // Wayland + Intel (Mesa) GPUs — scrolling anything with clipped rounded
+    // corners (sidebar cards) drops to low fps. Falling back to the GL
+    // renderer fixes it. Must be set before the webview is created.
+    std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
@@ -5044,6 +6436,11 @@ fn main() {
             // Use Tauri's async runtime (a tokio runtime isn't active inside setup()).
             let buds_app = app.handle().clone();
             tauri::async_runtime::spawn(async move { earbud_watch_loop(buds_app).await; });
+            // Caché del tiempo para el widget de la pantalla de bloqueo. Va aquí
+            // y no en el greeter porque kscreenlocker no tiene red propia ni
+            // sitio donde guardar nada: solo lee el fichero.
+            tauri::async_runtime::spawn(async move { weather_refresh_loop().await; });
+            tauri::async_runtime::spawn(async move { devices_refresh_loop().await; });
             if let Some(window) = app.get_webview_window("main") {
                 if is_hidden || toggle_only {
                     let _ = window.set_skip_taskbar(true);
@@ -5074,6 +6471,17 @@ fn main() {
                                 let _ = win.request_user_attention(Some(tauri::UserAttentionType::Critical));
                             };
                             if mode == "show" {
+                                // Reabrir desde oculto debe empezar limpio: si el usuario
+                                // cerró con la X estando en "Batería", volver a abrir desde
+                                // el menú no debe devolverle a Batería. Con la ventana ya
+                                // visible no se toca la página — solo se trae al frente.
+                                //
+                                // La X no cierra el proceso (close-to-background, arriba),
+                                // así que "cerrado" para el usuario == ventana no visible.
+                                if !visible || minimized {
+                                    use tauri::Emitter;
+                                    let _ = win.emit("reset-to-home", ());
+                                }
                                 raise();
                             } else if visible && !minimized {
                                 let _ = win.hide();
@@ -5373,6 +6781,9 @@ fn main() {
             open_main_window,
             system_extras::list_input_devices,system_extras::set_input_device_prop,
             system_extras::kscreen_get,system_extras::kscreen_set,
+            bookos_desktop::bookos_desktop_available,bookos_desktop::bookos_get_capabilities,
+            bookos_desktop::bookos_get_outputs,bookos_desktop::bookos_apply_output_config,
+            bookos_desktop::bookos_reload_config,
             system_extras::list_cursor_themes,system_extras::list_icon_themes,
             system_extras::apply_cursor_theme,system_extras::apply_icon_theme,
             system_extras::restart_kglobalaccel,
@@ -5392,11 +6803,13 @@ fn main() {
             get_current_theme,get_available_themes,set_color_scheme,get_theme_schedule,set_theme_schedule,set_icon_style,
             get_kde_light_dark_themes,apply_kde_theme,
             get_dnd_status,toggle_dnd,
+            get_desktop_lockscreen_config,set_desktop_lockscreen_config,
             get_lock_timeout,set_lock_timeout,set_lock_grace,get_lock_grace,check_fingerprint,enroll_fingerprint,verify_password,verify_fingerprint,
             get_locale_info,get_available_locales,set_locale,get_available_keymaps,set_keymap,
             get_datetime_info,list_timezones,set_timezone,set_ntp,
             check_system_updates,check_aur_updates,check_flatpak_updates,run_system_update,run_pacman_update_silent,get_update_progress,cancel_update,run_flatpak_update,run_aur_update,get_pkg_mgr,has_flatpak,logout_session,
-            get_app_power_usage,get_sddm_themes,set_sddm_theme,get_sddm_config,set_sddm_config,preview_sddm,
+            get_app_power_usage,get_sddm_themes,set_sddm_theme,get_sddm_config,set_sddm_config,
+            sddm_accent_from_image,sddm_clock_adapt,sddm_clock_depth,list_login_users,preview_sddm,
             is_lockscreen_theme_installed,install_lockscreen_theme,uninstall_lockscreen_theme,
             is_sddm_theme_installed,install_sddm_theme,uninstall_sddm_theme,
             get_app_usage,
@@ -5407,6 +6820,9 @@ fn main() {
             change_password,set_avatar,create_user,delete_user,get_autologin_status,set_autologin,get_labs_settings,set_lab_setting,
             forget_wifi,get_wifi_details,get_ethernet_status,get_ethernet_details,get_wifi_password,log_app_usage,track_active_app,
             get_wallpapers,add_wallpapers,get_current_wallpaper,set_wallpaper,
+            refresh_weather_cache,refresh_devices_cache,
+            dynamic_color_seeds,dynamic_color_preview,dynamic_color_apply,
+            dynamic_color_state,dynamic_color_set_enabled,dynamic_color_set_plasma,dynamic_color_set_kvantum,dynamic_color_set_lockscreen,
             get_default_apps,list_apps_for_role,set_default_app,open_mime_settings,
             get_bookos_setting,set_bookos_setting,get_settings_batch,configure_auto_update,restore_startup_settings,get_startup_page,check_navigation_request,write_ipc_state,read_ipc_state,
             get_available_kvantum_themes,get_available_plasma_themes,get_style_themes,set_style_themes,

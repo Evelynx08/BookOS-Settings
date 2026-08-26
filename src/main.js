@@ -7,6 +7,12 @@ import{getRoutines,executeRoutine,snapshotForRoutine,restoreSnapshot,getRoutineS
 let _pagesPromise=null;
 const _loadPages=()=>(_pagesPromise||(_pagesPromise=import('./modules/pages.js')));
 import{tauriInvoke,isTauri}from'./tauri-api.js';
+import{applyCachedPalette,syncPalette}from'./modules/dynamic-color.js';
+
+// La paleta dinámica se aplica desde la caché ANTES de que corra nada más: si
+// esperase al backend, la ventana abriría con los colores de fábrica y saltaría
+// al color del fondo medio segundo después, que es peor que no teñir nada.
+applyCachedPalette();
 
 document.addEventListener('DOMContentLoaded',async()=>{
     const sb=document.getElementById('sb'),app=document.getElementById('app'),mc=document.getElementById('mc');
@@ -33,6 +39,9 @@ document.addEventListener('DOMContentLoaded',async()=>{
     tauriInvoke('get_user_info').then(j=>{try{const ui=JSON.parse(j);if(JSON.stringify(ui)!==JSON.stringify(userInfo)){userInfo=ui;if(sb)sb.innerHTML=renderHome(ui);window.updateHomeBudsRow?.();}localStorage.setItem('__user_info__',j);}catch(e){}}).catch(()=>{});
     // Re-apply hardware settings saved from previous session (battery limit, perf mode)
     tauriInvoke('restore_startup_settings').catch(()=>{});
+    // Corrige la paleta en caché con la que hay de verdad en disco (puede
+    // haberla cambiado otra app, o haberse desactivado).
+    syncPalette();
     // Detect distro package manager once and cache for UI
     tauriInvoke('get_pkg_mgr').then(j=>{try{localStorage.setItem('__pkg_mgr__',j);}catch{}}).catch(()=>{});
     tauriInvoke('has_flatpak').then(j=>{try{localStorage.setItem('__has_flatpak__',j);}catch{}}).catch(()=>{});
@@ -73,7 +82,8 @@ document.addEventListener('DOMContentLoaded',async()=>{
         avanzadas:'renderAvanzadas',
         salud:'renderSaludDigital',
         accesibilidad:'renderAccesibilidad',
-        inicio:'renderPantallaInicio'
+        inicio:'renderPantallaInicio',
+        sddmeditor:'renderSddmEditor'
     };
     // Páginas directas / aliases usados por los widgets del panel (BookOS-Widgets)
     pages.wifi='renderWifiPage';          // subpágina Wi-Fi
@@ -213,8 +223,36 @@ document.addEventListener('DOMContentLoaded',async()=>{
             app.innerHTML='';
         }
     }
+    // Vuelve al estado limpio: sin sección abierta, como recién arrancada.
+    // Lo dispara el backend (evento "reset-to-home") cuando se pide mostrar la
+    // ventana y estaba oculta — cerrar con la X no mata el proceso, así que sin
+    // esto la app reaparecía en la misma página que se dejó abierta.
+    async function resetToHome(){
+        window._navEpoch=(window._navEpoch||0)+1;   // invalida renders en vuelo
+        clearPageIntervals();
+        _navHistory.length=0;
+        _fwdHistory.length=0;
+        app.innerHTML='';
+        sb.querySelectorAll('.item').forEach(i=>i.classList.remove('active-item'));
+        if(sb)sb.scrollTop=0;
+        // Deja el buscador vacío: reabrir con una búsqueda a medias del rato
+        // anterior tampoco es "empezar limpio".
+        const sIn=document.getElementById('search-in');
+        if(sIn&&sIn.value){sIn.value='';sIn.dispatchEvent(new Event('input'));}
+        // Si quien nos abrió pidió una página concreta (el widget de batería
+        // escribe /tmp/bookos-start-page antes de lanzar), respetarla en vez de
+        // quedarse en blanco. get_startup_page consume el fichero al leerlo, así
+        // que solo aplica a la petición que acaba de llegar.
+        // Antes esto solo se miraba al arrancar el proceso, de modo que con
+        // Ajustes ya vivo el widget de batería nunca llegaba a su página.
+        try{const sp=await tauriInvoke('get_startup_page');if(sp&&pages[sp])openPage(sp);}catch(e){}
+    }
+    window.resetToHome=resetToHome;
+
     window.openPage=openPage;
     window.goBack=goBackExt;
+    // Alias: el editor de inicio de sesión lo llama por su nombre interno.
+    window.goBackExt=goBackExt;
     window.goForward=goForward;
     document.addEventListener('click',e=>{if(e.target.closest('.back-btn'))window.goBack?.();});
     window.pushSubNav=pushSubNav;
@@ -288,13 +326,19 @@ document.addEventListener('DOMContentLoaded',async()=>{
     // pages.js (where getConnectedBuds lives) is lazy-loaded; poll so the row
     // appears once it's available and tracks connect/disconnect.
     updateHomeBudsRow();
-    setInterval(updateHomeBudsRow,5000);
+    // Esto solo pinta una fila de la pantalla de inicio, así que no tiene
+    // sentido refrescarlo con la ventana oculta — a diferencia de los timers de
+    // auriculares y rutinas de más abajo, que sí deben seguir con la app en la
+    // bandeja. Se refresca además al volver a la ventana, para que la fila esté
+    // al día en cuanto se mira.
+    setInterval(()=>{ if(!document.hidden) updateHomeBudsRow(); },5000);
+    document.addEventListener('visibilitychange',()=>{ if(!document.hidden) updateHomeBudsRow(); });
 
     // ── Search ──
     const sIn=document.getElementById('search-in'),sX=document.getElementById('search-x'),noR=document.getElementById('no-res');
     // Prefetch pages.js on first focus so window._tr is ready for sub-results.
     sIn?.addEventListener('focus',()=>{_loadPages();},{once:true});
-    sIn?.addEventListener('input',()=>{const v=sIn.value.length>0;if(sX)sX.style.visibility=v?'visible':'hidden';filter(sIn.value.toLowerCase().trim());});
+    sIn?.addEventListener('input',()=>{const v=sIn.value.length>0;if(sX)sX.style.visibility=v?'visible':'hidden';filter(sIn.value);});
     sIn?.addEventListener('keydown',e=>{if(e.key==='Escape'){sIn.value='';if(sX)sX.style.visibility='hidden';filter('');}});
     sX?.addEventListener('click',()=>{sIn.value='';if(sX)sX.style.visibility='hidden';filter('');sIn.focus();});
 
@@ -308,17 +352,33 @@ document.addEventListener('DOMContentLoaded',async()=>{
         sb.appendChild(_subResultsCard);
         return _subResultsCard;
     }
-    function filter(q){
+    // Normaliza para comparar: minúsculas y sin diacríticos, para que "bateria"
+    // encuentre "Batería" y "energia" encuentre "Energía".
+    const _norm=s=>(s||'').toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu,'');
+    // El índice está escrito solo en español y _tr() se aplicaba únicamente al
+    // pintar, nunca al comparar: en inglés solo se encontraba lo que tuviera
+    // keywords en inglés puestas a mano. Ahora se compara contra ambos idiomas.
+    const _hit=(q,...vals)=>{
+        const trf=window._tr||(x=>x);
+        return vals.some(v=>{
+            if(!v)return false;
+            if(Array.isArray(v))return v.some(k=>_norm(k).includes(q));
+            return _norm(v).includes(q)||_norm(trf(v)).includes(q);
+        });
+    };
+
+    function filter(raw){
+        const q=_norm((raw||'').trim());
         const cards=sb.querySelectorAll('.card:not(.sub-results-card)');let any=false;
         const subCard=_ensureSubResultsCard();
         if(!q){cards.forEach(c=>{c.classList.remove('hidden');c.querySelectorAll('.item').forEach(i=>i.classList.remove('hidden'));});subCard.style.display='none';subCard.innerHTML='';noR.style.display='none';return;}
         cards.forEach(card=>{
-            if(card.classList.contains('card-profile')){const m='cuenta perfil profile'.includes(q);card.classList.toggle('hidden',!m);if(m)any=true;return;}
+            if(card.classList.contains('card-profile')){const m=_hit(q,['cuenta','perfil','profile','account','usuario','user']);card.classList.toggle('hidden',!m);if(m)any=true;return;}
             let vis=false;
             card.querySelectorAll('.item[data-page]').forEach(item=>{
                 const e=searchIndex.find(s=>s.id===item.dataset.page);
                 if(!e){item.classList.add('hidden');return;}
-                const ok=e.title.toLowerCase().includes(q)||e.subtitle.toLowerCase().includes(q)||e.keywords.some(k=>k.includes(q));
+                const ok=_hit(q,e.title,e.subtitle,e.keywords);
                 item.classList.toggle('hidden',!ok);if(ok)vis=true;
             });
             card.classList.toggle('hidden',!vis);if(vis)any=true;
@@ -327,8 +387,8 @@ document.addEventListener('DOMContentLoaded',async()=>{
         const visiblePages=new Set([...sb.querySelectorAll('.card:not(.hidden) .item[data-page]:not(.hidden)')].map(i=>i.dataset.page));
         const subMatches=subSearchIndex.filter(s=>{
             if(visiblePages.has(s.parent))return false;
-            return s.title.toLowerCase().includes(q)||s.keywords.some(k=>k.includes(q));
-        }).slice(0,12);
+            return _hit(q,s.title,s.keywords);
+        }).slice(0,30);
         if(subMatches.length){
             const labelOf=id=>searchIndex.find(x=>x.id===id)?.title||id;
             // _tr (literal ES→EN dict) lives in pages/_common.js; identity until it loads.
@@ -511,8 +571,16 @@ document.addEventListener('DOMContentLoaded',async()=>{
 
     // ── Keyboard shortcuts ──
     document.addEventListener('keydown',e=>{
-        if((e.ctrlKey||e.metaKey)&&e.key==='f'){e.preventDefault();sBox.style.display='block';sIn?.focus();sIn?.select();}
-        if(e.key==='Escape')goBackExt();
+        // El buscador vive en la barra lateral: si está plegada, desplegarla
+        // antes de enfocar o el foco iría a un elemento con pointer-events:none.
+        if((e.ctrlKey||e.metaKey)&&e.key==='f'){e.preventDefault();mc?.classList.remove('sidebar-collapsed');sIn?.focus();sIn?.select();}
+        // Escape no navega atrás si hay un diálogo/popover abierto (cada uno
+        // gestiona el suyo) ni mientras se escribe en un campo — antes se iba
+        // hacia atrás dejando el diálogo huérfano encima de la página nueva.
+        if(e.key==='Escape'){
+            if(document.querySelector('.bk-overlay,#bk-popover')||e.target?.matches?.('input,textarea'))return;
+            goBackExt();
+        }
         if(e.key==='ArrowDown'||e.key==='ArrowUp'){
             const items=[...sb.querySelectorAll('.item:not(.hidden)[tabindex]')];
             const cur=document.activeElement;const idx=items.indexOf(cur);
@@ -607,6 +675,9 @@ document.addEventListener('DOMContentLoaded',async()=>{
                 const trigger_type=ev?.payload?.trigger_type;
                 if(trigger_type)fireMatchingRoutines(trigger_type);
             });
+            // El backend lo emite justo antes de mostrar una ventana que estaba
+            // oculta, para que reabrir desde el menú empiece en blanco.
+            listenFn('reset-to-home',()=>{ try{ resetToHome(); }catch(e){} });
         }
     }
 

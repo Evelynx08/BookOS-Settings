@@ -20,7 +20,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Roboto,
 .split-view{display:flex;flex:1;min-height:0}
 
 /* Sidebar */
-.sidebar{width:384px;flex-shrink:0;padding:0 24px 32px;overflow-y:auto;scrollbar-width:none;scroll-behavior:smooth;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain;user-select:none;-webkit-user-select:none}
+.sidebar{width:384px;flex-shrink:0;padding:0 24px 32px;overflow-y:auto;scrollbar-width:none;scroll-behavior:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain;user-select:none;-webkit-user-select:none;transform:translateZ(0);will-change:transform}
 .sidebar::-webkit-scrollbar{display:none}
 .sidebar-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;padding:0 2px}
 .header-title{font-size:28px;font-weight:700;letter-spacing:-.4px}
@@ -38,7 +38,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Roboto,
 /* Sidebar Cards */
 .card{background:var(--card);width:336px;max-width:336px;min-width:336px;padding:0;overflow:hidden;flex-shrink:0;border-radius:22px;display:flex;flex-direction:column}
 .card-profile{border-radius:20px}
-.item{display:flex;align-items:center;padding:0 16px;cursor:pointer;position:relative;transition:transform .1s;gap:12px;height:58px;flex-shrink:0}
+.item{display:flex;align-items:center;padding:0 16px;cursor:pointer;position:relative;transition:transform .1s;gap:12px;height:58px;flex-shrink:0;content-visibility:auto;contain-intrinsic-size:auto 58px}
 .item:active{transform:scale(0.98) translateZ(0)}
 .card-profile .item{height:70px}
 .item:first-child{border-radius:inherit;border-bottom-left-radius:0;border-bottom-right-radius:0}
@@ -63,7 +63,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Roboto,
 .profile-avatar-placeholder{width:44px;height:44px;background:var(--blue);border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-size:18px;font-weight:600;flex-shrink:0}
 
 /* Detail View */
-.detail-view{flex:1;padding:0 44px 32px;overflow-y:auto;scrollbar-width:none;min-width:0;user-select:none;-webkit-user-select:none;scroll-behavior:smooth;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;scroll-padding-top:12px}
+.detail-view{flex:1;padding:0 44px 32px;overflow-y:auto;scrollbar-width:none;min-width:0;user-select:none;-webkit-user-select:none;scroll-behavior:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;scroll-padding-top:12px}
 .detail-view::-webkit-scrollbar{display:none}
 .detail-header{display:flex;align-items:center;gap:10px;margin-bottom:20px;padding-top:18px}
 .back-btn{background:0;border:0;color:var(--blue);font-size:20px;cursor:pointer;padding:4px;border-radius:8px;display:flex;align-items:center;line-height:1;transition:.12s}
@@ -132,12 +132,25 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Roboto,
 .channel-dialog-actions .btn-close:hover{background:var(--hov)}
 .empty-state{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--tx2);font-size:14px;gap:14px}
 .empty-icon{width:56px;height:56px;opacity:.25}
+/* Estados de error/vacío con acción — antes .empty-state era CSS muerto y cada
+   página se inventaba su propia variante. */
+.empty-state{padding:40px 24px;text-align:center;min-height:220px}
+.empty-state .dt{color:var(--tx);font-size:15px;font-weight:600}
+.empty-state .ds{color:var(--tx2);font-size:13px;max-width:34ch;line-height:1.45}
+.empty-state svg{opacity:.4}
+.state-error svg{stroke:var(--red,#ff3b30);opacity:.75}
 
 /* Detail Cards */
 .detail-card{background:var(--card);border-radius:25px;margin-bottom:16px;overflow:hidden}
 .detail-item{display:flex;flex-direction:column;justify-content:center;padding:14px 20px;min-height:48px;position:relative;transition:background .12s}
 [style*="cursor:pointer"].detail-item:hover,[style*="cursor: pointer"].detail-item:hover{background:var(--hov)}
 [style*="cursor:pointer"].detail-item:active,[style*="cursor: pointer"].detail-item:active{background:var(--act)}
+/* Filas navegables accesibles: mismo aspecto que las de cursor:pointer, pero
+   enfocables y activables con teclado. */
+.nav-row{cursor:pointer}
+.nav-row:hover{background:var(--hov)}
+.nav-row:active{background:var(--act)}
+.nav-row:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
 .detail-item:not(:last-child)::after{content:"";position:absolute;bottom:0;left:20px;right:20px;height:.5px;background:var(--div)}
 .detail-item-row{flex-direction:row;justify-content:space-between;align-items:center}
 .detail-texts{display:flex;flex-direction:column;flex:1;min-width:0}
@@ -157,6 +170,40 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Roboto,
 .toggle-switch.active{background:var(--blue)}
 .toggle-switch::after{content:"";position:absolute;width:22px;height:22px;background:#fff;border-radius:50%;top:3px;left:3px;transition:transform .25s cubic-bezier(.4,0,.2,1);box-shadow:0 1px 3px rgba(0,0,0,.2)}
 .toggle-switch.active::after{transform:translateX(18px)}
+
+/* Editor del bloqueo nativo. La maqueta usa coordenadas porcentuales, igual
+   que el compositor, por lo que el resultado no depende del tamaño físico ni
+   de la escala fraccional del monitor. */
+.native-lock-editor{padding:16px!important}
+.native-lock-editor-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin:0 2px 14px}
+.native-lock-editor-head>div{display:flex;flex-direction:column;gap:3px;min-width:0}
+.native-live-state{flex:0 0 auto;font-size:11px;font-weight:650;color:var(--tx2);background:var(--sbg);border-radius:999px;padding:5px 9px;transition:.2s}
+.native-live-state.live{color:var(--green);background:color-mix(in srgb,var(--green) 13%,transparent)}
+.native-live-state.saving{color:var(--blue)}
+.native-live-state.error{color:var(--red)}
+.native-lock-preview{position:relative;width:100%;aspect-ratio:16/9;min-height:270px;max-height:520px;overflow:hidden;border-radius:22px;background:linear-gradient(155deg,#2596ed 0%,#0873c9 32%,#064682 62%,#011a35 100%);color:#fff;box-shadow:inset 0 0 0 1px rgba(255,255,255,.13),0 10px 28px rgba(0,38,76,.22);container-type:inline-size}
+.native-lock-preview::before{content:"";position:absolute;inset:-35% -15%;background:repeating-radial-gradient(ellipse at 70% 5%,transparent 0 13%,rgba(255,255,255,.07) 14% 20%,transparent 21% 29%);transform:rotate(8deg)}
+.nlp-shade{position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.02),rgba(0,10,25,.22))}
+.nlp-clock,.nlp-access,.nlp-media{position:absolute;left:50%;transform:translateX(-50%);z-index:1;transition:top .26s cubic-bezier(.2,.8,.2,1),opacity .2s}
+.nlp-clock{top:var(--clock-y);display:flex;flex-direction:column;align-items:center;line-height:1;text-shadow:0 2px 14px rgba(0,0,0,.25)}
+.nlp-clock strong{font-size:var(--clock-size);font-weight:650;letter-spacing:-.055em}
+.nlp-clock span{font-size:clamp(9px,1.15cqw,15px);margin-top:5px;opacity:.82}
+.nlp-access{top:var(--access-y);display:flex;flex-direction:column;align-items:center;gap:6px;font-size:clamp(9px,1.1cqw,14px);font-weight:620}
+.nlp-avatar{width:var(--avatar-size);height:var(--avatar-size);border-radius:50%;display:grid;place-items:center;background:linear-gradient(145deg,#ebeff8,#c8d1e1);color:#4773a6;font-size:clamp(18px,4cqw,48px);box-shadow:0 5px 18px rgba(0,0,0,.18)}
+.nlp-password{width:clamp(145px,25cqw,290px);height:clamp(26px,3.5cqw,42px);display:flex;align-items:center;justify-content:center;gap:7px;border-radius:999px;background:rgba(12,18,28,.72);border:1px solid rgba(255,255,255,.08);box-shadow:0 7px 18px rgba(0,0,0,.18);backdrop-filter:blur(16px)}
+.nlp-password i{width:5px;height:5px;border-radius:50%;background:#fff}.nlp-password b{position:absolute;right:5px;width:clamp(20px,2.8cqw,34px);height:clamp(20px,2.8cqw,34px);display:grid;place-items:center;border-radius:50%;background:#0a84ff;font-size:13px}
+.nlp-media{top:var(--media-y);width:clamp(190px,30cqw,370px);height:clamp(54px,7.5cqw,92px);padding:8px;display:flex;gap:10px;border-radius:clamp(15px,2cqw,24px);background:rgba(81,13,52,.76);border:1px solid rgba(255,255,255,.09);box-shadow:0 9px 20px rgba(0,0,0,.28);backdrop-filter:blur(20px)}
+.nlp-cover{height:100%;aspect-ratio:1;border-radius:18%;background:linear-gradient(135deg,#fbce42,#eb397a 45%,#453ada)}
+.nlp-song{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;font-size:clamp(7px,.9cqw,12px)}
+.nlp-song strong,.nlp-song span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.nlp-song span{opacity:.68}.nlp-song i{height:3px;margin:5px 0;border-radius:3px;background:linear-gradient(90deg,#fff 38%,rgba(255,255,255,.25) 38%)}.nlp-song div{text-align:center;font-size:clamp(8px,1cqw,13px)}
+.nlp-power{position:absolute;z-index:2;left:16px;bottom:14px;width:34px;height:34px;border:0;border-radius:12px;background:rgba(15,20,27,.72);color:#fff;letter-spacing:2px;pointer-events:none;backdrop-filter:blur(12px)}
+.native-lock-preview:not(.no-motion) .nlp-media{animation:nlp-float 3.6s ease-in-out infinite}
+@keyframes nlp-float{0%,100%{transform:translateX(-50%) translateY(0)}50%{transform:translateX(-50%) translateY(-3px)}}
+.native-lock-reset{display:block;margin:13px 0 0 auto}
+.native-lock-controls .native-lock-slider{align-items:center;gap:20px}
+.native-lock-slider .detail-texts{min-width:180px}.native-lock-slider .slider-container{width:min(52%,360px);margin-left:auto}.native-lock-slider .ds{font-variant-numeric:tabular-nums}
+@media(max-width:720px){.native-lock-preview{min-height:230px}.native-lock-editor-head{flex-direction:column}.native-lock-controls .native-lock-slider{align-items:flex-start;flex-direction:column}.native-lock-slider .slider-container{width:100%;margin:4px 0 0}}
+@media(prefers-reduced-motion:reduce){.native-lock-preview .nlp-media{animation:none}.nlp-clock,.nlp-access,.nlp-media{transition:none}}
 
 /* Slider */
 .slider-container{padding:6px 0 2px;display:flex;align-items:center;gap:12px}
@@ -693,7 +740,7 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 /* Drop the divider on the row immediately preceding a sub-heading */
 .sddm-card .detail-item:has(+ .sddm-subhead)::after{display:none}
 /* ── Theme redesign blocks ── */
-.theme-block{background:var(--card);border-radius:24px;padding:20px 22px;margin:0 0 16px;width:100%}
+.theme-block{background:var(--card);border-radius:25px;padding:20px 22px;margin:0 0 16px;width:100%}
 .theme-block-divider{height:1px;background:var(--div);margin:16px 0}
 .ti-chevron{color:var(--tx2);font-size:20px;font-weight:400}
 /* Rows inside a theme-block align to the block padding (no double inset) */
@@ -716,6 +763,78 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 .mode-swatch.active .mode-swatch-label{color:var(--blue)}
 .mode-radio{width:20px;height:20px;border-radius:50%;border:2px solid var(--brd);transition:.15s}
 .mode-radio.on{border-color:var(--blue);background:var(--blue);box-shadow:inset 0 0 0 3px var(--card)}
+/* Paleta de colores (estilo Android): maquetas, tiras de color y fichas */
+.dyn-label{font-size:12px;font-weight:600;color:var(--tx2);text-transform:uppercase;letter-spacing:.4px;margin:14px 2px 8px}
+.dyn-hint{font-size:13px;color:var(--tx2)}
+
+/* Maquetas — tres ventanas en miniatura con la paleta ELEGIDA */
+.dyn-mockups{display:flex;gap:12px;padding:2px 2px 18px;justify-content:center}
+/* Sin paleta elegida no hay maquetas: sin esto el bloque dejaría un hueco. */
+.dyn-mockups:empty{display:none}
+/* 4/5 y no 9/16: con proporción de móvil el tercio inferior quedaba vacío en
+   las tres maquetas y parecía que faltaba contenido por cargar. */
+.dyn-mock{flex:1 1 0;min-width:0;max-width:150px;aspect-ratio:4/5;border-radius:14px;padding:9px;display:flex;flex-direction:column;gap:7px;overflow:hidden;box-shadow:0 1px 6px rgba(0,0,0,.18)}
+.dyn-mock .mk-card{border-radius:9px;padding:7px;display:flex;flex-direction:column;gap:6px}
+.dyn-mock .mk-row{display:flex;align-items:center;gap:6px}
+.dyn-mock .mk-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.dyn-mock .mk-pill{height:5px;border-radius:3px;display:block}
+.dyn-mock .mk-slider{height:7px;border-radius:4px;overflow:hidden}
+.dyn-mock .mk-slider i{display:block;height:100%;border-radius:4px}
+.dyn-mock .mk-title{font-size:10px;font-weight:700;padding:1px 2px}
+.dyn-mock .mk-num{font-size:11px;font-weight:600;text-align:right;padding:2px 3px;opacity:.85}
+/* Teclas: aspect-ratio 1 para que salgan REDONDAS. Con `flex:1` sobre el grid
+   se estiraban a lo alto y el border-radius:50% las dejaba ovaladas. */
+.dyn-mock .mk-keys{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;align-content:start}
+.dyn-mock .mk-keys i{border-radius:50%;display:block;aspect-ratio:1}
+.dyn-mock .mk-sw{width:17px;height:10px;border-radius:5px;flex-shrink:0;margin-left:auto}
+.dyn-mock .mk-chips{display:flex;flex-wrap:wrap;gap:5px}
+.dyn-mock .mk-chip{font-size:7px;font-weight:600;color:#fff;padding:3px 7px;border-radius:8px;line-height:1.3}
+.dyn-mock .mk-toggle{width:18px;height:10px;border-radius:5px;flex-shrink:0;margin-left:auto;position:relative}
+.dyn-mock .mk-toggle::after{content:'';position:absolute;top:1.5px;right:1.5px;width:7px;height:7px;border-radius:50%;background:#fff}
+.dyn-mock .mk-toggle.off::after{right:auto;left:1.5px;background:rgba(255,255,255,.85)}
+
+/* Pestañas — píldora segmentada */
+.dyn-tabs{display:flex;gap:4px;background:var(--sbg);border-radius:14px;padding:3px;margin:14px 0 4px}
+.dyn-tab{flex:1;border:0;background:0;padding:8px 10px;border-radius:11px;font-size:13px;font-weight:500;color:var(--tx2);cursor:pointer;font-family:inherit;transition:.15s}
+.dyn-tab.on{background:var(--card);color:var(--blue);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.12)}
+
+/* Tiras de color — cada candidata es una paleta entera, no un solo color.
+   Tamaño fijo y proporcionado (como el mockup): estirarlas a la fuerza para
+   "llenar el ancho" con solo 2-3 semillas las convertía en franjas gigantes
+   sin forma de swatch. Si no caben todas en una fila, sencillamente pasan a
+   la siguiente (wrap) — sin carril de scroll ni paginador, menos piezas que
+   puedan romperse. Cada tira es un pequeño mazo de fichas redondeadas
+   apiladas (banda de arriba encima, tapando el borde de la de debajo), no
+   barras planas pegadas. */
+.dyn-strips{display:flex;flex-wrap:wrap;gap:14px;padding:12px 2px 4px}
+.dyn-strip{position:relative;flex:0 0 132px;width:132px;display:flex;flex-direction:column;cursor:pointer;border-radius:18px;transition:transform .15s}
+.dyn-strip:hover{transform:translateY(-2px)}
+.dyn-strip i{display:block;height:50px;border-radius:18px;box-shadow:0 -3px 6px -3px rgba(0,0,0,.18)}
+.dyn-strip i:not(:first-child){margin-top:-16px}
+.dyn-strip i:nth-child(1){z-index:4}
+.dyn-strip i:nth-child(2){z-index:3}
+.dyn-strip i:nth-child(3){z-index:2}
+.dyn-strip i:nth-child(4){z-index:1}
+.dyn-strip.on{outline:2.5px solid var(--blue);outline-offset:3px}
+.dyn-strip-check{position:absolute;top:7px;right:7px;width:22px;height:22px;border-radius:50%;background:var(--blue);color:#fff;font-size:12px;display:flex;align-items:center;justify-content:center;opacity:0;transform:scale(.6);transition:.15s;box-shadow:0 1px 4px rgba(0,0,0,.35);z-index:5}
+.dyn-strip.on .dyn-strip-check{opacity:1;transform:scale(1)}
+
+/* Aplicar — a lo ancho, apagado mientras no haya nada nuevo que confirmar */
+.dyn-apply{width:100%;margin-top:18px;height:46px;border:0;border-radius:23px;background:var(--blue);color:#fff;font-size:15px;font-weight:600;font-family:inherit;cursor:pointer;transition:.15s}
+.dyn-apply:disabled{opacity:.35;cursor:default}
+.dyn-apply:not(:disabled):hover{filter:brightness(1.08)}
+/* Fichas de estilo: chips de color superpuestos sobre una tarjeta neutra,
+   como los avatares apilados — de un vistazo se compara la gama de cada
+   estilo sin que la ficha sea un bloque de color a lo bestia. */
+.dyn-styles{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:12px;padding:2px}
+.dyn-style{background:0;border:0;padding:0;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:7px}
+.dyn-style-preview{width:100%;height:64px;border-radius:14px;background:var(--sbg);display:flex;align-items:center;justify-content:center;border:2px solid transparent;transition:.15s}
+.dyn-style-preview i{width:30px;height:30px;border-radius:50%;flex-shrink:0}
+.dyn-style-preview i:not(:first-child){margin-left:-11px}
+.dyn-style.on .dyn-style-preview{border-color:var(--blue)}
+.dyn-style-label{font-size:12px;font-weight:500;color:var(--tx2)}
+.dyn-style.on .dyn-style-label{color:var(--blue)}
+
 /* Icon style swatch — spread across the width, generous spacing */
 .icon-swatch-row{display:flex;justify-content:space-evenly;align-items:flex-start;padding:8px 6% 4px;gap:24px}
 .icon-swatch{flex:0 1 130px;display:flex;flex-direction:column;align-items:center;gap:10px;cursor:pointer}
@@ -814,7 +933,7 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 /* ═══ Wallpaper Desktop Preview ═══ */
 .wp-preview-desktop{margin-bottom:20px}
 /* ── Wallpaper hero card (redesign) ── */
-.wp-hero-card{background:var(--card);border-radius:24px;padding:18px;margin-bottom:20px}
+.wp-hero-card{background:var(--card);border-radius:25px;padding:18px;margin-bottom:16px}
 .wp-hero-name{font-size:15px;font-weight:600;color:var(--tx);margin:0 2px 12px;text-transform:capitalize}
 .wp-change-btn{width:100%;margin-top:14px;padding:13px;border:0;border-radius:14px;background:var(--sbg);color:var(--blue);font-size:14px;font-weight:600;font-family:inherit;cursor:pointer;transition:.15s}
 .wp-change-btn:hover{background:var(--hov)}
@@ -825,7 +944,7 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 .wp-palette-title{font-size:13px;font-weight:600;color:var(--tx)}
 .wp-palette-sub{font-size:11px;color:var(--blue)}
 /* ── Wallpaper grid panel ── */
-.wp-grid-panel{background:var(--card);border-radius:24px;padding:18px;margin-top:8px;position:relative}
+.wp-grid-panel{background:var(--card);border-radius:25px;padding:18px;margin-top:8px;position:relative}
 .wp-add-fab{position:fixed;bottom:24px;right:24px;width:52px;height:52px;border:0;border-radius:50%;background:var(--blue);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 6px 20px rgba(0,0,0,.28);transition:.15s;z-index:50}
 .wp-add-fab:hover{filter:brightness(1.08)}
 .wp-add-fab:active{transform:scale(.92)}
@@ -1020,7 +1139,7 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 .sd-app-bar{height:100%;background:var(--blue);border-radius:2px;transition:width .6s cubic-bezier(.4,0,.2,1)}
 
 /* ═══════════════════════════════════════════════════════════ */
-/* ── macOS-STYLE UPDATER ─────────────────────────────────── */
+/* ── ACTUALIZADOR ────────────────────────────────────────── */
 /* ═══════════════════════════════════════════════════════════ */
 /* Searching spinner state */
 .upd-searching{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:64px 24px;background:var(--card);border-radius:25px;margin-bottom:16px}
@@ -1037,7 +1156,7 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 .upd-recheck{margin-top:8px;background:var(--sbg);border:0;border-radius:20px;padding:9px 22px;font-size:13px;font-weight:500;color:var(--blue);cursor:pointer;font-family:inherit;transition:.12s}
 .upd-recheck:hover{background:var(--hov)}
 
-/* Update card (macOS-style icon left + body right) */
+/* Tarjeta de actualización (icono a la izquierda, cuerpo a la derecha) */
 /* ─── BookOS release card (BookOS 1.0 hero) ───────────────── */
 .bookos-release-card{
     background: var(--card);
@@ -1136,7 +1255,7 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 .release-channel-stable{ background: #34c759; color: #fff; }
 
 .upd-card{display:flex;gap:16px;background:var(--card);border-radius:25px;padding:20px 20px 20px 18px;margin-bottom:16px;align-items:flex-start}
-/* Vibrant variant for "updates available" — BookOS iOS style with aurora gradient.
+/* Variante vibrante para "hay actualizaciones" — degradado aurora.
    Triggered by adding .upd-card-vibrant class when total > 0. */
 .upd-card-vibrant{
     background: linear-gradient(135deg, #1a0d4d 0%, #3b2178 32%, #6b3fb8 64%, #2d6bff 100%);
@@ -1350,7 +1469,7 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 }
 
 /* ════════════════════════════════════════════════════════════════════
-   One UI premium pass — unified radii, readable secondary text, subtle
+   Pasada de refinamiento — radios unificados, texto secundario legible, 
    elevation, calmer motion. Overrides on purpose at end of file.
    ════════════════════════════════════════════════════════════════════ */
 :root{--r-card:24px;--r-control:14px;--r-chip:10px}
@@ -1360,11 +1479,11 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 .search-bar,.sel,.wifi-dialog input,.sudo-input,.rb-name-input,.rb-time-input,
 .channel-dialog-actions button{border-radius:var(--r-control)}
 
-/* Secondary text: 11px is below comfortable on HiDPI — One UI floors at ~12 */
+/* Texto secundario: 11px se queda corto en HiDPI, el suelo cómodo es ~12 */
 .item-texts .subtitle,.profile-left .subtitle,.ds,.conn-net-sub,.refresh-btn{font-size:12px}
 .dt{font-size:14.5px}
 
-/* Section headers: One UI style — slightly larger, semibold, more air above */
+/* Encabezados de sección: algo mayores, semibold y con más aire arriba */
 .section-header{font-size:13px;font-weight:600;letter-spacing:.1px;margin:22px 0 8px 8px}
 
 /* Cards read as elevated surfaces in light mode; dark mode relies on contrast */
@@ -1372,7 +1491,7 @@ input[type="range"].filled{background:linear-gradient(to right,var(--blue) var(-
 :root.dark-mode .card,:root.dark-mode .detail-card{box-shadow:none}
 @media(prefers-color-scheme:dark){:root:not(.light-mode) .card,:root:not(.light-mode) .detail-card{box-shadow:none}}
 
-/* Tactile press feedback on rows (One UI squish) */
+/* Respuesta táctil al pulsar una fila (ligero hundimiento) */
 .detail-item[style*="cursor"]:active{transform:scale(.985)}
 .detail-item{transition:background .12s,transform .12s}
 
@@ -1429,3 +1548,320 @@ button.toggle-switch{border:0;padding:0;font:inherit;-webkit-appearance:none;app
 
 /* About page — model name under device name */
 .about-hero-model{font-size:13px;color:var(--tx2);font-weight:500;margin-top:-2px;margin-bottom:6px}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Editor de la pantalla de inicio de sesión (sddm-editor.js)
+   Pantalla grande arriba, esquinas de selección sobre la
+   pieza activa, y panel inferior con pestañas para sus opciones.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.ed-top{display:flex;align-items:center;gap:12px;padding:2px 0 14px}
+.ed-back{width:34px;height:34px;border-radius:8px;border:none;background:var(--hov);
+    color:var(--tx);display:flex;align-items:center;justify-content:center;cursor:pointer}
+.ed-title{font-size:22px;font-weight:700;letter-spacing:-.3px}
+
+/* container-type:size → el reloj se mide en `cqh`, así su proporción respecto a
+   la pantalla es la misma que tendrá el greeter real a cualquier escala. */
+.ed-stage{position:relative;width:100%;aspect-ratio:16/10;border-radius:25px;overflow:hidden;
+    container-type:size;background:#000;touch-action:none;user-select:none;
+    box-shadow:0 20px 56px rgba(0,0,0,.30)}
+.ed-bg{position:absolute;inset:0;background-size:cover;background-position:center;
+    transform-origin:center;transition:filter .12s cubic-bezier(.4,0,.2,1)}
+.ed-scrim{position:absolute;inset:0;pointer-events:none}
+
+/* Píldoras superiores de acción. */
+.ed-chip{position:absolute;top:14px;z-index:6;border:none;cursor:pointer;
+    padding:9px 18px;border-radius:999px;font-size:13px;font-weight:600;
+    background:rgba(28,28,30,.66);color:#fff;
+    transition:background .12s cubic-bezier(.4,0,.2,1)}
+.ed-stage:not(.is-dark) .ed-chip{background:rgba(255,255,255,.78);color:#000}
+.ed-chip:hover{background:rgba(90,90,95,.7)}
+.ed-chip-l{left:14px}
+.ed-chip-r{right:14px}
+/* Solo se tiñe de acento cuando hay algo que guardar. */
+.ed-chip-r.hot{background:var(--ac,#007aff);color:#fff}
+
+/* Piezas editables. El recuadro es invisible: lo que marca la selección son
+   las cuatro esquinas, que no tapan el contenido. */
+.ed-el{position:absolute;color:var(--fg,#fff);cursor:pointer;
+    width:max-content;max-width:92%;padding:10px 16px;border-radius:14px;
+    transition:background .12s cubic-bezier(.4,0,.2,1)}
+.ed-el:hover{background:rgba(127,127,127,.14)}
+.ed-el:focus-visible{outline:2px solid var(--ac,#007aff);outline-offset:3px}
+.ed-c{position:absolute;width:14px;height:14px;opacity:0;pointer-events:none;
+    border:2.5px solid var(--ac,#007aff);transition:opacity .14s cubic-bezier(.4,0,.2,1)}
+.ed-el.ed-sel .ed-c{opacity:1}
+/* En el reloj las esquinas son asas: se arrastran para redimensionar. El área
+   sensible se agranda con un pseudo-elemento para poder agarrarlas con el ratón
+   sin que la marca visible tenga que ser enorme. */
+.ed-clock.ed-sel .ed-c{pointer-events:auto;cursor:nwse-resize}
+.ed-clock.ed-sel .ed-c-tr,.ed-clock.ed-sel .ed-c-bl{cursor:nesw-resize}
+.ed-clock.ed-sel .ed-c::after{content:"";position:absolute;inset:-12px}
+
+/* Guías de centrado: aparecen al acercarse al centro exacto. */
+.ed-guide{position:absolute;background:var(--ac,#007aff);opacity:0;pointer-events:none;
+    transition:opacity .1s linear;z-index:4}
+.ed-guide.on{opacity:.9}
+.ed-guide-v{left:50%;top:0;bottom:0;width:1.5px;transform:translateX(-50%)}
+.ed-guide-h{top:50%;left:0;right:0;height:1.5px;transform:translateY(-50%)}
+.ed-c-tl{left:-3px;top:-3px;border-right:0;border-bottom:0;border-radius:6px 0 0 0}
+.ed-c-tr{right:-3px;top:-3px;border-left:0;border-bottom:0;border-radius:0 6px 0 0}
+.ed-c-bl{left:-3px;bottom:-3px;border-right:0;border-top:0;border-radius:0 0 0 6px}
+.ed-c-br{right:-3px;bottom:-3px;border-left:0;border-top:0;border-radius:0 0 6px 0}
+
+/* Reloj: colocado por coordenadas libres, centrado sobre su punto. */
+.ed-clock{cursor:grab;text-align:center;transform:translate(-50%,-50%)}
+.ed-stage.dragging .ed-clock{cursor:grabbing;transition:none}
+.ed-time{line-height:1.05;letter-spacing:-.02em}
+.ed-date{font-size:2.2cqh;font-weight:500;opacity:.85;margin-top:.4cqh}
+
+.ed-users{left:50%;top:52%;transform:translate(-50%,-50%);
+    display:flex;flex-direction:column;align-items:center;gap:1.2cqh}
+.ed-avatars{display:flex;align-items:center;gap:2.2cqh}
+/* El seleccionado crece con transform:scale, no cambiando width/height: el HIG
+   prohíbe animar medidas porque fuerza relayout en cada frame. */
+/* flex:0 0 auto es imprescindible: por defecto los hijos de un flex se
+   encogen en anchura pero conservan la altura, y con border-radius 50 % el
+   avatar salía ovalado en cuanto la ventana se estrechaba. */
+.ed-av{flex:0 0 auto;width:8.5cqh;height:8.5cqh;border-radius:50%;background:var(--ac,#007aff);
+    background-size:cover;background-position:center;display:flex;align-items:center;
+    justify-content:center;font-size:3cqh;font-weight:700;color:#fff;opacity:.55;
+    transform:scale(.88);
+    transition:transform .25s cubic-bezier(.34,1.4,.64,1),opacity .12s cubic-bezier(.4,0,.2,1)}
+.ed-av.ed-sel{opacity:1;transform:scale(1.18);box-shadow:0 0 0 .3cqh var(--ac,#007aff)}
+.ed-uname{font-size:2.2cqh;font-weight:500}
+.ed-field{flex:0 0 auto;width:26cqh;height:4.6cqh;border-radius:2.3cqh;
+    background:var(--pill,rgba(28,28,30,.8))}
+
+.ed-bar{left:50%;transform:translateX(-50%);bottom:4cqh;padding:6px 8px}
+.ed-bar[data-pos="top"]{bottom:auto;top:9cqh}
+.ed-pill{display:inline-block;padding:1.5cqh 3cqh;border-radius:999px;
+    background:var(--pill,rgba(28,28,30,.8));font-size:2.2cqh;font-weight:600;white-space:nowrap}
+.ed-pill.compact{padding:.9cqh 2.2cqh;font-size:1.7cqh}
+
+/* ── Panel inferior ─────────────────────────────────────────────────────── */
+/* Radio 25 (tarjeta de detalle) y sombra de reposo: la que tenía no estaba en
+   los cuatro niveles del HIG. */
+.ed-sheet{margin-top:18px;background:var(--card);border-radius:25px;
+    padding:10px 20px 20px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+.ed-grab{width:38px;height:4px;border-radius:2px;background:var(--tx3);
+    margin:0 auto 12px;opacity:.5}
+.ed-tabs{display:flex;gap:8px;margin-bottom:14px}
+.ed-tab{border:none;cursor:pointer;padding:9px 18px;border-radius:999px;
+    background:transparent;color:var(--tx2);font-size:14px;font-weight:600;
+    transition:background .12s cubic-bezier(.4,0,.2,1),color .12s cubic-bezier(.4,0,.2,1)}
+.ed-tab.on{background:var(--hov);color:var(--tx)}
+.ed-tab.static{cursor:default}
+
+.ed-row{padding:10px 0;border-bottom:.5px solid var(--div)}
+.ed-row:last-child{border-bottom:none}
+.ed-row-inline{display:flex;align-items:center;justify-content:space-between}
+.ed-rl{display:block;font-size:12px;font-weight:500;color:var(--tx2);margin-bottom:8px}
+.ed-row-inline .ed-rl{margin-bottom:0;font-size:14px;color:var(--tx)}
+
+/* Muestras de fuente: se escriben con su propia familia y peso. */
+.ed-fonts{display:flex;gap:12px;padding:4px 0 14px}
+.ed-font{width:58px;height:58px;border-radius:50%;border:2px solid transparent;cursor:pointer;
+    background:var(--hov);color:var(--tx);font-size:22px;
+    transition:border-color .12s cubic-bezier(.4,0,.2,1),background .12s cubic-bezier(.4,0,.2,1)}
+.ed-font.on{border-color:var(--blue);background:color-mix(in srgb,var(--blue) 12%,transparent)}
+
+.ed-srow{display:flex;align-items:center;gap:10px}
+.ed-lohi{font-size:11px;color:var(--tx2);white-space:nowrap}
+/* Pista 4px r2, relleno con corte duro hasta --accent y thumb blanco de 20,
+   tal cual lo especifica el HIG. */
+.ed-range{flex:1;height:4px;-webkit-appearance:none;appearance:none;border-radius:2px;
+    cursor:pointer;
+    background:linear-gradient(to right,var(--blue) 0 var(--fill,50%),var(--toff) var(--fill,50%) 100%)}
+.ed-range::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;
+    background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+
+/* Interruptor: se quedó sin estilos al renombrar de .pv-toggle a .ed-sw y
+   salía como un puntito. Medidas del HIG: pista 46x28, thumb 22 con inset 3. */
+.ed-sw{width:46px;height:28px;border-radius:14px;border:none;padding:0;flex:0 0 auto;
+    background:var(--toff);cursor:pointer;position:relative;
+    transition:background .25s cubic-bezier(.34,1.4,.64,1)}
+.ed-sw.on{background:var(--blue)}
+.ed-sw span{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:11px;
+    background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.2);
+    transition:transform .25s cubic-bezier(.34,1.4,.64,1)}
+.ed-sw.on span{transform:translateX(18px)}
+
+.ed-opts{display:flex;gap:8px;flex-wrap:wrap}
+.ed-opt{border:none;cursor:pointer;padding:8px 16px;border-radius:12px;
+    background:var(--hov);color:var(--tx);font-size:13px;font-weight:600}
+.ed-opt.on{background:var(--blue);color:#fff}
+
+.ed-colors{display:flex;gap:9px;flex-wrap:wrap}
+.ed-col{width:28px;height:28px;border-radius:50%;border:2px solid transparent;cursor:pointer;
+    padding:0;font-size:12px;font-weight:700;color:var(--tx);background:var(--hov);
+    /* Contorno interior: sin él el blanco desaparece sobre la tarjeta blanca. */
+    box-shadow:inset 0 0 0 1px rgba(127,127,127,.35)}
+.ed-col.on{border-color:var(--tx)}
+
+.ed-modes{display:flex;gap:14px;padding:4px 0 10px}
+.ed-mode{display:flex;flex-direction:column;align-items:center;gap:7px;border:none;
+    background:transparent;cursor:pointer;color:var(--tx2);font-size:12px;font-weight:600}
+.ed-mode.on{color:var(--blue)}
+.ed-thumb{display:block;width:56px;height:36px;border-radius:10px;background-size:cover;
+    background-position:center;box-shadow:inset 0 0 0 1px rgba(127,127,127,.3);
+    border:2px solid transparent}
+.ed-mode.on .ed-thumb{border-color:var(--blue)}
+.ed-thumb.blur{filter:blur(3px);transform:scale(.96)}
+.ed-thumb.solid{background:linear-gradient(135deg,#3a3a3c,#1c1c1e)}
+
+.ed-btn{border:none;cursor:pointer;padding:8px 18px;border-radius:12px;
+    background:var(--hov);color:var(--tx);font-size:13px;font-weight:600}
+.ed-tip{margin:12px 0 0;font-size:12px;line-height:1.5;color:var(--tx2)}
+/* Subtítulo de grupo dentro del panel (12/Medium en text-2, como el HIG). */
+.ed-sub{margin:18px 0 2px;font-size:12px;font-weight:500;color:var(--tx2)}
+
+/* ── Widgets como piezas sueltas en la maqueta ───────────────────────────
+   La capa fija el tamaño base en cqh (escala con la pantalla) y cada tarjeta
+   lo modula con su propio font-size en %. Todo lo de dentro va en em, así que
+   tirar de una esquina redimensiona la tarjeta entera sin recalcular nada. */
+.ed-wlayer{position:absolute;inset:0;pointer-events:none;font-size:2.1cqh}
+.ed-wlayer .ed-el{pointer-events:auto}
+.ed-w{display:flex;flex:0 0 auto;align-items:center;gap:.6em;
+    padding:.7em 1.05em;border-radius:1.2em;
+    background:color-mix(in srgb,var(--pill,rgba(28,28,30,.8))
+               calc(var(--wop,1) * 100%),transparent);
+    white-space:nowrap;color:var(--fg,#fff)}
+.ed-wempty{background:transparent;border:2px dashed rgba(255,255,255,.45)}
+.ed-stage:not(.is-dark) .ed-wempty{border-color:rgba(0,0,0,.35)}
+.ed-wadd{font-size:1em;font-weight:600;color:var(--fg,#fff);opacity:.85}
+.ed-wi{flex:0 0 auto;font-size:1.6em;line-height:1}
+.ed-wt{display:flex;flex-direction:column;line-height:1.15}
+/* Pieza apagada: sigue en su sitio y se puede seleccionar para reactivarla,
+   pero se lee como lo que es — algo que no saldrá en la pantalla real. */
+.ed-el.ed-ghost{opacity:.42}
+.ed-el.ed-ghost .ed-pill{border:1px dashed color-mix(in srgb,var(--fg,#fff) 55%,transparent);
+  background:transparent;font-style:italic}
+/* Batería, tarjeta grande: un círculo por dispositivo del ecosistema. El aro
+   de carga es un conic-gradient sobre --p (ángulo), que es la forma barata de
+   dibujar un arco sin canvas ni SVG por elemento. */
+/* La tarjeta de batería NO usa .ed-w-large (columna, 15em de ancho mínimo, que
+   son las proporciones del tiempo): crece a lo ancho con el número de aparatos
+   y su alto lo fija el contenido, igual que en el QML. */
+/* Muestra de color personalizado: el <input type=color> del sistema va debajo,
+   a tamaño completo y transparente, para que el botón conserve el aspecto de
+   los demás en vez del recuadro gris que pinta el navegador. */
+.ed-col-pick{position:relative;overflow:hidden;display:grid;place-items:center;
+  border:1px dashed color-mix(in srgb,var(--fg,#fff) 45%,transparent)}
+.ed-col-pick span{font-size:.9em;font-weight:700;color:var(--fg,#fff);opacity:.7;
+  pointer-events:none}
+.ed-col-pick input[type=color]{position:absolute;inset:0;width:100%;height:100%;
+  opacity:0;border:0;padding:0;cursor:pointer}
+.ed-hex{width:7.5em;font-family:ui-monospace,monospace;font-size:.9em;
+  padding:.35em .6em;border-radius:.6em;text-transform:uppercase;
+  border:1px solid color-mix(in srgb,var(--fg,#fff) 25%,transparent);
+  background:color-mix(in srgb,var(--fg,#fff) 8%,transparent);color:var(--fg,#fff)}
+.ed-hex:focus{outline:2px solid var(--ac,#007aff);outline-offset:1px}
+/* Música: carátula + textos + transportes, misma estructura que el QML. */
+.ed-wm{display:flex;gap:.7em;align-items:center;width:100%}
+.ed-wm-art{width:3.4em;height:3.4em;border-radius:.7em;display:grid;place-items:center;
+  background:color-mix(in srgb,var(--fg,#fff) 10%,transparent);font-size:1.1em}
+.ed-wm-txt{display:flex;flex-direction:column;gap:.1em;min-width:0;flex:1}
+.ed-wm-txt b{font-size:.85em;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ed-wm-txt i{font-size:.66em;font-style:normal;color:var(--fg2,#8e8e93)}
+.ed-wm-ctl{display:flex;gap:.5em;align-items:center;margin-top:.45em}
+.ed-wm-ctl u{text-decoration:none;font-size:.6em;width:1.7em;height:1.7em;border-radius:50%;
+  display:grid;place-items:center}
+.ed-wm-ctl u.main{background:color-mix(in srgb,var(--fg,#fff) 14%,transparent);
+  width:2.1em;height:2.1em}
+.ed-w-batt{padding:.55em .8em;border-radius:1.5em;align-items:center}
+.ed-wb{display:flex;gap:.75em;align-items:flex-end;justify-content:center}
+.ed-wb-d{display:flex;flex-direction:column;align-items:center;gap:.28em}
+.ed-wb-d i{font-size:.55em;font-style:normal;color:var(--fg2,#8e8e93)}
+.ed-wb-d.cur i{color:var(--ac,#007aff);font-weight:700}
+.ed-wb-ring{width:2.9em;height:2.9em;border-radius:50%;display:grid;place-items:center;
+  background:conic-gradient(var(--ac,#007aff) var(--p,0deg),
+             color-mix(in srgb,var(--fg,#fff) 22%,transparent) 0)}
+.ed-wb-d:not(.cur) .ed-wb-ring{background:conic-gradient(
+  color-mix(in srgb,var(--ac,#007aff) 55%,transparent) var(--p,0deg),
+  color-mix(in srgb,var(--fg,#fff) 22%,transparent) 0)}
+.ed-wb-disc{width:2.35em;height:2.35em;border-radius:50%;background:#fff;
+  display:grid;place-items:center}
+.ed-dev{width:1.5em;height:1.5em;fill:#111}
+.ed-wt b{font-size:1.15em;font-weight:700}
+/* Fecha: mismo orden que el QML — día de la semana en acento arriba, número
+   grande, y debajo el próximo evento (o "Sin eventos"). */
+.ed-wt-date i{color:var(--ac,#007aff);font-weight:700;font-size:.62em}
+.ed-wt-date b{font-size:1.9em;font-weight:700;line-height:1}
+.ed-wt-date u{font-size:.56em;text-decoration:none;color:var(--fg2,#8e8e93);
+              max-width:9em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ed-wt i{font-size:.78em;font-style:normal;color:#8e8e93}
+.ed-wdel{position:absolute;right:-9px;top:-9px;width:22px;height:22px;border-radius:11px;
+    border:none;cursor:pointer;background:var(--red,#ff3b30);color:#fff;font-size:15px;
+    line-height:1;padding:0;opacity:0;transform:scale(.7);pointer-events:none;
+    transition:opacity .12s cubic-bezier(.4,0,.2,1),transform .12s cubic-bezier(.4,0,.2,1)}
+.ed-w.ed-sel .ed-wdel{opacity:1;transform:scale(1);pointer-events:auto}
+/* Las esquinas de un widget seleccionado son asas de redimensionado. */
+.ed-w.ed-sel .ed-c{pointer-events:auto;cursor:nwse-resize}
+.ed-w.ed-sel .ed-c-tr,.ed-w.ed-sel .ed-c-bl{cursor:nesw-resize}
+.ed-w.ed-sel .ed-c::after{content:"";position:absolute;inset:-12px}
+
+.ed-val{float:right;font-size:12px;font-weight:600;color:var(--tx);font-style:normal}
+
+/* Selector de widgets / contenido de la BookBar */
+.ed-wopt{display:flex;flex-direction:row;align-items:center;gap:10px;width:100%;cursor:pointer;
+    border:none;border-radius:14px;padding:11px 14px;background:var(--hov);
+    text-align:left;transition:background .12s cubic-bezier(.4,0,.2,1)}
+.ed-wopt>span:nth-child(2){flex:1;display:flex;flex-direction:column}
+.ed-wopt b{font-size:14px;font-weight:500;color:var(--tx)}
+.ed-wopt i{font-size:11px;font-style:normal;color:var(--tx2)}
+.ed-wopt-ic{font-size:20px}
+.ed-wopt-mark{width:24px;height:24px;border-radius:12px;background:var(--blue);color:#fff;
+    display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700}
+.ed-wopt.on .ed-wopt-mark{background:var(--red,#ff3b30)}
+.ed-wpick{display:flex;flex-direction:column;gap:8px;padding:4px 0 12px}
+
+.ed-btn.danger{background:color-mix(in srgb,var(--red,#ff3b30) 12%,transparent);
+    color:var(--red,#ff3b30)}
+/* El widget que estás editando, resaltado dentro de la lista. */
+.ed-wopt.cur{box-shadow:inset 0 0 0 2px var(--blue)}
+/* El widget del tiempo trae su propio fondo (el estado meteorológico), así que
+   no usa el color de píldora ni atenúa su texto secundario. */
+.ed-w-wx .ed-wt i{color:rgba(255,255,255,.8)}
+
+/* ── Notificaciones y calendario ───────────────────────────────────────────
+   Son tarjetas, no píldoras: apilan filas o dos columnas de día, y con el alto
+   de 92 de la píldora no cabrían. Mismas proporciones que GreeterWidgets.qml —
+   si cambian allí, cambian aquí o la maqueta miente. */
+.ed-w-card{display:block;white-space:normal;padding:.6em .7em;width:9.5em}
+.ed-wn{display:flex;flex-direction:column;gap:.3em}
+.ed-wn-h{font-size:.62em;font-style:normal;font-weight:600;letter-spacing:.06em;
+    color:var(--fg2,#8e8e93)}
+.ed-wn-r{display:flex;align-items:center;justify-content:space-between;gap:.4em;
+    border-radius:.6em;padding:.3em .5em;
+    background:color-mix(in srgb,var(--ac,#007aff) 22%,transparent)}
+.ed-wn-r>span:first-child{display:flex;flex-direction:column;line-height:1.1;min-width:0}
+.ed-wn-r i{font-size:.55em;font-style:normal;color:var(--fg2,#8e8e93)}
+.ed-wn-r b{font-size:.72em;font-weight:600;overflow:hidden;text-overflow:ellipsis}
+.ed-wn-dot{flex:0 0 auto;width:.42em;height:.42em;border-radius:50%;background:#ff3b30}
+.ed-wc{display:flex;gap:.6em}
+.ed-wc-c{flex:1;display:flex;flex-direction:column;gap:.1em;min-width:0}
+.ed-wc-c+.ed-wc-c{border-left:1px solid color-mix(in srgb,var(--fg2,#8e8e93) 35%,transparent);
+    padding-left:.6em}
+.ed-wc-c i{font-size:.6em;font-style:normal;font-weight:600;color:var(--fg2,#8e8e93);
+    overflow:hidden;text-overflow:ellipsis}
+.ed-wc-c b{font-size:1.6em;font-weight:300;line-height:1.05}
+.ed-wc-c u{font-size:.58em;text-decoration:none;color:var(--fg2,#8e8e93)}
+.ed-wc-e{font-size:.58em;border-radius:.5em;padding:.25em .4em;
+    background:color-mix(in srgb,var(--ac,#007aff) 25%,transparent);
+    overflow:hidden;text-overflow:ellipsis}
+
+/* ── Tiempo, variante tarjeta ──────────────────────────────────────────────
+   Proporciones del Figma (750x330) llevadas a em, para que la tarjeta escale
+   entera al tirar de una esquina igual que la píldora. */
+.ed-w-large{flex-direction:column;align-items:stretch;padding:.9em 1em;
+    border-radius:1.5em;min-width:15em}
+.ed-wx{display:flex;flex-direction:column;gap:.15em;color:#fff}
+.ed-wx-top{display:flex;align-items:center;gap:.3em;font-size:.78em;font-weight:500}
+.ed-wx-i{width:1em;height:1em}
+.ed-wx-t{font-size:1.7em;font-weight:400;line-height:1.1}
+.ed-wx-days{display:flex;justify-content:space-between;gap:.35em;margin-top:.7em}
+.ed-wx-d{display:flex;flex-direction:column;align-items:center;gap:.12em;
+    font-size:.55em;opacity:.9}
+.ed-wx-d i{font-style:normal}
+.ed-wx-d svg{width:1.4em;height:1.4em}

@@ -1,0 +1,163 @@
+# Maintainer: Jose <josrebe333@gmail.com>
+pkgname=bookos-settings
+pkgver=0.5.0
+pkgrel=1
+pkgdesc="BookOS Settings — settings application for KDE Plasma (Samsung Galaxy Book / BookOS)"
+arch=('x86_64')
+url="https://github.com/Evelynx08/BookOS-Settings"
+license=('GPL3')
+install=bookos-settings.install
+depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3' 'python')
+optdepends=(
+    'colord: ICC profile support'
+    'kscreen: display control via kscreen-doctor'
+    'qdbus6: brightness control via KDE D-Bus'
+    'inotify-tools: watcher for semantic search'
+    'python-dbus: KRunner semantic search plugin'
+    'python-gobject: KRunner semantic search plugin'
+)
+makedepends=('rust' 'cargo' 'protobuf' 'git')
+
+source=()
+sha256sums=()
+
+build() {
+    cd "${startdir}/src-tauri"
+    cargo build --no-bundle
+}
+
+package() {
+    # Definimos las rutas relativas al directorio de compilación
+    local _builddir="${startdir}"
+    local _bin="${_builddir}/src-tauri/target/release"
+    local _extra="${_builddir}/src-tauri/extra"
+    local _search="${_builddir}/src-tauri/extra/search"
+    local _src="${_builddir}/src"
+
+    # Binary
+    install -Dm755 "$_bin/bookos-settings" \
+        "$pkgdir/usr/bin/bookos-settings"
+
+    # Desktop entry
+    install -dm755 "$pkgdir/usr/share/applications"
+    cat > "$pkgdir/usr/share/applications/bookos-settings.desktop" << EOF
+[Desktop Entry]
+Name=BookOS Settings
+Name[es]=Ajustes de BookOS
+Comment=Settings for BookOS KDE Plasma
+Exec=bookos-settings
+Icon=bookos-settings
+Terminal=false
+Type=Application
+Categories=Settings;
+StartupWMClass=bookos-settings
+EOF
+
+    # Icons
+    install -Dm644 "$_src/assets/settings.png" \
+        "$pkgdir/usr/share/icons/hicolor/256x256/apps/bookos-settings.png"
+    install -Dm644 "$_src/assets/settings.svg" \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/bookos-settings.svg"
+    # Notification icons used by Rust commands (notify-send -i bookos-buds, etc.)
+    install -Dm644 "${_builddir}/src-tauri/icons/bookos-buds.svg" \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/bookos-buds.svg"
+
+    # Systemd system units
+    install -Dm644 "$_extra/bookos-battery-adaptive.service" \
+        "$pkgdir/usr/lib/systemd/system/bookos-battery-adaptive.service"
+    install -Dm644 "$_extra/bookos-battery-adaptive.timer" \
+        "$pkgdir/usr/lib/systemd/system/bookos-battery-adaptive.timer"
+    install -Dm644 "$_extra/bookos-battery-logger.service" \
+        "$pkgdir/usr/lib/systemd/system/bookos-battery-logger.service"
+    install -Dm644 "$_extra/bookos-battery-logger.timer" \
+        "$pkgdir/usr/lib/systemd/system/bookos-battery-logger.timer"
+    install -Dm644 "$_extra/bookos-hw-perms.service" \
+        "$pkgdir/usr/lib/systemd/system/bookos-hw-perms.service"
+    install -Dm644 "$_extra/bookos-thermal-logger.service" \
+        "$pkgdir/usr/lib/systemd/system/bookos-thermal-logger.service"
+
+    # Systemd user units
+    install -Dm644 "$_search/bookos-krunner.service" \
+        "$pkgdir/usr/lib/systemd/user/bookos-krunner.service"
+    install -Dm644 "$_search/bookos-search-reindex.service" \
+        "$pkgdir/usr/lib/systemd/user/bookos-search-reindex.service"
+    install -Dm644 "$_search/bookos-search-reindex.timer" \
+        "$pkgdir/usr/lib/systemd/user/bookos-search-reindex.timer"
+    install -Dm644 "$_search/bookos-search-watcher.service" \
+        "$pkgdir/usr/lib/systemd/user/bookos-search-watcher.service"
+
+    # udev rules
+    install -Dm644 "$_extra/99-bookos-power.rules" \
+        "$pkgdir/usr/lib/udev/rules.d/99-bookos-power.rules"
+    install -Dm644 "$_extra/61-samsung-galaxybook.hwdb" \
+        "$pkgdir/usr/lib/udev/hwdb.d/61-samsung-galaxybook.hwdb"
+
+    # ACPI event — Fn+F1 triggers bookos-settings --toggle
+    install -Dm644 "$_extra/samsung-settings.acpi" \
+        "$pkgdir/etc/acpi/events/samsung-settings"
+
+    # Shell scripts
+    install -Dm755 "$_extra/bookos-battery-adaptive.sh" \
+        "$pkgdir/usr/lib/bookos/bookos-battery-adaptive.sh"
+    install -Dm755 "$_extra/bookos-battery-logger.sh" \
+        "$pkgdir/usr/lib/bookos/bookos-battery-logger.sh"
+    install -Dm755 "$_extra/bookos-thermal-logger.sh" \
+        "$pkgdir/usr/lib/bookos/bookos-thermal-logger.sh"
+    install -Dm755 "$_extra/bookos-register-shortcut.sh" \
+        "$pkgdir/usr/lib/bookos/bookos-register-shortcut.sh"
+    install -Dm755 "$_extra/bookos-toggle-as-user.sh" \
+        "$pkgdir/usr/lib/bookos/bookos-toggle-as-user.sh"
+    install -Dm755 "$_extra/scripts/bookos-reapply-theme.sh" \
+        "$pkgdir/usr/lib/bookos/bookos-reapply-theme.sh"
+
+    # pacman hook: re-apply the lockscreen patch after plasma-workspace upgrades
+    # (Plasma overwrites the patched shell QML, reverting the BookOS lockscreen).
+    install -Dm644 "$_extra/bookos-theme-reapply.hook" \
+        "$pkgdir/usr/share/libalpm/hooks/95-bookos-theme-reapply.hook"
+
+    # BookOS lockscreen QML — installed by the app (toggle in Settings)
+    for f in MainBlock.qml LockScreenUi.qml BookBar.qml MediaControls.qml; do
+        install -Dm644 "$_extra/lockscreen/$f" \
+            "$pkgdir/usr/share/bookos-settings/lockscreen/$f"
+    done
+
+    # BookOS SDDM theme — staged under /usr/share/bookos-settings/sddm-theme.
+    # install_sddm_theme() (Settings app) copies it to /usr/share/sddm/themes/bookos
+    # the first time the user enables the SDDM theme toggle.
+    install -Dm644 "$_extra/sddm-theme/Main.qml"          "$pkgdir/usr/share/bookos-settings/sddm-theme/Main.qml"
+    install -Dm644 "$_extra/sddm-theme/metadata.desktop"  "$pkgdir/usr/share/bookos-settings/sddm-theme/metadata.desktop"
+    install -Dm644 "$_extra/sddm-theme/theme.conf"        "$pkgdir/usr/share/bookos-settings/sddm-theme/theme.conf"
+    # Icons subdir
+    if [ -d "$_extra/sddm-theme/icons" ]; then
+        find "$_extra/sddm-theme/icons" -type f | while read -r f; do
+            rel="${f#$_extra/sddm-theme/}"
+            install -Dm644 "$f" "$pkgdir/usr/share/bookos-settings/sddm-theme/$rel"
+        done
+    fi
+
+    # D-Bus service
+    install -Dm644 "$_search/org.bookos.SemanticSearch.service" \
+        "$pkgdir/usr/share/dbus-1/services/org.bookos.SemanticSearch.service"
+
+    # KRunner plugin
+    install -Dm644 "$_search/bookos-semantic-krunner.desktop" \
+        "$pkgdir/usr/share/krunner/dbusplugins/bookos-semantic-krunner.desktop"
+
+    # bookos-search scripts
+    install -Dm755 "$_search/bookos-krunner.py"  "$pkgdir/opt/bookos-search/bookos-krunner.py"
+    install -Dm755 "$_search/buscar.py"           "$pkgdir/opt/bookos-search/buscar.py"
+    install -Dm755 "$_search/indexador.py"        "$pkgdir/opt/bookos-search/indexador.py"
+    install -Dm755 "$_search/setup.sh"            "$pkgdir/opt/bookos-search/setup.sh"
+    install -Dm755 "$_search/watcher.sh"          "$pkgdir/opt/bookos-search/watcher.sh"
+
+    # AI battery prediction (Python venv installed by .install hook)
+    local _ai="${_extra}/ai"
+    install -Dm755 "$_ai/train.py"   "$pkgdir/opt/bookos-ai/train.py"
+    install -Dm755 "$_ai/predict.py" "$pkgdir/opt/bookos-ai/predict.py"
+    install -Dm755 "$_ai/setup.sh"   "$pkgdir/opt/bookos-ai/setup.sh"
+    install -Dm644 "$_ai/bookos-battery-train.service" \
+        "$pkgdir/usr/lib/systemd/system/bookos-battery-train.service"
+    install -Dm644 "$_ai/bookos-battery-train.timer" \
+        "$pkgdir/usr/lib/systemd/system/bookos-battery-train.timer"
+
+}

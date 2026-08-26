@@ -374,17 +374,33 @@ function toast(msg, icon='✓'){
 if(typeof window!=='undefined'){
     window.toast=toast;
     window._tr=_tr;
-    // Lazy export — promptAuth is defined later in this file. Use a getter
-    // so the global picks up the live binding once the module finishes loading.
-    Object.defineProperty(window,'promptAuth',{configurable:true,get(){return promptAuth;}});
+}
+
+// El diálogo de autenticación vive en pages.js, que lo publica como
+// window.promptAuth al cargarse. Aquí solo se enruta: llamarlo directamente
+// lanzaba ReferenceError y cualquier botón que pidiera contraseña —"Hecho"
+// del editor de inicio de sesión, entre otros— moría en silencio.
+function promptAuth(opts={}){
+    const fn=typeof window!=='undefined'?window.promptAuth:null;
+    if(typeof fn!=='function'){
+        console.error('promptAuth no disponible: pages.js no se ha cargado');
+        toast('No se pudo abrir la ventana de autenticación','❌');
+        return Promise.resolve(null);
+    }
+    return fn(opts);
 }
 
 // ── Dialog (replaces browser confirm()) ──
+let _dlgSeq=0;
 function showDialog(title,msg,{confirmText='Confirmar',confirmClass='confirm',cancelText='Cancelar',onConfirm,onCancel}={}){
+    // Se guarda quién tenía el foco para devolvérselo al cerrar; sin esto el
+    // foco se perdía al body y el teclado quedaba en el limbo.
+    const prevFocus=document.activeElement;
+    const titleId='bk-dlg-t'+(++_dlgSeq);
     const ov=document.createElement('div');
     ov.className='bk-overlay';
-    ov.innerHTML=`<div class="bk-dialog">
-        <div class="bk-dialog-title">${title}</div>
+    ov.innerHTML=`<div class="bk-dialog" role="dialog" aria-modal="true" aria-labelledby="${titleId}">
+        <div class="bk-dialog-title" id="${titleId}">${title}</div>
         ${msg?`<div class="bk-dialog-msg">${msg}</div>`:''}
         <div class="bk-dialog-btns">
             <button class="bk-dbtn cancel" id="d-cancel">${cancelText}</button>
@@ -392,13 +408,27 @@ function showDialog(title,msg,{confirmText='Confirmar',confirmClass='confirm',ca
         </div>
     </div>`;
     document.body.appendChild(ov);
-    const close=()=>ov.remove();
+    const close=()=>{ov.remove();document.removeEventListener('keydown',onKey,true);try{prevFocus?.focus?.();}catch(e){}};
+    function onKey(e){
+        if(e.key==='Escape'){e.preventDefault();e.stopPropagation();close();onCancel?.();return;}
+        if(e.key!=='Tab')return;
+        // Trampa de foco: Tab cicla solo entre los botones del diálogo.
+        const f=[...ov.querySelectorAll('button')].filter(b=>!b.disabled);
+        if(!f.length)return;
+        const first=f[0],last=f[f.length-1];
+        if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus();}
+        else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}
+    }
+    // En captura: se adelanta al Escape global de main.js, que antes navegaba
+    // hacia atrás dejando el diálogo huérfano encima de la página nueva.
+    document.addEventListener('keydown',onKey,true);
     ov.querySelector('#d-cancel').onclick=()=>{close();onCancel?.();};
     ov.querySelector('#d-ok')?.addEventListener('click',()=>{close();onConfirm?.();});
     ov.addEventListener('click',e=>{if(e.target===ov){close();onCancel?.();}});
+    (ov.querySelector('#d-ok')||ov.querySelector('#d-cancel'))?.focus();
 }
 
-// ── Root password prompt — thin wrapper over promptAuth() (defined later).
+// ── Root password prompt — thin wrapper over promptAuth().
 // Returns Promise<string|null>. Fingerprint matches resolve with empty string
 // (callers that need the literal password should switch to promptAuth directly).
 function showRootAuth(title,desc=''){
@@ -484,6 +514,81 @@ function renderInfoItem(title, subtitle=''){
 // Runtime ES->EN dict for all UI labels (rows, sections, headers).
 // Auto-translates any string that contains a known ES phrase when bookos_lang=en.
 const _UI_TR_EN = {
+    // ── Widgets, BookBar y fondo del editor de login ──
+    'Widgets':'Widgets', '+ Añadir widgets':'+ Add widgets', 'Quitar':'Remove',
+    'Colocación':'Placement', 'Bajo el reloj':'Under the clock', 'Libre':'Free',
+    'Batería':'Battery', 'Carga y tiempo restante':'Charge and time left',
+    'Tiempo':'Weather', 'De tu zona, sin consultar nada al iniciar':
+        'For your area, with no lookup at startup',
+    'Fecha':'Date', 'Día del mes':'Day of the month',
+    'Arrastra cada widget por separado a donde quieras.':
+        'Drag each widget separately wherever you want.',
+    'Van en fila bajo el reloj y se mueven con él.':
+        'They sit in a row under the clock and move with it.',
+    'Todos van en fila bajo el reloj y se mueven con él. Cambia a "Libre" para colocarlos uno a uno.':
+        'They all sit in a row under the clock and move with it. Switch to "Free" to place them one by one.',
+    'Contenido':'Content', 'Aspecto':'Appearance',
+    'Qué puede aparecer':'What can appear',
+    'Música':'Music', 'Lo que esté sonando':'Whatever is playing',
+    'Modos y rutinas':'Modes and routines', 'El modo activo del ecosistema':'The active ecosystem mode',
+    'Porcentaje y tiempo restante':'Percentage and time left',
+    'Cuándo se ve':'When it shows', 'Siempre':'Always', 'Solo al cargar':'Only while charging',
+    'La píldora se oculta en uso normal y aparece al enchufar el cargador, con una animación.':
+        'The pill hides during normal use and appears when you plug in the charger, with an animation.',
+    'Siempre visible mientras haya algo que mostrar.':'Always visible while there is something to show.',
+    'Color del fondo':'Background color', 'Del tema':'From theme',
+    'Grosor':'Weight', 'Tamaño':'Size',
+    'La muestra <b>A</b> toma el tono del fondo de pantalla y lo':
+        'The <b>A</b> swatch takes the hue of the wallpaper and',
+    'aclara hasta que se lee bien encima. Cambia sola al cambiar el fondo.':
+        'lightens it until it reads on top. It updates when the wallpaper changes.',
+    'Mostrar notificaciones':'Show notifications', 'Mostrar su contenido':'Show their content',
+    'Pantalla de bloqueo (Win+L)':'Lock screen (Win+L)',
+    'Con el contenido oculto se ve qué aplicación avisa y':
+        'With content hidden you see which app is notifying and',
+    'cuántos avisos hay, pero no el texto. Un portátil bloqueado suele estar':
+        'how many there are, but not the text. A locked laptop is usually',
+    'desatendido.':'unattended.',
+    'Centrar horizontal':'Center horizontally', 'Centrar vertical':'Center vertically',
+    'Posición':'Position', 'Selector':'Selector',
+    // ── Editor de la pantalla de inicio de sesión (sddm-editor.js) ──
+    // Sin estas entradas la pasada de traducción del DOM dejaba el panel a
+    // medias: "Position"/"Size" traducidos y "Compacta"/"Solo la última" no.
+    // El editor cuelga de "Lock screen" y su objetivo principal es Win+L; el
+    // título decía "Login screen", que apuntaba a la pantalla equivocada.
+    'Pantalla de bloqueo':'Lock screen',
+    'Personalizar la pantalla':'Customize the screen',
+    'Reloj, fondo, cuentas, BookBar y widgets · también en el acceso':
+        'Clock, wallpaper, accounts, BookBar and widgets · also on the login screen',
+    'Pantalla de inicio de sesión':'Login screen',
+    'Reloj, fondo, cuentas y BookBar del login':'Clock, wallpaper, accounts and BookBar',
+    'Fuente y color':'Font and color', 'Estilo':'Style', 'Ajuste':'Adjust',
+    'Grosor':'Weight', 'Fina':'Thin', 'Negrita':'Bold',
+    'Color':'Color', 'Automático':'Automatic',
+    'Tamaño':'Size', 'Pequeño':'Small', 'Grande':'Large',
+    'Hora':'Time', 'Segundos':'Seconds', 'Mostrar fecha':'Show date',
+    'Fecha':'Date', 'Día y mes':'Day and month', 'Numérica':'Numeric', 'Solo día':'Day only',
+    'Selector':'Selector', 'Todas las cuentas':'All accounts', 'Solo la última':'Last one only',
+    'Cuentas':'Accounts',
+    'Mostrar BookBar':'Show BookBar', 'Compacta':'Compact', 'Normal':'Normal',
+    'Desenfocado':'Blurred', 'Nítido':'Sharp', 'Liso':'Solid',
+    'Imagen':'Image', 'Elegir…':'Choose…',
+    'Desenfoque':'Blur', 'Difuso':'Diffuse',
+    'Oscurecimiento':'Dimming', 'Claro':'Light', 'Oscuro':'Dark',
+    'Opacidad de píldoras':'Pill opacity', 'Trans.':'Trans.', 'Sólida':'Solid',
+    'Aspecto':'Appearance', 'Auto':'Auto',
+    'Fondo de pantalla':'Wallpaper', 'Hecho':'Done', 'Centrar':'Center',
+    'Arrastra el reloj por la pantalla para colocarlo donde quieras.':
+        'Drag the clock anywhere on the screen.',
+    'Arrastra una esquina para cambiar el tamaño.':'Drag a corner to resize.',
+    'Con "Todas las cuentas" se ven todos los usuarios en fila y se':
+        'With "All accounts" every user is shown in a row and you',
+    'entra pulsando el que quieras, como en macOS.':
+        'sign in by tapping the one you want, like macOS.',
+    'Toca el reloj, las cuentas o la BookBar para personalizarlos.':
+        'Tap the clock, the accounts or the BookBar to customize them.',
+    'Toca el fondo para cambiar la imagen.':'Tap the background to change the image.',
+
     // ── Added in full-app translation sweep ──
     'Buscando actualizaciones...':'Checking for updates...',
     'Color del estuche':'Case color',
@@ -1790,6 +1895,19 @@ const _UI_TR_EN = {
     'Ej. Penicilina':'e.g. Penicillin',
     'Ej. Ibuprofeno':'e.g. Ibuprofen',
     'Ej. Diabetes':'e.g. Diabetes',
+    // Dock (pantalla de inicio)
+    'Efecto lupa':'Magnification',
+    'Los iconos crecen al pasar el cursor, estilo macOS. Al desactivarlo se quedan siempre a tamaño completo':'Icons grow under the cursor, macOS style. Turn it off to keep them always at full size',
+    'Intensidad de la lupa':'Magnification strength',
+    'Cuánto crece el icono bajo el cursor':'How much the icon grows under the cursor',
+    'Efecto lupa activado':'Magnification on',
+    'Efecto lupa desactivado':'Magnification off',
+    'Suave':'Subtle',
+    'Normal':'Normal',
+    'Fuerte':'Strong',
+    'Paleta dinámica de BookOS':'BookOS dynamic palette',
+    'Acento automático de Plasma':'Automatic Plasma accent',
+    'Color de acento nativo de KDE según el fondo':"KDE's native accent color, based on the wallpaper",
 };
 
 function _tr(str){
@@ -1868,6 +1986,63 @@ function renderHeader(title, rightActions=''){
 function renderSection(title){
     return `<p class="section-header">${_tr(title)}</p>`;
 }
+
+// ── Estados de error / vacío ────────────────────────────────────────────
+// Antes no existía ningún helper de error: los `catch(e){}` mudos dejaban la
+// página vacía y el usuario no distinguía "falló el backend" de "no hay nada".
+// Los callbacks se registran en un mapa y se despachan por delegación para no
+// depender de `onclick=` inline (hostil a CSP) ni obligar a cablear ids.
+const _stateCbs=new Map();
+let _stateSeq=0,_stateBound=false;
+function _stateAction(cb){
+    if(typeof cb!=='function')return'';
+    if(!_stateBound){
+        _stateBound=true;
+        document.addEventListener('click',e=>{
+            const b=e.target?.closest?.('[data-state-action]');
+            if(!b)return;
+            const fn=_stateCbs.get(b.dataset.stateAction);
+            if(fn){e.preventDefault();fn();}
+        });
+    }
+    const id='st'+(++_stateSeq);
+    _stateCbs.set(id,cb);
+    // El mapa se llenaría sin fin al repintar páginas: se queda con los últimos.
+    if(_stateCbs.size>60)_stateCbs.delete(_stateCbs.keys().next().value);
+    return id;
+}
+function renderError(msg='No se pudo cargar la información',{onRetry,retryLabel='Reintentar'}={}){
+    const id=_stateAction(onRetry);
+    return `<div class="empty-state state-error">
+        <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="var(--tx2)" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16.4v.01"/></svg>
+        <span>${_tr(msg)}</span>
+        ${id?`<button type="button" class="btn btn-sm" data-state-action="${id}">${_tr(retryLabel)}</button>`:''}
+    </div>`;
+}
+// cta: {label,onClick} — hasta ahora ningún estado vacío ofrecía acción.
+function renderEmptyState(icon,title,sub='',cta=null){
+    const id=cta?_stateAction(cta.onClick):'';
+    return `<div class="empty-state">
+        ${icon||''}
+        <span class="dt">${_tr(title)}</span>
+        ${sub?`<span class="ds">${_tr(sub)}</span>`:''}
+        ${id?`<button type="button" class="btn btn-sm" data-state-action="${id}">${_tr(cta.label)}</button>`:''}
+    </div>`;
+}
+
+// Fila que navega a otra página. Las filas escritas a mano eran <div> con
+// `style="cursor:pointer"`: ni enfocables, ni anunciadas, ni activables con
+// teclado — el panel derecho entero era inalcanzable salvo los toggles.
+function renderNavRow(title,subtitle='',{id='',right=''}={}){
+    return `<div class="detail-item detail-item-row nav-row" role="button" tabindex="0"${id?` id="${id}"`:''}><div class="detail-texts"><span class="dt">${_tr(title)}</span>${subtitle?`<span class="ds">${_tr(subtitle)}</span>`:''}</div>${right||chevron()}</div>`;
+}
+// Enter/Espacio activan esas filas igual que un click (el rol button lo promete).
+document.addEventListener('keydown',e=>{
+    if(e.key!=='Enter'&&e.key!==' ')return;
+    const r=e.target?.closest?.('.nav-row[role="button"]');
+    if(!r)return;
+    e.preventDefault();r.click();
+});
 
 // ── Anchored popover select ──────────────────────────────────────────────
 // Floating option picker anchored to a settings row (instead of a sub-page).
@@ -1997,6 +2172,7 @@ export{
     getSetting,setSetting,primeSetting,ci,_icInvalidate,getCachedHwState,
     esc,addInterval,toast,showDialog,showRootAuth,promptSudo,invokeWithAuth,
     renderSkeleton,renderSkeletonChart,renderLoading,renderCard,renderInfoItem,
+    renderError,renderEmptyState,renderNavRow,
     _tr,renderRowItem,renderToggle,renderSlider,renderHeader,renderSection,
     popoverSelect,themeColor,setupToggle,setupSlider,wifiIcon,btIcon,chevron,lockIcon
 };

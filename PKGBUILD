@@ -1,13 +1,15 @@
 # Maintainer: Jose <josrebe333@gmail.com>
 pkgname=bookos-settings
-pkgver=0.5.0
+pkgver=0.6.0
 pkgrel=1
 pkgdesc="BookOS Settings — settings application for KDE Plasma (Samsung Galaxy Book / BookOS)"
 arch=('x86_64')
 url="https://github.com/Evelynx08/BookOS-Settings"
 license=('GPL3')
 install=bookos-settings.install
-depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3' 'python')
+# upower: lo consulta refresh_devices_cache() para la tarjeta de bateria
+# (portatil, auriculares). El movil y la tablet entran por BookOS Link.
+depends=('webkit2gtk-4.1' 'gtk3' 'libsoup3' 'python' 'upower')
 optdepends=(
     'colord: ICC profile support'
     'kscreen: display control via kscreen-doctor'
@@ -23,7 +25,11 @@ sha256sums=()
 
 build() {
     cd "${startdir}/src-tauri"
-    cargo build --no-bundle
+    # --release, no "--no-bundle": eso ultimo es una opcion de `cargo tauri`,
+    # no de cargo, y hacia fallar el build con "unexpected argument". Ademas
+    # package() busca el binario en target/release, asi que sin --release no
+    # habria nada que empaquetar.
+    cargo build --release
 }
 
 package() {
@@ -111,22 +117,48 @@ EOF
         "$pkgdir/usr/lib/bookos/bookos-reapply-theme.sh"
 
     # pacman hook: re-apply the lockscreen patch after plasma-workspace upgrades
-    # (Plasma overwrites the patched shell QML, reverting the BookOS lockscreen).
+    # (Plasma overwrites the patched shell QML, reverting the BookOS lockscreen)
+    # AND after bookos-settings itself upgrades, para que los QML nuevos de una
+    # version nueva lleguen a las copias en uso sin volver a pulsar "instalar".
     install -Dm644 "$_extra/bookos-theme-reapply.hook" \
         "$pkgdir/usr/share/libalpm/hooks/95-bookos-theme-reapply.hook"
 
-    # BookOS lockscreen QML — installed by the app (toggle in Settings)
-    for f in MainBlock.qml LockScreenUi.qml BookBar.qml MediaControls.qml; do
-        install -Dm644 "$_extra/lockscreen/$f" \
-            "$pkgdir/usr/share/bookos-settings/lockscreen/$f"
-    done
+    # Cliente del color dinamico: el fichero CANONICO que copian las demas apps
+    # de BookOS (Reloj, Notas, Store, Player, Viewer, Shell). Cada una lleva su
+    # propia copia en su repo; esta es la referencia con la que compararlas.
+    install -Dm644 "$_extra/dynamic-color/bookos-palette.js" \
+        "$pkgdir/usr/share/bookos-settings/dynamic-color/bookos-palette.js"
+
+    # Plantillas Kvantum del color dinamico: mismo .kvconfig con los ~10
+    # valores de color que cambian sustituidos por placeholders.
+    install -Dm644 "$_extra/kvantum/bookos-dark-blue.kvconfig.tmpl" \
+        "$pkgdir/usr/share/bookos-settings/kvantum/bookos-dark-blue.kvconfig.tmpl"
+    install -Dm644 "$_extra/kvantum/bookos-light-blue.kvconfig.tmpl" \
+        "$pkgdir/usr/share/bookos-settings/kvantum/bookos-light-blue.kvconfig.tmpl"
+
+    # BookOS lockscreen QML — installed by the app (toggle in Settings).
+    # Se copia el directorio ENTERO, no una lista fija: al anadir
+    # LockNotifications.qml la lista se quedo corta y el lockscreen habria
+    # fallado al cargar por un fichero que si referencia LockScreenUi.qml.
+    install -dm755 "$pkgdir/usr/share/bookos-settings/lockscreen"
+    cp -r "$_extra/lockscreen/." "$pkgdir/usr/share/bookos-settings/lockscreen/"
+    # Los widgets (bateria/tiempo/fecha) son EL MISMO componente que usa el tema
+    # SDDM, parametrizado por propiedades. Se copia desde sddm-theme en vez de
+    # duplicar el fichero en el repo: dos copias divergen en cuanto se toca una.
+    cp -f "$_extra/sddm-theme/GreeterWidgets.qml" "$_extra/sddm-theme/WxIcon.qml" \
+        "$_extra/sddm-theme/DeviceIcon.qml" "$_extra/sddm-theme/GlyphIcon.qml" \
+        "$pkgdir/usr/share/bookos-settings/lockscreen/"
+    find "$pkgdir/usr/share/bookos-settings/lockscreen" -type f -exec chmod 644 {} +
 
     # BookOS SDDM theme — staged under /usr/share/bookos-settings/sddm-theme.
     # install_sddm_theme() (Settings app) copies it to /usr/share/sddm/themes/bookos
     # the first time the user enables the SDDM theme toggle.
-    install -Dm644 "$_extra/sddm-theme/Main.qml"          "$pkgdir/usr/share/bookos-settings/sddm-theme/Main.qml"
-    install -Dm644 "$_extra/sddm-theme/metadata.desktop"  "$pkgdir/usr/share/bookos-settings/sddm-theme/metadata.desktop"
-    install -Dm644 "$_extra/sddm-theme/theme.conf"        "$pkgdir/usr/share/bookos-settings/sddm-theme/theme.conf"
+    # Mismo motivo: el tema SDDM crecio a varios QML (UserAvatar, Fingerprint,
+    # GreeterWidgets, WxIcon) mas backgrounds/, y la lista fija de tres
+    # ficheros dejaba fuera todo lo nuevo.
+    install -dm755 "$pkgdir/usr/share/bookos-settings/sddm-theme"
+    cp -r "$_extra/sddm-theme/." "$pkgdir/usr/share/bookos-settings/sddm-theme/"
+    find "$pkgdir/usr/share/bookos-settings/sddm-theme" -type f -exec chmod 644 {} +
     # Icons subdir
     if [ -d "$_extra/sddm-theme/icons" ]; then
         find "$_extra/sddm-theme/icons" -type f | while read -r f; do

@@ -94,7 +94,13 @@ pub async fn qs_start(
     }
 
     let msg_tx  = state.msg_tx.clone();
-    let mut rqs = RQS::new(Visibility::Visible, Some(44551), None);
+    // Carpeta propia en vez del ~/Downloads de la librería: lo que llega de
+    // otro aparato no se mezcla con lo que baja el navegador, y así se puede
+    // vaciar sin mirar. Se crea al arrancar el servicio porque la librería no
+    // la crea sola: si no existe, la transferencia falla al escribir.
+    let dl = bookshare_download_dir();
+    let _ = std::fs::create_dir_all(&dl);
+    let mut rqs = RQS::new(Visibility::Visible, Some(44551), Some(dl));
 
     // Redirect the lib's message_sender to our broadcast channel
     // by replacing it before run() — not possible directly, so we subscribe
@@ -244,7 +250,26 @@ pub async fn qs_set_visibility(
     Ok(r#"{"ok":true}"#.into())
 }
 
-/// Set download directory for incoming files (None = default ~/Downloads).
+/// Carpeta donde caen los ficheros recibidos: ~/Descargas/Book-Share.
+///
+/// El nombre de la carpeta de descargas es el del IDIOMA del sistema
+/// ("Descargas", "Downloads", "Téléchargements"…), así que se pregunta a
+/// xdg-user-dir en vez de cablear uno. Si no está, se cae a ~/Downloads, que es
+/// lo que asume la librería.
+pub fn bookshare_download_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let base = std::process::Command::new("xdg-user-dir")
+        .arg("DOWNLOAD")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty() && s != &home)
+        .unwrap_or_else(|| format!("{}/Downloads", home));
+    std::path::PathBuf::from(base).join("Book-Share")
+}
+
+/// Set download directory for incoming files (None = ~/Descargas/Book-Share).
 #[tauri::command]
 pub async fn qs_set_download_path(
     path: Option<String>,
@@ -252,6 +277,9 @@ pub async fn qs_set_download_path(
 ) -> Result<String, String> {
     let guard = state.rqs.lock().map_err(|e| e.to_string())?;
     let rqs = guard.as_ref().ok_or("Servicio no iniciado.")?;
-    rqs.set_download_path(path.map(std::path::PathBuf::from));
+    let dir = path.map(std::path::PathBuf::from)
+                  .unwrap_or_else(bookshare_download_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    rqs.set_download_path(Some(dir));
     Ok(r#"{"ok":true}"#.into())
 }

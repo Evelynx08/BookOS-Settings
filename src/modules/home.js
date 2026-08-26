@@ -79,6 +79,8 @@ export const subSearchIndex=[
 {parent:'inicio',title:'Tamaño de iconos',keywords:['iconos','tamaño','grande','pequeño']},
 {parent:'inicio',title:'Posición de la barra',keywords:['barra','panel','posicion','abajo','arriba','izquierda','derecha']},
 {parent:'inicio',title:'Accesos directos',keywords:['accesos','directos','shortcuts','escritorio']},
+{parent:'inicio',title:'Efecto lupa del dock',keywords:['lupa','dock','magnify','zoom','iconos','animacion','cursor','macos','crecer','magnification']},
+{parent:'inicio',title:'Tamaño del dock',keywords:['dock','tamaño','grosor','alto','altura','size','thickness','panel','iconos','grande','pequeño']},
 // Fondos
 {parent:'fondos',title:'Fondo de pantalla',keywords:['fondo','wallpaper','imagen']},
 {parent:'fondos',title:'Paleta de colores',keywords:['paleta','colores','acento','tono']},

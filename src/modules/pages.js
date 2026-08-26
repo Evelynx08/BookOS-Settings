@@ -3,6 +3,7 @@ import{
     getSetting,setSetting,primeSetting,ci,_icInvalidate,getCachedHwState,invalidateHwCache,
     esc,addInterval,toast,showDialog,showRootAuth,promptSudo,invokeWithAuth,
     renderSkeleton,renderSkeletonChart,renderLoading,renderCard,renderInfoItem,
+    renderError,renderEmptyState,renderNavRow,
     _tr,renderRowItem,renderToggle,renderSlider,renderHeader,renderSection,
     popoverSelect,themeColor,setupToggle,setupSlider,wifiIcon,btIcon,chevron,lockIcon
 }from'./pages/_common.js';
@@ -11,6 +12,11 @@ import{
 import{getRoutines,saveRoutines,getRoutineSnapshot,deleteRoutineSnapshot,saveRoutineSnapshot,executeRoutine,snapshotForRoutine,restoreSnapshot,_getSnap,_deleteSnap}from'./routines-engine.js';
 // Re-export shared helpers so existing importers of pages.js keep working.
 export{invalidateHwCache};
+// Editor de la pantalla de inicio: módulo aparte por tamaño y porque solo se
+// carga cuando el usuario entra en él.
+import{renderSddmEditor}from'./pages/sddm-editor.js';
+export{renderSddmEditor};
+import{installPaletteCss,previewPaletteCss,paletteToCss}from'./dynamic-color.js';
 export{getRoutines,saveRoutines,getRoutineSnapshot,deleteRoutineSnapshot,saveRoutineSnapshot,executeRoutine,snapshotForRoutine,restoreSnapshot};
 
 // ── Conexiones main page ──
@@ -452,6 +458,100 @@ async function renderWifiDetailPage(c,{ssid,security,band}){
     });
 }
 
+
+// ════════════════════════════════════════════════════════════════════════
+// ── Puente con BookOS Desktop (sustituye a KScreen en sesión BookOS) ────
+// ════════════════════════════════════════════════════════════════════════
+// Regla que no se rompe: **o BookOS Desktop, o KScreen, nunca los dos**. Si el
+// compositor de BookOS está en el bus, KWin no está gobernando estas pantallas
+// y llamar a kscreen-doctor no haría nada (o algo peor, si hay una sesión de
+// Plasma abierta en otro TTY). La detección es lo primero que se pregunta y
+// decide la rama entera.
+//
+// El contrato de la interfaz D-Bus lo documenta bookos-comp/src/ajustes.rs.
+
+// La disponibilidad se cachea para la vida de la página: el escritorio no
+// cambia de compositor a media sesión, y preguntarlo en cada render sería una
+// ida y vuelta al bus por cada popover que se abre.
+let _bkDisponible=null;
+export async function bookosDesktopReady(){
+    if(_bkDisponible===null){
+        try{_bkDisponible=await tauriInvoke('bookos_desktop_available');}
+        catch(e){_bkDisponible=false;}
+    }
+    return _bkDisponible;
+}
+
+async function bkCapabilities(){
+    try{return JSON.parse(await tauriInvoke('bookos_get_capabilities'));}
+    catch(e){return {};}
+}
+
+async function bkGetOutputs(){
+    try{return JSON.parse(await tauriInvoke('bookos_get_outputs'));}
+    catch(e){console.error('[Pantalla] bookos_get_outputs',e);return [];}
+}
+
+/// El modo que una salida tiene puesto ahora mismo.
+function bkModoActual(o){
+    return (o.modos||[]).find(m=>m.actual)||(o.modos||[]).find(m=>m.preferido)||(o.modos||[])[0]||null;
+}
+const bkHz=m=>m?Math.round(m.refresco_mhz/1000):0;
+const bkRes=m=>m?`${m.ancho}x${m.alto}`:'';
+
+/// Convierte el censo en la petición equivalente: es el punto de partida al que
+/// se le aplican los cambios de una sola salida. Se manda **siempre la
+/// configuración completa** porque una posición o una pantalla principal solo
+/// tienen sentido respecto de las demás.
+function bkPeticiones(outs,id,cambios){
+    return outs.map(o=>{
+        const m=bkModoActual(o);
+        const base={
+            id:o.id,activa:o.activa,
+            ancho:m?m.ancho:0,alto:m?m.alto:0,refresco_mhz:m?m.refresco_mhz:0,
+            escala:o.escala,x:o.x,y:o.y,
+            transformacion:o.transformacion,vrr:o.vrr,principal:o.principal,
+        };
+        return o.id===id?{...base,...cambios}:base;
+    });
+}
+
+/// Aplica y devuelve `{ok,error}` **sin adornar**: si el compositor dice que no,
+/// la interfaz tiene que enseñar el motivo y no un «aplicado» que no ocurrió.
+async function bkApply(peticiones){
+    try{
+        const r=JSON.parse(await tauriInvoke('bookos_apply_output_config',{config:peticiones}));
+        return {ok:!!r.ok,error:r.error||''};
+    }catch(e){return {ok:false,error:String(e)};}
+}
+
+/// Marcar sólo la principal es un cambio del conjunto: la que lo era deja de
+/// serlo, así que se reescriben todas.
+function bkPeticionesPrincipal(outs,id){
+    return bkPeticiones(outs,null,null).map(p=>({...p,principal:p.id===id}));
+}
+
+/// Estados que la interfaz enseña. Que sean cuatro y no dos es lo que evita el
+/// «parece que funcionó»: `pendiente` mientras el compositor contesta,
+/// `reinicio` para lo que se guarda pero no se ve hasta la próxima sesión.
+const BK_ESTADO={aplicado:'✓',pendiente:'…',reinicio:'↻',error:'❌'};
+function bkToast(estado,texto){
+    toast(texto,BK_ESTADO[estado]||'✓');
+}
+
+/// ¿Esta combinación va a ir a tirones?
+///
+/// Con escala fraccional el compositor tiene que reescalar cada superficie que
+/// no dibuje directamente a esa escala, y a 120 Hz eso son 8,3 ms de
+/// presupuesto por fotograma para hacer un trabajo extra que a 60 tiene 16,6.
+/// No se prohíbe —se ve bien en máquinas holgadas— pero se avisa.
+function bkAvisoFluidez(escala,hz){
+    const fraccional=Math.abs(escala-Math.round(escala))>0.001;
+    if(fraccional&&hz>=90)
+        return _tr('Escala fraccional a')+' '+hz+' Hz: '+_tr('puede notarse menos fluido que con una escala entera');
+    return '';
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // ── Pantalla ────────────────────────────────────────────────────────────
 // ════════════════════════════════════════════════════════════════════════
@@ -461,9 +561,10 @@ export async function renderPantalla(c){
     let lockTimeout=5;
     let savedVb=false,savedHdr=false,savedDpst=false;
     let hw=null;
+    let kscrOutputs=[];
     let styleThemes={kvantum_dark:'bookos-dark-blue',kvantum_light:'bookos-light-blue',plasma_dark:'bookos-dark',plasma_light:'bookos-light'};
     try{
-        const[b,n,d,t,lt,_hw,st]=await Promise.all([
+        const[b,n,d,t,lt,_hw,st,ks]=await Promise.all([
             tauriInvoke('get_brightness').then(JSON.parse).catch(()=>({brightness:75})),
             tauriInvoke('get_nightlight').then(JSON.parse).catch(()=>({active:false,temperature:4500})),
             ci('get_display_info').then(JSON.parse).catch(()=>[]),
@@ -471,8 +572,9 @@ export async function renderPantalla(c){
             tauriInvoke('get_lock_timeout').then(r=>JSON.parse(r).timeout).catch(()=>5),
             getCachedHwState(),
             ci('get_style_themes').then(JSON.parse).catch(()=>({})),
+            ci('kscreen_get').then(JSON.parse).then(j=>j.outputs||[]).catch(()=>[]),
         ]);
-        br=b.brightness;nl=n;displays=d;theme=t;lockTimeout=lt;hw=_hw;
+        br=b.brightness;nl=n;displays=d;theme=t;lockTimeout=lt;hw=_hw;kscrOutputs=ks;
         if(st&&st.kvantum_dark) styleThemes={...styleThemes,...st};
         if(hw&&typeof hw==='string'){try{hw=JSON.parse(hw);}catch{hw=null;}}
         if(hw){
@@ -487,6 +589,26 @@ export async function renderPantalla(c){
             ]);
         }
     }catch(e){console.error('[Pantalla]',e);}
+
+    // En sesión BookOS el censo lo da el compositor y kscreen-doctor no pinta
+    // nada. Se traduce a la misma forma que usaba la página para no tocar el
+    // resto del render: `name` pasa a ser el identificador estable del monitor,
+    // que es lo que hay que mandar de vuelta al aplicar.
+    const nativo=await bookosDesktopReady();
+    let bkOuts=[],bkCaps={};
+    if(nativo){
+        [bkOuts,bkCaps]=await Promise.all([bkGetOutputs(),bkCapabilities()]);
+        const activas=bkOuts.filter(o=>o.activa);
+        displays=activas.map(o=>{
+            const m=bkModoActual(o);
+            const vistos=new Set();
+            const modes=(o.modos||[]).map(x=>`${x.ancho}x${x.alto}@${bkHz(x)}`).filter(x=>{
+                if(vistos.has(x))return false;vistos.add(x);return true;
+            });
+            return {name:o.id,current:m?`${bkRes(m)}@${bkHz(m)}`:'',modes};
+        });
+        kscrOutputs=activas.map(o=>({name:o.id,scale:o.escala,enabled:true}));
+    }
 
     const savedRR=await getSetting('RefreshRate','120');
     const nlFrom=await getSetting('NightLightFrom','22:00');
@@ -507,6 +629,7 @@ export async function renderPantalla(c){
     // hw !== null → el dispositivo tiene controles de pantalla avanzados (HDR, Vision Booster, ICC)
 
     const curRes=displays.length?getResName(displays[0].current||''):'';
+    const curScale=displays.length?(kscrOutputs.find(o=>o.name===displays[0].name)?.scale||1):1;
     const curHz=savedRR==='60'?'60 Hz':'120 Hz';
     const nlLabel=nl.active?`${nlFrom} – ${nlTo}`:_tr('Desactivada');
     const iccProfiles=[
@@ -570,9 +693,15 @@ export async function renderPantalla(c){
             <span class="dt">${_tr('Resolución de la pantalla')}</span>
             <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px" id="lbl-resolution">${curRes}</span>${chevron()}</div>
         </div>`);
+        dispRows.push(`<div class="detail-item" style="cursor:pointer" id="btn-scale">
+            <span class="dt">${_tr('Escala')}</span>
+            <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px" id="lbl-scale">${Math.round(curScale*100)}%</span>${chevron()}</div>
+        </div>`);
     }
+    // En sesión BookOS la sub-página lista todas las pantallas, no solo las
+    // externas: es el compositor quien las gobierna y la interna es una más.
     dispRows.push(`<div class="detail-item" style="cursor:pointer" id="btn-ext-displays">
-        <span class="dt">${_tr('Pantallas externas')}</span>
+        <span class="dt">${_tr(nativo?'Pantallas':'Pantallas externas')}</span>
         <div style="display:flex;align-items:center;gap:6px">${chevron()}</div>
     </div>`);
     h+=renderCard(dispRows);
@@ -644,7 +773,7 @@ export async function renderPantalla(c){
     });
     // ── Quick anchored popovers (no sub-page navigation) ──
     // Mutable selection state so reopening a popover marks the fresh choice.
-    const _sel={rr:savedRR,icc:effectiveIcc,res:(displays[0]?.current||'').split('@')[0].trim(),to:lockTimeout,nl:nl.active};
+    const _sel={rr:savedRR,icc:effectiveIcc,res:(displays[0]?.current||'').split('@')[0].trim(),to:lockTimeout,nl:nl.active,scale:Math.round(curScale*100)};
     const _setLbl=(id,txt)=>{const el=document.getElementById(id);if(el)el.textContent=txt;};
 
     document.getElementById('btn-fluidez')?.addEventListener('click',e=>{
@@ -658,6 +787,29 @@ export async function renderPantalla(c){
             onSelect:async mode=>{
                 _sel.rr=mode;
                 setSetting('RefreshRate',mode);
+                if(nativo){
+                    const o=bkOuts.find(x=>x.activa&&x.principal)||bkOuts.find(x=>x.activa);
+                    if(!o)return;
+                    const m=bkModoActual(o),objetivo=parseInt(mode);
+                    // Se conserva la resolución y se busca el refresco más alto
+                    // que no pase del pedido: en un panel de 90/120 elegir
+                    // «estándar» tiene que dar 60, no fallar por no haber 60
+                    // exactos.
+                    const cand=(o.modos||[]).filter(x=>x.ancho===m.ancho&&x.alto===m.alto&&bkHz(x)<=objetivo+2)
+                        .sort((a,b)=>b.refresco_mhz-a.refresco_mhz)[0];
+                    if(!cand){bkToast('error',_tr('Esta pantalla no tiene ese refresco'));return;}
+                    bkToast('pendiente',_tr('Aplicando')+'…');
+                    const r=await bkApply(bkPeticiones(bkOuts,o.id,{
+                        ancho:cand.ancho,alto:cand.alto,refresco_mhz:cand.refresco_mhz,
+                        vrr:o.vrr_capaz&&objetivo>=120,
+                    }));
+                    if(!r.ok){bkToast('error',r.error||_tr('Error al aplicar'));return;}
+                    bkOuts=await bkGetOutputs();
+                    _setLbl('lbl-fluidez',bkHz(cand)+' Hz');
+                    const aviso=bkAvisoFluidez(o.escala,bkHz(cand));
+                    bkToast('aplicado',aviso||(bkHz(cand)+' Hz'));
+                    return;
+                }
                 if(displays.length){
                     const disp=displays[0];
                     const curResOnly=(disp.current||'').split('@')[0].trim();
@@ -725,10 +877,56 @@ export async function renderPantalla(c){
                 onSelect:async res=>{
                     _sel.res=res;
                     const curHzNow=(d.current||'').split('@')[1]||'60';
+                    if(nativo){
+                        const o=bkOuts.find(x=>x.id===d.name);
+                        if(!o)return;
+                        const [w,h]=res.split('x').map(Number);
+                        // Se intenta conservar el refresco actual; si esa
+                        // resolución no lo tiene, el más alto que haya.
+                        const cand=(o.modos||[]).filter(m=>m.ancho===w&&m.alto===h)
+                            .sort((a,b)=>(bkHz(b)===parseInt(curHzNow)?1:0)-(bkHz(a)===parseInt(curHzNow)?1:0)||b.refresco_mhz-a.refresco_mhz)[0];
+                        if(!cand){bkToast('error',_tr('Ese modo no existe en esta pantalla'));return;}
+                        bkToast('pendiente',_tr('Aplicando')+'…');
+                        const r=await bkApply(bkPeticiones(bkOuts,o.id,{ancho:cand.ancho,alto:cand.alto,refresco_mhz:cand.refresco_mhz}));
+                        if(!r.ok){bkToast('error',r.error||_tr('Error al aplicar'));return;}
+                        bkOuts=await bkGetOutputs();
+                        d.current=`${res}@${bkHz(cand)}`;
+                        _setLbl('lbl-resolution',resMap[res]||res);
+                        bkToast('aplicado','Resolución: '+(resMap[res]||res));
+                        return;
+                    }
                     const targetMode=(d.modes||[]).find(m=>m.startsWith(res+'@'+curHzNow))||(d.modes||[]).find(m=>m.startsWith(res))||res;
                     try{await tauriInvoke('set_resolution',{output:d.name,resolution:targetMode});d.current=targetMode;}catch(e){}
                     _setLbl('lbl-resolution',resMap[res]||res);
                     toast('Resolución: '+(resMap[res]||res));
+                },
+            });
+        });
+        document.getElementById('btn-scale')?.addEventListener('click',e=>{
+            const d=displays[0];
+            // Las escalas las dice el compositor: no están cableadas aquí para
+            // que la interfaz no ofrezca una que el backend vaya a rechazar.
+            const o=nativo?bkOuts.find(x=>x.id===d.name):null;
+            const escalas=(o?.escalas?.length?o.escalas:[1,1.25,1.5,1.75,2]).map(x=>Math.round(x*100));
+            popoverSelect(e.currentTarget,{
+                title:_tr('Escala'),
+                options:escalas.map(v=>({val:v,label:v+'%'})),
+                current:_sel.scale,
+                onSelect:async v=>{
+                    _sel.scale=v;
+                    if(nativo&&o){
+                        bkToast('pendiente',_tr('Aplicando')+'…');
+                        const r=await bkApply(bkPeticiones(bkOuts,o.id,{escala:v/100}));
+                        if(!r.ok){bkToast('error',r.error||_tr('Error al aplicar'));return;}
+                        bkOuts=await bkGetOutputs();
+                        _setLbl('lbl-scale',v+'%');
+                        const aviso=bkAvisoFluidez(v/100,bkHz(bkModoActual(bkOuts.find(x=>x.id===o.id)||o)));
+                        bkToast('aplicado',aviso||(_tr('Escala')+': '+v+'%'));
+                        return;
+                    }
+                    try{await tauriInvoke('kscreen_set',{args:[`output.${d.name}.scale.${(v/100).toFixed(2)}`]});}catch(e){}
+                    _setLbl('lbl-scale',v+'%');
+                    toast(_tr('Escala')+': '+v+'%');
                 },
             });
         });
@@ -2062,7 +2260,11 @@ export async function renderSeguridad(c){
             tauriInvoke('get_firewall_status').then(JSON.parse).catch(()=>({active:false})),
             tauriInvoke('get_lock_timeout').then(r=>JSON.parse(r).timeout).catch(()=>5),
             tauriInvoke('run_command',{cmd:'kreadconfig6',args:['--file','kscreenlockerrc','--group','Daemon','--key','LockOnResume','--default','true']}).then(v=>v.trim()!=='false').catch(()=>true),
-            tauriInvoke('run_command',{cmd:'kreadconfig6',args:['--file','kscreenlockerrc','--group','Daemon','--key','LockGracePeriod','--default','0']}).then(v=>parseInt(v)||0).catch(()=>0),
+            // La clave de KDE es LockGrace, no LockGracePeriod: se leía una que
+            // no existe, así que el selector volvía siempre a 0 aunque hubiera
+            // un valor guardado. get_lock_grace ya usa la clave correcta, la
+            // misma que escribe set_lock_grace.
+            tauriInvoke('get_lock_grace').then(r=>JSON.parse(r).seconds||0).catch(()=>0),
             tauriInvoke('get_camera_enabled').then(r=>JSON.parse(r).enabled).catch(()=>true),
             tauriInvoke('get_mic_muted').then(r=>JSON.parse(r).muted).catch(()=>false),
         ]);
@@ -2220,6 +2422,9 @@ export async function renderTemas(c){
             <div class="theme-block-divider"></div>
             ${renderRowItem('Programar modo oscuro','',renderToggle('sched',schedule.enabled))}
         </div>`+
+        // Paleta de colores (dynamic color) vive ahora en Fondo de Pantalla:
+        // ver renderFondos(). Tiene más sentido ahí porque la paleta sale del
+        // fondo de pantalla, no del tema.
         // ── Icon style + tinted settings (row appears only for "tinted") ──
         `<div class="theme-block">
             <div class="icon-swatch-row">
@@ -2576,19 +2781,25 @@ function _startFpIdleAnim(){_startFpIdleAnimById('fp-svg-main');}
 export async function renderBloqueo(c){
     c.innerHTML=renderHeader(t('hdr_lockscreen'))+renderSkeleton(3);
     const _sddmDefaults={variant:'dark',background:'solid',bgImage:'',accentColor:'#007AFF',clockFormat:'24h',clockFont:'serif',blurRadius:'24',showDate:'true',showBattery:'true',showBookBar:'true'};
-    let timeout=5,fp={available:false,enrolled:false},aod=false,sddmCfg={..._sddmDefaults},userInfo={display_name:'',has_avatar:false,avatar_path:''},bookBarEnabled=true,lockThemeOn=false,sddmThemeOn=false;
-    try{[timeout,fp,aod,sddmCfg,userInfo,bookBarEnabled,lockThemeOn,sddmThemeOn]=await Promise.all([
+    const _desktopDefaults={animaciones:true,fecha:true,medios:true,reloj_y:.08,acceso_y:.36,medios_y:.68,reloj_tamano:144,avatar_tamano:132};
+    let timeout=5,fp={available:false,enrolled:false},aod=false,sddmCfg={..._sddmDefaults},userInfo={display_name:'',has_avatar:false,avatar_path:''},lockThemeOn=false,sddmThemeOn=false,desktopCfg={..._desktopDefaults};
+    try{[timeout,fp,aod,sddmCfg,userInfo,lockThemeOn,sddmThemeOn,desktopCfg]=await Promise.all([
         tauriInvoke('get_lock_timeout').then(r=>JSON.parse(r).timeout).catch(()=>5),
         tauriInvoke('check_fingerprint').then(JSON.parse).catch(()=>({available:false,enrolled:false})),
         getSetting('AOD','false').then(v=>v==='true'),
         tauriInvoke('get_sddm_config').then(JSON.parse).catch(()=>({..._sddmDefaults})),
         tauriInvoke('get_user_info').then(JSON.parse).catch(()=>({display_name:'',has_avatar:false,avatar_path:''})),
-        getSetting('BookBarEnabled','true').then(v=>v!=='false'),
         tauriInvoke('is_lockscreen_theme_installed').then(r=>JSON.parse(r).installed).catch(()=>false),
-        tauriInvoke('is_sddm_theme_installed').then(r=>JSON.parse(r).installed).catch(()=>false)
+        tauriInvoke('is_sddm_theme_installed').then(r=>JSON.parse(r).installed).catch(()=>false),
+        tauriInvoke('get_desktop_lockscreen_config').then(JSON.parse).catch(()=>({..._desktopDefaults}))
     ]);}catch(e){}
+    desktopCfg={..._desktopDefaults,...desktopCfg};
     // Defaults for missing keys (older config)
     for(const k in _sddmDefaults) if(!sddmCfg[k]) sddmCfg[k]=_sddmDefaults[k];
+    // showBookBar en theme.conf es la fuente de verdad real (la lee tanto el
+    // lockscreen KDE como el greeter SDDM); BookBarEnabled en settings.json
+    // es solo caché optimista de UI, no autoritativa.
+    const bookBarEnabled=sddmCfg.showBookBar!=='false';
 
     // Fingerprint SVG — dual-layer: grey base + blue overlay (opacity-controlled)
     const enrolled=fp.enrolled;
@@ -2635,54 +2846,53 @@ export async function renderBloqueo(c){
     const fontOpts=[['serif','Serif'],['sans','Sans'],['mono','Mono']];
     const accentSwatches=['#007AFF','#FF3B30','#FF9500','#FFCC00','#34C759','#5AC8FA','#AF52DE','#FF2D55'];
     const blurPct=parseInt(sddmCfg.blurRadius)||24;
-    const sddmHtml=
-        `<div class="detail-card sddm-card">
-        <div class="sddm-card-title">${t('sec_sddm')}</div>
-        <div id="sddm-preview-wrap"></div>
-        ${renderRowItem('Modo oscuro','Pantalla de inicio oscura o clara',renderToggle('sddm-dark',sddmCfg.variant==='dark'))}
-        <div class="detail-item detail-item-row">
-            <div class="detail-texts"><span class="dt">${_tr("Fondo")}</span></div>
-            <div class="seg-ctrl" id="sddm-bg-ctrl">${bgOpts.map(([v,l])=>`<button class="seg-btn${sddmCfg.background===v?' active':''}" data-val="${v}">${l}</button>`).join('')}</div>
-        </div>
-        <div class="detail-item detail-item-row" id="sddm-img-row" style="display:${sddmCfg.background==='solid'?'none':'flex'}">
-            <div class="detail-texts"><span class="dt">Imagen de fondo</span><span class="ds" id="sddm-img-name" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${sddmCfg.bgImage?sddmCfg.bgImage.split('/').pop():'Sin imagen'}</span></div>
-            <button class="btn btn-secondary btn-sm" id="sddm-img-btn">Elegir</button>
-        </div>
-        <div class="detail-item" id="sddm-blur-row" style="display:${sddmCfg.background==='blur'?'flex':'none'}">
-            <span class="dt">Intensidad del blur</span>
-            <div class="slider-container"><input type="range" class="filled" id="sddm-blur" min="0" max="60" value="${blurPct}" style="--fill:${(blurPct/60)*100}%"><span class="slider-label" id="sddm-blur-l">${blurPct}</span></div>
-        </div>
-        <div class="sddm-subhead">${_tr('Reloj')}</div>
-        <div class="detail-item detail-item-row">
-            <div class="detail-texts"><span class="dt">Formato del reloj</span></div>
-            <div class="seg-ctrl" id="sddm-fmt-ctrl">${fmtOpts.map(([v,l])=>`<button class="seg-btn${sddmCfg.clockFormat===v?' active':''}" data-val="${v}">${l}</button>`).join('')}</div>
-        </div>
-        <div class="detail-item detail-item-row">
-            <div class="detail-texts"><span class="dt">Tipografía del reloj</span></div>
-            <div class="seg-ctrl" id="sddm-font-ctrl">${fontOpts.map(([v,l])=>`<button class="seg-btn${sddmCfg.clockFont===v?' active':''}" data-val="${v}" style="font-family:${v==='mono'?'monospace':(v==='sans'?'sans-serif':'serif')}">${l}</button>`).join('')}</div>
-        </div>
-        <div class="detail-item detail-item-row">
-            <div class="detail-texts"><span class="dt">Color de acento</span><span class="ds">Botones, enlaces y huella</span></div>
-            <div id="sddm-accent-swatches" style="display:flex;gap:7px;align-items:center">
-                ${accentSwatches.map(c=>`<button class="sddm-swatch${sddmCfg.accentColor.toLowerCase()===c.toLowerCase()?' active':''}" data-color="${c}" style="width:22px;height:22px;border-radius:11px;border:2px solid ${sddmCfg.accentColor.toLowerCase()===c.toLowerCase()?'var(--tx)':'transparent'};background:${c};cursor:pointer;padding:0"></button>`).join('')}
-                <input type="color" id="sddm-accent-custom" value="${sddmCfg.accentColor}" style="width:24px;height:24px;border:none;background:transparent;cursor:pointer;padding:0">
-            </div>
-        </div>
-        <div class="sddm-subhead">${_tr('Elementos en pantalla')}</div>
-        ${renderRowItem('Mostrar fecha','Día de la semana bajo el reloj',renderToggle('sddm-show-date',sddmCfg.showDate!=='false'))}
-        ${renderRowItem('Mostrar batería','Pastilla con porcentaje de batería',renderToggle('sddm-show-batt',sddmCfg.showBattery!=='false'))}
-        ${renderRowItem('Mostrar Book Bar','Pastilla con rutina activa o batería',renderToggle('sddm-show-bb',sddmCfg.showBookBar!=='false'))}
-        <div class="detail-item detail-item-row">
-            <div class="detail-texts"><span class="dt">Previsualizar pantalla</span><span class="ds">Abre el greeter en modo prueba</span></div>
-            <button class="btn btn-secondary btn-sm" id="sddm-preview-btn">Previsualizar</button>
+    // La personalización profunda vive en su propia página (editor visual con
+    // manipulación directa). Aquí solo queda la puerta de entrada: mantener dos
+    // interfaces escribiendo el mismo theme.conf.user acabaría desincronizándolas.
+    const sddmHtml=renderSection('Personalización')+`<div class="detail-card">
+        <div class="detail-item detail-item-row" id="go-sddm-editor" style="cursor:pointer">
+            <div class="detail-texts">
+                <span class="dt">Personalizar la pantalla</span>
+                <span class="ds">Reloj, fondo, cuentas, BookBar y widgets · también en el acceso</span>
+            </div>${chevron()}
         </div>
     </div>`;
 
     const lockType=await getSetting('LockType','password').catch(()=>'password');
     const lockTypeLabel=lockType==='pin'?'PIN':'Contraseña del sistema';
+    const desktopPreview=`<div class="native-lock-preview" id="native-lock-preview"
+        style="--clock-y:${desktopCfg.reloj_y*100}%;--access-y:${desktopCfg.acceso_y*100}%;--media-y:${desktopCfg.medios_y*100}%;--clock-size:${desktopCfg.reloj_tamano*.34}px;--avatar-size:${desktopCfg.avatar_tamano*.32}px">
+        <div class="nlp-shade"></div>
+        <div class="nlp-clock"><strong>12:30</strong><span class="nlp-date" ${desktopCfg.fecha?'':'hidden'}>martes, 18 de agosto</span></div>
+        <div class="nlp-access"><div class="nlp-avatar">${esc((userInfo.display_name||'B').trim().charAt(0).toUpperCase()||'B')}</div><span>${esc(userInfo.display_name||'BookOS')}</span><div class="nlp-password"><i></i><i></i><i></i><b>→</b></div></div>
+        <div class="nlp-media" ${desktopCfg.medios?'':'hidden'}><div class="nlp-cover"></div><div class="nlp-song"><strong>Ahora suena</strong><span>BookOS Music</span><i></i><div>◀ &nbsp; ❚❚ &nbsp; ▶</div></div></div>
+        <button class="nlp-power" tabindex="-1">•••</button>
+    </div>`;
+    const nativeSlider=(id,title,min,max,value,step,label)=>`<div class="detail-item native-lock-slider"><div class="detail-texts"><span class="dt">${title}</span><span class="ds" id="${id}-value">${label(value)}</span></div><div class="slider-container"><input type="range" class="filled" id="${id}" min="${min}" max="${max}" step="${step}" value="${value}"></div></div>`;
+    const percent=v=>Math.round(v*100)+'% de la altura';
+    const pixels=v=>Math.round(v)+' px lógicos';
 
     c.innerHTML=renderHeader(t('hdr_lockscreen_aod'))+
         `<div class="themed-page">`+
+        renderSection('Pantalla de bloqueo de BookOS Desktop')+
+        `<div class="detail-card native-lock-editor">
+            <div class="native-lock-editor-head"><div><span class="dt">Vista previa adaptable</span><span class="ds">Las posiciones son proporcionales y mantienen el diseño en HiDPI y monitores grandes.</span></div><span class="native-live-state" id="native-live-state">Guardado</span></div>
+            ${desktopPreview}
+            <button class="btn btn-secondary btn-sm native-lock-reset" id="native-lock-reset">Restaurar diseño</button>
+        </div>`+
+        renderCard([
+            renderRowItem('Animaciones','Entrada escalonada, pulso al comprobar y error con movimiento',renderToggle('native-lock-animations',desktopCfg.animaciones)),
+            renderRowItem('Mostrar fecha','Fecha larga debajo del reloj',renderToggle('native-lock-date',desktopCfg.fecha)),
+            renderRowItem('Controles multimedia','Tarjeta MPRIS con progreso y reproducción',renderToggle('native-lock-media',desktopCfg.medios))
+        ])+
+        renderSection('Distribución')+
+        `<div class="detail-card native-lock-controls">
+            ${nativeSlider('native-clock-y','Posición del reloj',.02,.40,desktopCfg.reloj_y,.01,percent)}
+            ${nativeSlider('native-access-y','Posición del acceso',.18,.72,desktopCfg.acceso_y,.01,percent)}
+            ${nativeSlider('native-media-y','Posición de multimedia',.42,.88,desktopCfg.medios_y,.01,percent)}
+            ${nativeSlider('native-clock-size','Tamaño del reloj',72,220,desktopCfg.reloj_tamano,2,pixels)}
+            ${nativeSlider('native-avatar-size','Tamaño del avatar',64,220,desktopCfg.avatar_tamano,2,pixels)}
+        </div>`+
         renderCard([
             `<div class="detail-item detail-item-row" id="lock-type-row" style="cursor:pointer">
                 <div class="detail-texts"><span class="dt">Tipo de bloqueo</span><span class="ds" id="lock-type-label">${lockTypeLabel}</span></div>
@@ -2704,7 +2914,109 @@ export async function renderBloqueo(c){
             renderRowItem('Tema BookOS — SDDM (login)','Activa el tema BookOS al iniciar sesión',renderToggle('sddm-theme',sddmThemeOn))
         ])+sddmHtml+`</div>`;
 
+    // Editor de la pantalla de inicio. Delegado en el contenedor y colocado
+    // inmediatamente tras el innerHTML, para que una excepción en los
+    // manejadores de más abajo no deje la fila muerta y sin señal.
+    // El contenedor es un proxy NUEVO en cada navegación, y el de una visita
+    // anterior descarta sus escrituras en silencio. Como el listener se engancha
+    // una sola vez, no puede capturarlo: se guarda el vigente en el elemento
+    // real y se lee en el momento del clic.
+    c._sddmCurrentC=c;
+    if(!c._sddmNavBound){
+        c._sddmNavBound=true;
+        c.addEventListener('click',async ev=>{
+            if(!ev.target.closest('#go-sddm-editor'))return;
+            const cur=ev.currentTarget._sddmCurrentC||c;
+            try{
+                if(window.pushSubNav)window.pushSubNav(()=>renderBloqueo(cur));
+                window.clearPageIntervals?.();
+                await renderSddmEditor(cur);
+            }catch(e){
+                console.error('[sddm-editor]',e);
+                toast('No se pudo abrir: '+(e&&e.message||e),'❌');
+            }
+        });
+    }
+
     setupSlider('lt',async v=>{try{await tauriInvoke('set_lock_timeout',{minutes:parseInt(v)})}catch(e){}const l=document.getElementById('lt-l');if(l)l.textContent=v+' min';toast('Tiempo de espera: '+v+' min');},false);
+
+    // El editor nativo actualiza primero la maqueta y agrupa cambios rápidos en
+    // una sola escritura. El compositor relee el fichero por D-Bus si esta es
+    // una sesión BookOS; fuera de ella el ajuste queda listo para el próximo
+    // inicio sin marcarlo como error.
+    let nativeSaveTimer=0;
+    const updateNativePreview=()=>{
+        const p=document.getElementById('native-lock-preview');
+        if(!p)return;
+        p.style.setProperty('--clock-y',desktopCfg.reloj_y*100+'%');
+        p.style.setProperty('--access-y',desktopCfg.acceso_y*100+'%');
+        p.style.setProperty('--media-y',desktopCfg.medios_y*100+'%');
+        p.style.setProperty('--clock-size',desktopCfg.reloj_tamano*.34+'px');
+        p.style.setProperty('--avatar-size',desktopCfg.avatar_tamano*.32+'px');
+        p.querySelector('.nlp-date').hidden=!desktopCfg.fecha;
+        p.querySelector('.nlp-media').hidden=!desktopCfg.medios;
+        p.classList.toggle('no-motion',!desktopCfg.animaciones);
+        const values={
+            'native-clock-y-value':percent(desktopCfg.reloj_y),
+            'native-access-y-value':percent(desktopCfg.acceso_y),
+            'native-media-y-value':percent(desktopCfg.medios_y),
+            'native-clock-size-value':pixels(desktopCfg.reloj_tamano),
+            'native-avatar-size-value':pixels(desktopCfg.avatar_tamano),
+        };
+        for(const [id,value] of Object.entries(values)){const el=document.getElementById(id);if(el)el.textContent=value;}
+    };
+    const saveNative=()=>{
+        clearTimeout(nativeSaveTimer);
+        const state=document.getElementById('native-live-state');
+        if(state){state.textContent='Pendiente…';state.className='native-live-state saving';}
+        nativeSaveTimer=setTimeout(async()=>{
+            try{
+                const result=JSON.parse(await tauriInvoke('set_desktop_lockscreen_config',{config:desktopCfg}));
+                if(!result.ok)throw new Error(result.error||'No se pudo guardar');
+                desktopCfg={...desktopCfg,...result.config};
+                if(state){state.textContent=result.live?'Aplicado en vivo':'Guardado · próxima sesión';state.className='native-live-state '+(result.live?'live':'offline');}
+            }catch(e){
+                if(state){state.textContent='Error al guardar';state.className='native-live-state error';}
+                toast('No se pudo guardar el diseño del bloqueo','⚠️');
+            }
+        },180);
+    };
+    const bindNativeRange=(id,key,format)=>{
+        const el=document.getElementById(id);if(!el)return;
+        const sync=(persist=true)=>{
+            desktopCfg[key]=Number(el.value);
+            const pct=((el.value-el.min)/(el.max-el.min))*100;
+            el.style.setProperty('--fill',pct+'%');
+            const label=document.getElementById(id+'-value');if(label)label.textContent=format(desktopCfg[key]);
+            updateNativePreview();if(persist)saveNative();
+        };
+        el.addEventListener('input',()=>sync(true));sync(false);
+    };
+    bindNativeRange('native-clock-y','reloj_y',percent);
+    bindNativeRange('native-access-y','acceso_y',percent);
+    bindNativeRange('native-media-y','medios_y',percent);
+    bindNativeRange('native-clock-size','reloj_tamano',pixels);
+    bindNativeRange('native-avatar-size','avatar_tamano',pixels);
+    for(const id of ['native-lock-animations','native-lock-date','native-lock-media']){
+        const subtitle=document.querySelector(`[data-toggle="${id}"]`)?.closest('.detail-item-row')?.querySelector('.ds');
+        if(subtitle)subtitle.dataset.custom='true';
+    }
+    setupToggle('native-lock-animations',v=>{desktopCfg.animaciones=v;updateNativePreview();saveNative();});
+    setupToggle('native-lock-date',v=>{desktopCfg.fecha=v;updateNativePreview();saveNative();});
+    setupToggle('native-lock-media',v=>{desktopCfg.medios=v;updateNativePreview();saveNative();});
+    document.getElementById('native-lock-reset')?.addEventListener('click',()=>{
+        desktopCfg={..._desktopDefaults};
+        const ids={
+            'native-clock-y':'reloj_y','native-access-y':'acceso_y','native-media-y':'medios_y',
+            'native-clock-size':'reloj_tamano','native-avatar-size':'avatar_tamano'
+        };
+        for(const [id,key] of Object.entries(ids)){const el=document.getElementById(id);if(el){el.value=desktopCfg[key];el.dispatchEvent(new Event('input'));}}
+        for(const [id,key] of [['native-lock-animations','animaciones'],['native-lock-date','fecha'],['native-lock-media','medios']]){
+            const el=document.querySelector(`[data-toggle="${id}"]`);if(el){el.classList.toggle('active',desktopCfg[key]);el.setAttribute('aria-checked',desktopCfg[key]?'true':'false');}
+        }
+        updateNativePreview();saveNative();
+    });
+    updateNativePreview();
 
     // Lock type — anchored popover
     let _lockCur=lockType;
@@ -2827,270 +3139,50 @@ export async function renderBloqueo(c){
 
     setupToggle('aod',async a=>{setSetting('AOD',a?'true':'false');toast(a?'AOD activado':'AOD desactivado');});
     setupToggle('bookbar',async a=>{
-        setSetting('BookBarEnabled',a?'true':'false');
-        try{await tauriInvoke('run_command',{cmd:'sh',args:['-c',`mkdir -p "$HOME/.config" && echo '{"enabled":${a}}' > "$HOME/.config/bookos-bookbar.json"`]});}catch(e){}
-        toast(a?'Book Bar activada':'Book Bar desactivada');
+        const action=a?'activar':'desactivar';
+        const pwd=await showRootAuth('Permisos requeridos',
+            `Para ${action} Book Bar en el bloqueo y el acceso, introduce la contraseña del equipo.`);
+        let ok=false;
+        if(pwd!==null){
+            try{
+                const cfg={...JSON.parse(await tauriInvoke('get_sddm_config')),showBookBar:a?'true':'false'};
+                ok=JSON.parse(await tauriInvoke('set_sddm_config',{cfg:JSON.stringify(cfg),password:pwd})).ok;
+            }catch(e){ ok=false; }
+        }
+        if(ok){
+            setSetting('BookBarEnabled',a?'true':'false');
+            try{await tauriInvoke('run_command',{cmd:'sh',args:['-c',`mkdir -p "$HOME/.config" && echo '{"enabled":${a}}' > "$HOME/.config/bookos-bookbar.json"`]});}catch(e){}
+            toast(a?'Book Bar activada':'Book Bar desactivada');
+        } else {
+            toast('No se pudo actualizar Book Bar','⚠️');
+            setTimeout(()=>renderBloqueo(c),200);
+        }
     });
     // ── Tema BookOS lockscreen ──
     setupToggle('lock-theme',async a=>{
         const action=a?'activar':'desactivar';
-        const ok=await promptAuth(`${action} tema BookOS lockscreen`,async pwd=>{
+        const pwd=await showRootAuth('Permisos requeridos',
+            `Para ${action} el tema BookOS del bloqueo, introduce la contraseña del equipo.`);
+        let ok=false;
+        if(pwd!==null){
             const cmd=a?'install_lockscreen_theme':'uninstall_lockscreen_theme';
-            return JSON.parse(await tauriInvoke(cmd,{password:pwd}));
-        });
+            try{ ok=JSON.parse(await tauriInvoke(cmd,{password:pwd})).ok; }catch(e){ ok=false; }
+        }
         if(ok) toast(a?'Tema lockscreen activado':'Tema lockscreen desactivado','🔒');
         else { setTimeout(()=>renderBloqueo(c),200); }
     });
     // ── Tema BookOS SDDM ──
     setupToggle('sddm-theme',async a=>{
         const action=a?'activar':'desactivar';
-        const ok=await promptAuth(`${action} tema BookOS SDDM`,async pwd=>{
+        const pwd=await showRootAuth('Permisos requeridos',
+            `Para ${action} el tema BookOS de SDDM, introduce la contraseña del equipo.`);
+        let ok=false;
+        if(pwd!==null){
             const cmd=a?'install_sddm_theme':'uninstall_sddm_theme';
-            return JSON.parse(await tauriInvoke(cmd,{password:pwd}));
-        });
+            try{ ok=JSON.parse(await tauriInvoke(cmd,{password:pwd})).ok; }catch(e){ ok=false; }
+        }
         if(ok) toast(a?'Tema SDDM activado':'Tema SDDM desactivado','🚪');
         else { setTimeout(()=>renderBloqueo(c),200); }
-    });
-
-    // SDDM preview
-    let _sddmCfg={
-        variant:sddmCfg.variant,
-        background:sddmCfg.background,
-        bgImage:sddmCfg.bgImage,
-        accentColor:sddmCfg.accentColor,
-        clockFormat:sddmCfg.clockFormat,
-        clockFont:sddmCfg.clockFont,
-        blurRadius:sddmCfg.blurRadius,
-        showDate:sddmCfg.showDate,
-        showBattery:sddmCfg.showBattery,
-        showBookBar:sddmCfg.showBookBar
-    };
-    const _avatarUrl=userInfo.avatar_data
-        ||(userInfo.has_avatar&&userInfo.avatar_path
-            ?(window.__TAURI__?.core?.convertFileSrc?window.__TAURI__.core.convertFileSrc(userInfo.avatar_path):'')
-            :'');
-    const _displayName=userInfo.display_name||'Usuario';
-
-    function _renderSddmPreview(){
-        const wrap=document.getElementById('sddm-preview-wrap');
-        if(!wrap)return;
-        const dark=_sddmCfg.variant==='dark';
-        const bg=_sddmCfg.background;
-        const imgPath=_sddmCfg.bgImage;
-        const imgUrl=imgPath?(window.__TAURI__?.core?.convertFileSrc?window.__TAURI__.core.convertFileSrc(imgPath):`file://${imgPath}`):'';
-        const accent=_sddmCfg.accentColor||'#007AFF';
-        const blurPx=Math.max(0,Math.min(60,parseInt(_sddmCfg.blurRadius)||24))*0.6; // scale to preview size
-        const showDate=_sddmCfg.showDate!=='false';
-        const showBatt=_sddmCfg.showBattery!=='false';
-
-        const bgColor=dark?'#000':'#f2f2f7';
-        const fgColor=dark?'#fff':'#000';
-        const fg2=dark?'#8e8e93':'#8e8e93';
-        const fieldBg=dark?'#1c1c1e':'#fff';
-        const pillBg=dark?'rgba(28,28,30,.8)':'rgba(255,255,255,.8)';
-        const overlay=dark?'rgba(0,0,0,.5)':'rgba(255,255,255,.37)';
-        const now=new Date();
-        let clockStr;
-        if(_sddmCfg.clockFormat==='12h'){
-            const h12=((now.getHours()+11)%12)+1;
-            clockStr=h12+':'+String(now.getMinutes()).padStart(2,'0')+' '+(now.getHours()<12?'AM':'PM');
-        } else {
-            clockStr=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
-        }
-        const dateStr=now.toLocaleDateString('es-ES',{weekday:'long',day:'numeric',month:'long'});
-
-        // Background layers
-        let bgLayer='';
-        if(bg==='solid'||!imgUrl){
-            bgLayer=`<div style="position:absolute;inset:0;background:${bgColor}"></div>`;
-        } else if(bg==='image'){
-            bgLayer=`<div style="position:absolute;inset:0;background:url('${imgUrl}') center/cover no-repeat"></div>
-                     <div style="position:absolute;inset:0;background:${overlay}"></div>`;
-        } else { // blur
-            bgLayer=`<div style="position:absolute;inset:0;overflow:hidden">
-                <div style="position:absolute;inset:-${Math.max(20,blurPx*2)}px;background:url('${imgUrl}') center/cover no-repeat;filter:blur(${blurPx}px)"></div>
-            </div>
-            <div style="position:absolute;inset:0;background:${overlay}"></div>`;
-        }
-
-        wrap.innerHTML=`<div style="position:relative;width:100%;max-width:560px;margin:4px auto 14px;aspect-ratio:16/9;border-radius:18px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.35)">
-            ${bgLayer}
-            <!-- clock -->
-            <div style="position:absolute;top:7%;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:2px">
-                <div style="font-family:${_sddmCfg.clockFont==='mono'?'monospace':(_sddmCfg.clockFont==='sans'?'sans-serif':'serif')};font-size:clamp(18px,5vw,28px);font-weight:700;color:${fgColor};white-space:nowrap;text-shadow:0 1px 4px rgba(0,0,0,.4)">${clockStr}</div>
-                ${showDate?`<div style="font-size:9px;font-weight:500;color:${fgColor};opacity:.85;text-shadow:0 1px 3px rgba(0,0,0,.4)">${dateStr}</div>`:''}
-            </div>
-            <!-- avatar + name + password -->
-            <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:6px;width:80%">
-                ${_avatarUrl
-                    ?`<img src="${_avatarUrl}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;display:block">`
-                    :`<div style="width:40px;height:40px;border-radius:50%;background:${dark?'#2c2c2e':'#c7c7cc'};display:flex;align-items:center;justify-content:center;font-size:16px;color:${fg2};font-weight:600">${(_displayName[0]||'U').toUpperCase()}</div>`}
-                <div style="font-size:11px;font-weight:500;color:${fgColor}">${_displayName}</div>
-                <div style="display:flex;gap:4px;width:100%;max-width:160px;margin-top:2px">
-                    <div style="flex:1;height:20px;background:${fieldBg};border-radius:10px;display:flex;align-items:center;padding:0 8px">
-                        <div style="width:10px;height:10px;border-radius:50%;background:${accent};margin-left:auto"></div>
-                    </div>
-                    <div style="width:20px;height:20px;background:${dark?'#3a3a3c':'#e5e5ea'};border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:10px;color:${fgColor}">→</div>
-                </div>
-                <div style="display:flex;flex-direction:column;align-items:center;gap:3px;margin-top:3px">
-                    <div style="width:14px;height:14px;border-radius:50%;background:${accent}33;display:flex;align-items:center;justify-content:center">
-                        <div style="width:7px;height:7px;border-radius:50%;border:1.2px solid ${accent}"></div>
-                    </div>
-                    <div style="font-size:8px;color:${accent}">Coloca tu dedo en el lector</div>
-                </div>
-            </div>
-            <!-- battery pill -->
-            ${showBatt?`<div style="position:absolute;bottom:6%;left:50%;transform:translateX(-50%);background:${pillBg};border-radius:10px;padding:3px 10px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)">
-                <span style="font-size:9px;font-weight:600;color:${fgColor}">🔋 74%</span>
-            </div>`:''}
-        </div>`;
-    }
-    _renderSddmPreview();
-    // Save SDDM config. Sends an empty password so the backend goes straight to
-    // pkexec's native polkit dialog — a single, consistent auth prompt (no
-    // custom password modal that could double up with pkexec).
-    let _sddmSaving=false;
-    async function _sddmPromptAndSave(){
-        if(_sddmSaving)return; // avoid stacking dialogs from rapid toggles
-        _sddmSaving=true;
-        try{
-            const res=JSON.parse(await tauriInvoke('set_sddm_config',{
-                variant:_sddmCfg.variant,
-                background:_sddmCfg.background,
-                bgImage:_sddmCfg.bgImage,
-                accentColor:_sddmCfg.accentColor,
-                clockFormat:_sddmCfg.clockFormat,
-                clockFont:_sddmCfg.clockFont,
-                blurRadius:String(_sddmCfg.blurRadius),
-                showDate:_sddmCfg.showDate,
-                showBattery:_sddmCfg.showBattery,
-                showBookBar:_sddmCfg.showBookBar,
-                password:''
-            }));
-            if(res.ok){toast('Pantalla de inicio actualizada','🖥️');}
-            else{toast('Error: '+(res.error||'desconocido'),'❌');}
-        }catch(e){toast('Error al guardar configuración SDDM','❌');}
-        finally{_sddmSaving=false;}
-    }
-    setupToggle('sddm-dark',async dark=>{
-        _sddmCfg.variant=dark?'dark':'light';
-        _renderSddmPreview();
-        await _sddmPromptAndSave();
-    });
-    document.querySelectorAll('#sddm-bg-ctrl .seg-btn').forEach(btn=>{
-        btn.addEventListener('click',async()=>{
-            document.querySelectorAll('#sddm-bg-ctrl .seg-btn').forEach(b=>b.classList.remove('active'));
-            btn.classList.add('active');
-            _sddmCfg.background=btn.dataset.val;
-            const imgRow=document.getElementById('sddm-img-row');
-            if(imgRow)imgRow.style.display=_sddmCfg.background==='solid'?'none':'flex';
-            _renderSddmPreview();
-            await _sddmPromptAndSave();
-        });
-    });
-    document.getElementById('sddm-img-btn')?.addEventListener('click',async()=>{
-        try{
-            const {open}=window.__TAURI__.dialog;
-            const path=await open({filters:[{name:'Imagen',extensions:['png','jpg','jpeg','webp']}],multiple:false});
-            if(!path)return;
-            _sddmCfg.bgImage=path;
-            const nameEl=document.getElementById('sddm-img-name');
-            if(nameEl)nameEl.textContent=path.split('/').pop();
-            _renderSddmPreview();
-            await _sddmPromptAndSave();
-        }catch(e){toast('Error al seleccionar imagen','❌');}
-    });
-
-    // Show blur slider only when bg=blur
-    document.querySelectorAll('#sddm-bg-ctrl .seg-btn').forEach(btn=>{
-        btn.addEventListener('click',()=>{
-            const blurRow=document.getElementById('sddm-blur-row');
-            if(blurRow)blurRow.style.display=btn.dataset.val==='blur'?'flex':'none';
-        });
-    });
-
-    // Blur slider — debounced save
-    let _blurSaveTimer=null;
-    setupSlider('sddm-blur',v=>{
-        _sddmCfg.blurRadius=String(v);
-        const l=document.getElementById('sddm-blur-l');
-        if(l)l.textContent=v;
-        _renderSddmPreview();
-        clearTimeout(_blurSaveTimer);
-        _blurSaveTimer=setTimeout(()=>{ _sddmPromptAndSave(); }, 600);
-    },false);
-
-    // Clock format
-    document.querySelectorAll('#sddm-fmt-ctrl .seg-btn').forEach(btn=>{
-        btn.addEventListener('click',async()=>{
-            document.querySelectorAll('#sddm-fmt-ctrl .seg-btn').forEach(b=>b.classList.remove('active'));
-            btn.classList.add('active');
-            _sddmCfg.clockFormat=btn.dataset.val;
-            _renderSddmPreview();
-            await _sddmPromptAndSave();
-        });
-    });
-
-    // Accent color swatches
-    function _applyAccent(color){
-        _sddmCfg.accentColor=color;
-        document.querySelectorAll('#sddm-accent-swatches .sddm-swatch').forEach(s=>{
-            const match=s.dataset.color.toLowerCase()===color.toLowerCase();
-            s.classList.toggle('active',match);
-            s.style.borderColor=match?'var(--tx)':'transparent';
-        });
-        const custom=document.getElementById('sddm-accent-custom');
-        if(custom)custom.value=color;
-        _renderSddmPreview();
-    }
-    document.querySelectorAll('#sddm-accent-swatches .sddm-swatch').forEach(s=>{
-        s.addEventListener('click',async()=>{
-            _applyAccent(s.dataset.color);
-            await _sddmPromptAndSave();
-        });
-    });
-    let _accentSaveTimer=null;
-    document.getElementById('sddm-accent-custom')?.addEventListener('input',e=>{
-        _applyAccent(e.target.value);
-        clearTimeout(_accentSaveTimer);
-        _accentSaveTimer=setTimeout(()=>{ _sddmPromptAndSave(); }, 700);
-    });
-
-    // Preview button — launch sddm-greeter in test mode
-    document.getElementById('sddm-preview-btn')?.addEventListener('click',async()=>{
-        try{
-            const res=JSON.parse(await tauriInvoke('preview_sddm'));
-            if(res.ok)toast('Abriendo previsualización…','🖥️');
-            else toast('Error: '+(res.error||'desconocido'),'❌');
-        }catch(e){toast('Error al abrir la previsualización','❌');}
-    });
-
-    // Clock font
-    document.querySelectorAll('#sddm-font-ctrl .seg-btn').forEach(btn=>{
-        btn.addEventListener('click',async()=>{
-            document.querySelectorAll('#sddm-font-ctrl .seg-btn').forEach(b=>b.classList.remove('active'));
-            btn.classList.add('active');
-            _sddmCfg.clockFont=btn.dataset.val;
-            _renderSddmPreview();
-            await _sddmPromptAndSave();
-        });
-    });
-
-    // Show date / battery / bookbar toggles
-    setupToggle('sddm-show-date',async v=>{
-        _sddmCfg.showDate=v?'true':'false';
-        _renderSddmPreview();
-        await _sddmPromptAndSave();
-    });
-    setupToggle('sddm-show-batt',async v=>{
-        _sddmCfg.showBattery=v?'true':'false';
-        _renderSddmPreview();
-        await _sddmPromptAndSave();
-    });
-    setupToggle('sddm-show-bb',async v=>{
-        _sddmCfg.showBookBar=v?'true':'false';
-        _renderSddmPreview();
-        await _sddmPromptAndSave();
     });
 
     // Fingerprint enroll
@@ -3474,6 +3566,10 @@ async function promptAuth(opts={}){
         }
     });
 }
+
+// _common.js enruta sus propios diálogos (showRootAuth, invokeWithAuth) aquí:
+// el módulo no puede importar de pages.js sin ciclo, así que el puente es global.
+if(typeof window!=='undefined')window.promptAuth=promptAuth;
 
 // Backwards-compat shim: existing call-sites that just want a password string.
 async function promptUpdatePassword(distro){
@@ -4430,13 +4526,13 @@ export async function renderMantenimiento(c){
         try {
             const dest = await window.__TAURI__.dialog.save({defaultPath:'bookos_settings.json', filters:[{name:'JSON',extensions:['json']}]});
             if(dest) { await tauriInvoke('export_settings', {dest}); toast('Ajustes exportados a '+dest); }
-        } catch(e){}
+        } catch(e){ toast('No se pudieron exportar los ajustes','❌'); }
     });
     document.getElementById('m-imp')?.addEventListener('click', async()=>{
         try {
             const src = await window.__TAURI__.dialog.open({filters:[{name:'JSON',extensions:['json']}]});
             if(src) { await tauriInvoke('import_settings', {src}); toast('Ajustes importados'); setTimeout(()=>location.reload(), 1500); }
-        } catch(e){}
+        } catch(e){ toast('No se pudieron importar los ajustes','❌'); }
     });
 }
 
@@ -4445,8 +4541,14 @@ export async function renderMantenimiento(c){
 // ════════════════════════════════════════════════════════════════════════
 export async function renderFondos(c){
     c.innerHTML=renderHeader(t('hdr_wallpaper_style'))+renderSkeleton(2);
-    let wallpapers=[];
-    try{wallpapers=JSON.parse(await tauriInvoke('get_wallpapers'));}catch(e){}
+    let wallpapers=[],wpFailed=false;
+    // Si el backend falla, hay que distinguirlo de "no tienes fondos": antes
+    // los dos casos mostraban el mismo mensaje y no había forma de reintentar.
+    try{wallpapers=JSON.parse(await tauriInvoke('get_wallpapers'));}catch(e){wpFailed=true;}
+    if(wpFailed){
+        c.innerHTML=renderHeader(t('hdr_wallpaper_style'))+renderError('No se pudieron cargar los fondos de pantalla',{onRetry:()=>renderFondos(c)});
+        return;
+    }
     let current='';
     try{current=JSON.parse(await tauriInvoke('get_current_wallpaper')).path||'';}catch(e){}
 
@@ -4457,7 +4559,12 @@ export async function renderFondos(c){
     ]);}catch(e){}
 
     if(!wallpapers.length){
-        c.innerHTML=renderHeader(t('hdr_wallpaper_style'))+renderCard([renderInfoItem('No se encontraron fondos de pantalla','Añade imágenes a ~/Imágenes o /usr/share/wallpapers')]);
+        c.innerHTML=renderHeader(t('hdr_wallpaper_style'))+renderEmptyState(
+            '<svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="var(--tx2)" stroke-width="1.5"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="M21 16l-5-5-5 5-2-2-6 6"/></svg>',
+            'No se encontraron fondos de pantalla',
+            'Añade imágenes a ~/Imágenes o /usr/share/wallpapers',
+            {label:'Buscar de nuevo',onClick:()=>renderFondos(c)}
+        );
         return;
     }
 
@@ -4497,7 +4604,7 @@ export async function renderFondos(c){
     h += `<div class="wp-hero-card">
         <div class="wp-hero-name">${esc(currentWp.name)}</div>
         <div class="wp-desktop-screen" id="wp-screen">
-            <img src="${currentImg}" class="wp-desktop-bg" id="wp-screen-img" alt="" onerror="this.style.opacity='0'">
+            <img src="${currentImg}" class="wp-desktop-bg" id="wp-screen-img" alt="" decoding="async" onerror="this.style.opacity='0'">
             <div class="wp-top-bar" style="background:${panelBg};border-bottom:1px solid ${panelBorder}">
                 <span class="wp-top-bar-title" style="color:${panelTx2}">BookOS</span>
                 <div class="wp-top-bar-tray">
@@ -4512,10 +4619,35 @@ export async function renderFondos(c){
         <button class="wp-change-btn" id="btn-change-wp">${_tr("Cambiar fondo de pantalla")}</button>
         <div class="wp-palette-row" id="wps-palette">
             <div class="wp-palette-texts">
-                <span class="wp-palette-title">${_tr("Paleta de colores")}</span>
-                <span class="wp-palette-sub">${_tr("Ajusta colores según el fondo")}</span>
+                <span class="wp-palette-title">${_tr("Acento automático de Plasma")}</span>
+                <span class="wp-palette-sub">${_tr("Color de acento nativo de KDE según el fondo")}</span>
             </div>
             ${renderToggle('palette',colorPalette)}
+        </div>
+    </div>`;
+
+    // ── Paleta de colores dinámica de BookOS (Material-You-like) ──
+    // Antes vivía en Temas; tiene más sentido aquí porque la paleta sale
+    // del fondo de pantalla, no del tema claro/oscuro. Elegir NO aplica:
+    // solo repinta las maquetas de arriba. Solo se guarda con "Aplicar".
+    h += `<div class="theme-block" id="dyn-block">
+        <div class="dyn-mockups" id="dyn-mockups"></div>
+        ${renderRowItem('Paleta dinámica de BookOS','Tiñe las apps de BookOS con los colores de tu fondo',renderToggle('dyncolor',false))}
+        <div class="theme-block-divider" id="dyn-div" style="display:none"></div>
+        <div id="dyn-body" style="display:none">
+            ${renderRowItem('Aplicar paleta a los iconos','Recolorea los iconos de las apps con el tono elegido',renderToggle('dyniconos',false))}
+            ${renderRowItem('Aplicar paleta a Plasma/KDE','Tiñe KdeControlStation y el tema de escritorio con el esquema de color nativo',renderToggle('dynplasma',false))}
+            ${renderRowItem('Aplicar paleta a Kvantum','Tiñe apps Qt como Dolphin o Kate con el estilo Kvantum de BookOS',renderToggle('dynkvantum',false))}
+            ${renderRowItem('Aplicar paleta a la pantalla de bloqueo','Tiñe el acento de la pantalla de bloqueo y, si es posible, del saludo de inicio de sesión',renderToggle('dynlockscreen',false))}
+            <div class="theme-block-divider"></div>
+            <div class="dyn-tabs">
+                <button class="dyn-tab on" data-tab="wall">${_tr('Colores del fondo')}</button>
+                <button class="dyn-tab" data-tab="basic">${_tr('Colores básicos')}</button>
+            </div>
+            <div class="dyn-strips" id="dyn-strips"></div>
+            <div class="dyn-label">${_tr('Estilo')}</div>
+            <div class="dyn-styles" id="dyn-styles"></div>
+            <button class="dyn-apply" id="dyn-apply" disabled>${_tr('Aplicar')}</button>
         </div>
     </div>`;
 
@@ -4529,7 +4661,7 @@ export async function renderFondos(c){
                 const colorHash=w.name.split('').reduce((a,c)=>a+c.charCodeAt(0),0);
         const hue=colorHash%360;
         const fallback=`this.style.display='none';this.nextElementSibling.style.display='flex'`;
-        return `<div class="wallpaper-card ${isActive?'active':''}" data-path="${esc(w.path)}" tabindex="0" role="button" aria-pressed="${isActive}" aria-label="${esc(w.name)}"><img src="${imgUrl}" class="wp-card-img" loading="lazy" alt="" onerror="${fallback}"><div class="wp-card-placeholder" style="display:none;background:linear-gradient(135deg,hsl(${hue},50%,35%),hsl(${(hue+40)%360},60%,25%))"></div><span class="wp-name">${esc(w.name)}</span></div>`;
+        return `<div class="wallpaper-card ${isActive?'active':''}" data-path="${esc(w.path)}" tabindex="0" role="button" aria-pressed="${isActive}" aria-label="${esc(w.name)}"><img src="${imgUrl}" class="wp-card-img" loading="lazy" decoding="async" alt="" onerror="${fallback}"><div class="wp-card-placeholder" style="display:none;background:linear-gradient(135deg,hsl(${hue},50%,35%),hsl(${(hue+40)%360},60%,25%))"></div><span class="wp-name">${esc(w.name)}</span></div>`;
             }).join('')}
         </div>
     </div>`;
@@ -4570,11 +4702,15 @@ export async function renderFondos(c){
         fab.addEventListener('click',_addWallpapers);
         document.body.appendChild(fab);
         const grid=document.getElementById('wp-grid');
-        const app=document.getElementById('app');
+        // wp-grid es hijo directo de .detail-view: basta con childList sobre
+        // ese contenedor, sin subtree — igual que el observer de dyn-block.
+        // Con subtree:true sobre #app esto se disparaba en cada repintado del
+        // selector de paleta si la rejilla de fondos estaba abierta a la vez.
+        const detailView=document.querySelector('.detail-view');
         const obs=new MutationObserver(()=>{
             if(!grid||!document.body.contains(grid)){fab.remove();obs.disconnect();}
         });
-        if(app)obs.observe(app,{childList:true,subtree:true});
+        if(detailView)obs.observe(detailView,{childList:true});
     };
 
     document.getElementById('btn-change-wp')?.addEventListener('click',()=>{
@@ -4607,6 +4743,7 @@ export async function renderFondos(c){
     document.querySelectorAll('.wallpaper-card').forEach(card=>{
         const apply=async()=>{
             try{await tauriInvoke('set_wallpaper',{path:card.dataset.path});}catch(e){toast('Error al aplicar fondo','❌');return;}
+            _dynSeedsCache={wallpaper:'',seeds:[]}; // el fondo cambió: la caché de semillas ya no vale
             document.querySelectorAll('.wallpaper-card').forEach(x=>{x.classList.remove('active');x.setAttribute('aria-pressed','false');});
             card.classList.add('active');
             card.setAttribute('aria-pressed','true');
@@ -4617,6 +4754,320 @@ export async function renderFondos(c){
         };
         card.addEventListener('click',apply);
         card.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();apply();}});
+    });
+
+    setupDynamicColor(currentWp.path);
+}
+// ── Paleta de colores ────────────────────────────────────────────────────
+// Dos pasos, como en Android: se elige un color (del fondo o de la lista
+// básica) y el estilo con el que se desarrolla en paleta completa. Elegir solo
+// actualiza las maquetas de arriba; quien aplica de verdad es el botón.
+const _DYN_STYLES=[['vibrant','Vibrante'],['expressive','Expresivo'],['muted','Suave'],['neutral','Neutro']];
+// Semillas del último fondo leído — a nivel de módulo, no de la página, para
+// que sobreviva a un ir-y-volver a Fondos. Sin esto, cada visita con la
+// paleta ya activada volvía a lanzar ImageMagick (proceso + decodificar la
+// imagen) aunque el fondo no hubiera cambiado desde la última vez.
+let _dynSeedsCache={wallpaper:'',seeds:[]};
+// Colores básicos: los mismos tonos que ofrece BookOS en sus esquemas fijos,
+// para quien no quiera depender del fondo de pantalla.
+const _DYN_BASIC=['#007AFF','#34C759','#FF9500','#FF3B30','#AF52DE','#FF2D92','#5AC8FA','#8E8E93'];
+
+/** Tono HSL en grados de un #RRGGBB. Lo necesita set_icon_style, que tiñe por hue. */
+function _dynHue(hex){
+    const r=parseInt(hex.substr(1,2),16)/255,g=parseInt(hex.substr(3,2),16)/255,b=parseInt(hex.substr(5,2),16)/255;
+    const mx=Math.max(r,g,b),mn=Math.min(r,g,b),d=mx-mn;
+    if(d===0)return 210;
+    let h;
+    if(mx===r)h=((g-b)/d+(g<b?6:0));else if(mx===g)h=(b-r)/d+2;else h=(r-g)/d+4;
+    return h*60;
+}
+
+/** Tira vertical de tonos, como los swatches de Android. */
+function _dynStrip(p,seed,active){
+    const T=p.tones||{};
+    const band=(ramp,i)=>(T[ramp]&&T[ramp][i])||'#888';
+    // Cuatro bandas, no cinco: con la tira ya llenando el ancho del
+    // contenedor, una banda de más solo la hacía verse recargada.
+    // El tono 9 (95 de luminosidad) del neutro es casi blanco: contra una
+    // tarjeta blanca/gris clara la última banda desaparecía. El 6 (70) se ve
+    // siempre, tema claro u oscuro, fondo blanco o gris.
+    const bands=[band('primary',7),band('tertiary',5),band('secondary',3),band('neutral',6)];
+    return `<button class="dyn-strip${active?' on':''}" data-seed="${seed}">
+        ${bands.map(c=>`<i style="background:${c}"></i>`).join('')}
+        <span class="dyn-strip-check">✓</span>
+    </button>`;
+}
+
+/** Tres maquetas con la paleta elegida: panel, lista y teclado numérico. */
+function _dynMockups(r){
+    if(!r)return '';
+    const a=r.blue,a2=r['accent-2']||a,a3=r['accent-3']||a;
+    const pill=(w,c)=>`<i class="mk-pill" style="width:${w}%;background:${c}"></i>`;
+    return `
+    <div class="dyn-mock" style="background:${r.bg}">
+        <div class="mk-card" style="background:${r.card}">
+            <div class="mk-row"><i class="mk-dot" style="background:${a}"></i>${pill(58,r.toff)}</div>
+            <div class="mk-row"><i class="mk-dot" style="background:${a2}"></i>${pill(44,r.toff)}</div>
+        </div>
+        <div class="mk-card" style="background:${r.card}">
+            <div class="mk-row"><i class="mk-dot" style="background:${a3}"></i>${pill(66,r.toff)}</div>
+            <div class="mk-slider" style="background:${r.toff}"><i style="width:62%;background:${a}"></i></div>
+            <div class="mk-slider" style="background:${r.toff}"><i style="width:38%;background:${a2}"></i></div>
+        </div>
+        <div class="mk-card" style="background:${r.card}">
+            <div class="mk-row">${pill(48,r.toff)}<i class="mk-sw" style="background:${a}"></i></div>
+            <div class="mk-row">${pill(60,r.toff)}<i class="mk-sw" style="background:${r.toff}"></i></div>
+        </div>
+    </div>
+    <div class="dyn-mock" style="background:${r.bg}">
+        <div class="mk-title" style="color:${a}">Ajustes</div>
+        <div class="mk-card" style="background:${r.card}">
+            ${[0,1,2].map(i=>`<div class="mk-row"><i class="mk-dot" style="background:${[a,a2,a3][i]}"></i>${pill([70,54,62][i],r.toff)}</div>`).join('')}
+        </div>
+        <div class="mk-card" style="background:${r.card}">
+            ${[0,1,2,3].map(i=>`<div class="mk-row"><i class="mk-dot" style="background:${[a2,a3,a,a2][i]}"></i>${pill([58,66,50,62][i],r.toff)}</div>`).join('')}
+        </div>
+    </div>
+    <div class="dyn-mock" style="background:${r.bg}">
+        <div class="mk-num" style="color:${r.tx}">1260</div>
+        <div class="mk-keys">
+            ${[0,1,2,3,4,5,6,7].map(()=>`<i style="background:${r.card}"></i>`).join('')}
+            <i style="background:${a}"></i>
+        </div>
+    </div>
+    <div class="dyn-mock" style="background:${r.bg}">
+        <div class="mk-card" style="background:${r.card}">
+            <div class="mk-chips">
+                <i class="mk-chip" style="background:${a}">Notas</i>
+                <i class="mk-chip" style="background:${a2}">Fotos</i>
+                <i class="mk-chip" style="background:${a3}">Reloj</i>
+            </div>
+        </div>
+        <div class="mk-card" style="background:${r.card}">
+            <div class="mk-row"><i class="mk-dot" style="background:${a}"></i>${pill(50,r.toff)}<i class="mk-toggle" style="background:${a}"></i></div>
+            <div class="mk-row"><i class="mk-dot" style="background:${r.toff}"></i>${pill(62,r.toff)}<i class="mk-toggle off" style="background:${r.toff}"></i></div>
+        </div>
+    </div>`;
+}
+
+async function setupDynamicColor(current){
+    const body=document.getElementById('dyn-body');
+    const div=document.getElementById('dyn-div');
+    const stripsEl=document.getElementById('dyn-strips');
+    const stylesEl=document.getElementById('dyn-styles');
+    const mockEl=document.getElementById('dyn-mockups');
+    const applyBtn=document.getElementById('dyn-apply');
+    if(!body||!stripsEl||!stylesEl||!mockEl||!applyBtn)return;
+
+    let seeds=[];                       // colores sacados del fondo
+    let tab='wall';
+    let sel={seed:'',style:'vibrant'};  // elección en curso (aún sin aplicar)
+    let applied={seed:'',style:''};     // lo que está puesto de verdad
+    let previewCache={};                // "seed|style" → paleta, para no repetir IPC
+
+    const show=on=>{body.style.display=on?'block':'none';div.style.display=on?'block':'none';};
+    const isDark=()=>document.documentElement.classList.contains('dark-mode');
+    const colors=()=>tab==='wall'?seeds:_DYN_BASIC;
+
+    const preview=async(seed,style)=>{
+        const k=seed+'|'+style;
+        if(previewCache[k])return previewCache[k];
+        try{
+            const p=JSON.parse(await tauriInvoke('dynamic_color_preview',{seed,style}));
+            previewCache[k]=p;
+            return p;
+        }catch(e){return null;}
+    };
+
+    // Las maquetas y las tiras se redibujan juntas: comparten la misma paleta
+    // y pedirla dos veces por separado dejaría un parpadeo entre ambas.
+    const repaint=async()=>{
+        const list=colors();
+        const pals=await Promise.all(list.map(s=>preview(s,sel.style)));
+        stripsEl.innerHTML=list.map((s,i)=>pals[i]?_dynStrip(pals[i],s,s===sel.seed):'').join('');
+        stripsEl.querySelectorAll('.dyn-strip').forEach(b=>b.addEventListener('click',()=>{
+            sel.seed=b.dataset.seed;
+            repaint();
+        }));
+
+        const cur=await preview(sel.seed,sel.style);
+        mockEl.innerHTML=_dynMockups(cur?(isDark()?cur.dark:cur.light):null);
+        // Previsualización de verdad: tiñe Ajustes entero mientras se elige,
+        // no solo las maquetas de arriba. Nada se escribe a disco aquí, así
+        // que otras apps de BookOS no se enteran hasta que se pulse "Aplicar".
+        if(cur)previewPaletteCss(paletteToCss(cur));
+
+        // Antes esto era un cuadro pálido casi vacío con tres puntos diminutos
+        // flotando en medio — apenas se notaba la diferencia entre estilos. La
+        // ficha ahora ES el color: mismas bandas que las tiras de semilla de
+        // arriba, para comparar de un vistazo qué tan saturado sale cada uno.
+        const styleCards=await Promise.all(_DYN_STYLES.map(async([id,label])=>{
+            const p=await preview(sel.seed,id);
+            if(!p)return '';
+            const T=p.tones||{};
+            const band=(ramp,i)=>(T[ramp]&&T[ramp][i])||'#888';
+            // El tono 9 (95 de luminosidad) del neutro es casi blanco: contra una
+    // tarjeta blanca/gris clara la última banda desaparecía. El 6 (70) se ve
+    // siempre, tema claro u oscuro, fondo blanco o gris.
+    const bands=[band('primary',7),band('tertiary',5),band('secondary',3),band('neutral',6)];
+            return `<button class="dyn-style${id===sel.style?' on':''}" data-style="${id}">
+                <span class="dyn-style-preview">${bands.map(c=>`<i style="background:${c}"></i>`).join('')}</span>
+                <span class="dyn-style-label">${_tr(label)}</span>
+            </button>`;
+        }));
+        stylesEl.innerHTML=styleCards.join('');
+        stylesEl.querySelectorAll('.dyn-style').forEach(b=>b.addEventListener('click',()=>{
+            sel.style=b.dataset.style;
+            repaint();
+        }));
+
+        // El botón solo se enciende si hay algo nuevo que aplicar.
+        applyBtn.disabled=!sel.seed||(sel.seed===applied.seed&&sel.style===applied.style);
+    };
+
+    // Extraer los colores del fondo pasa por ImageMagick: fuera del camino de
+    // pintado de la página.
+    const loadSeeds=async()=>{
+        // Fondo sin cambiar desde la última lectura: nos ahorramos el viaje a
+        // ImageMagick por completo.
+        if(_dynSeedsCache.seeds.length&&_dynSeedsCache.wallpaper===current){
+            seeds=_dynSeedsCache.seeds;
+            if(!seeds.includes(sel.seed))sel.seed=seeds[0];
+            return true;
+        }
+        stripsEl.innerHTML=`<span class="dyn-hint">${_tr('Leyendo el fondo de pantalla…')}</span>`;
+        try{
+            const r=JSON.parse(await tauriInvoke('dynamic_color_seeds',{path:null}));
+            if(!r.ok||!r.seeds?.length){
+                stripsEl.innerHTML=`<span class="dyn-hint">${_tr('No se pudo leer el fondo de pantalla')}</span>`;
+                return false;
+            }
+            seeds=r.seeds;
+            _dynSeedsCache={wallpaper:r.wallpaper||current,seeds};
+            if(!seeds.includes(sel.seed))sel.seed=seeds[0];
+            return true;
+        }catch(e){
+            stripsEl.innerHTML=`<span class="dyn-hint">${_tr('No se pudo leer el fondo de pantalla')}</span>`;
+            return false;
+        }
+    };
+
+    // Los iconos son ~8k SVG reescritos: se tocan solo al aplicar, y solo si el
+    // interruptor lo pide.
+    const applyIcons=async seed=>{
+        if(!document.querySelector('[data-toggle="dyniconos"]')?.classList.contains('active'))return;
+        try{
+            await tauriInvoke('set_icon_style',{mode:'tinted',hue:_dynHue(seed),strength:45,
+                dark:isDark(),tintBase:true,tintLogo:false,logoHue:_dynHue(seed)});
+            localStorage.setItem('bookos_icon_style','tinted');
+        }catch(e){}
+    };
+
+    applyBtn.addEventListener('click',async()=>{
+        applyBtn.disabled=true;
+        try{
+            const r=JSON.parse(await tauriInvoke('dynamic_color_apply',{seed:sel.seed,style:sel.style}));
+            if(r.ok){
+                installPaletteCss(paletteToCss(r.palette));
+                applied={seed:sel.seed,style:sel.style};
+                applyIcons(sel.seed);
+                toast(_tr('Paleta aplicada'));
+                repaint();
+            }else{toast(_tr('No se pudo aplicar la paleta'),'❌');repaint();}
+        }catch(e){toast(_tr('No se pudo aplicar la paleta'),'❌');repaint();}
+    });
+
+    document.querySelectorAll('.dyn-tab').forEach(b=>b.addEventListener('click',()=>{
+        document.querySelectorAll('.dyn-tab').forEach(x=>x.classList.remove('on'));
+        b.classList.add('on');
+        tab=b.dataset.tab;
+        const list=colors();
+        if(!list.includes(sel.seed))sel.seed=list[0]||'';
+        repaint();
+    }));
+
+    let st=null;
+    try{st=JSON.parse(await tauriInvoke('dynamic_color_state'));}catch(e){}
+    if(st){
+        sel={seed:st.seed||'',style:st.style||'vibrant'};
+        applied={seed:st.seed||'',style:st.style||''};
+        const tg=document.querySelector('[data-toggle="dyncolor"]');
+        if(tg&&st.enabled){tg.classList.add('active');tg.setAttribute('aria-checked','true');}
+        const ti=document.querySelector('[data-toggle="dyniconos"]');
+        if(ti&&localStorage.getItem('bookos_dyn_icons')==='1'){ti.classList.add('active');ti.setAttribute('aria-checked','true');}
+        const tp=document.querySelector('[data-toggle="dynplasma"]');
+        if(tp&&st.plasma){tp.classList.add('active');tp.setAttribute('aria-checked','true');}
+        const tk=document.querySelector('[data-toggle="dynkvantum"]');
+        if(tk&&st.kvantum){tk.classList.add('active');tk.setAttribute('aria-checked','true');}
+        const tl=document.querySelector('[data-toggle="dynlockscreen"]');
+        if(tl&&st.lockscreen){tl.classList.add('active');tl.setAttribute('aria-checked','true');}
+        show(!!st.enabled);
+        if(st.enabled){ if(await loadSeeds()) await repaint(); }
+    }
+
+    // Deshace la previsualización si se sale de la página (o se apaga el
+    // interruptor) sin pulsar "Aplicar": vuelve a lo que estaba puesto de
+    // verdad, no a los colores por defecto de la app.
+    const revertPreview=async()=>{
+        if(applied.seed){
+            const p=await preview(applied.seed,applied.style);
+            installPaletteCss(p?paletteToCss(p):'');
+        }else{
+            installPaletteCss('');
+        }
+    };
+
+    setupToggle('dyncolor',async on=>{
+        show(on);
+        if(on){
+            if(await loadSeeds())await repaint();
+            try{await tauriInvoke('dynamic_color_set_enabled',{enabled:true});}catch(e){}
+        }else{
+            try{await tauriInvoke('dynamic_color_set_enabled',{enabled:false});}catch(e){}
+            installPaletteCss('');
+            applied={seed:'',style:''};
+            toast(_tr('Paleta de colores desactivada'));
+        }
+    });
+
+    // #dyn-block es hijo DIRECTO de .detail-view (el contenedor `c` que usa el
+    // router para pintar cada página con `c.innerHTML=...`). Observar solo sus
+    // hijos directos —sin `subtree`— detecta esa navegación con un único
+    // mutation record, sin dispararse en cada repintado interno de la propia
+    // previsualización (que solo toca nietos: #dyn-strips, #dyn-styles…).
+    // Con `subtree:true` sobre #app, cada clic de semilla/estilo mientras se
+    // previsualiza disparaba el observer de todas formas: eso era el
+    // "rendimiento raro" de esta página.
+    const detailView=document.querySelector('.detail-view');
+    if(detailView){
+        const leaveObs=new MutationObserver(()=>{
+            if(!document.body.contains(body)){
+                if(sel.seed!==applied.seed||sel.style!==applied.style)revertPreview();
+                leaveObs.disconnect();
+            }
+        });
+        leaveObs.observe(detailView,{childList:true});
+    }
+    // Solo recuerda la preferencia: teñir 8k iconos al pulsar un interruptor,
+    // sin haber elegido paleta todavía, sería trabajo tirado.
+    setupToggle('dyniconos',async on=>{
+        localStorage.setItem('bookos_dyn_icons',on?'1':'0');
+        if(on&&applied.seed)applyIcons(applied.seed);
+    });
+    // Esquema de color nativo de Plasma: aparte de los iconos, independiente
+    // (se puede querer uno sin el otro). Al encenderlo con una paleta ya
+    // aplicada, la reescribe para generar+aplicar el .colors de una vez.
+    setupToggle('dynplasma',async on=>{
+        try{await tauriInvoke('dynamic_color_set_plasma',{enabled:on});}catch(e){}
+        toast(on?_tr('Paleta aplicada a Plasma/KDE'):_tr('Paleta de Plasma/KDE desactivada'));
+    });
+    setupToggle('dynkvantum',async on=>{
+        try{await tauriInvoke('dynamic_color_set_kvantum',{enabled:on});}catch(e){}
+        toast(on?_tr('Paleta aplicada a Kvantum'):_tr('Paleta de Kvantum desactivada'));
+    });
+    setupToggle('dynlockscreen',async on=>{
+        try{await tauriInvoke('dynamic_color_set_lockscreen',{enabled:on});}catch(e){}
+        toast(on?_tr('Paleta aplicada a la pantalla de bloqueo'):_tr('Paleta de la pantalla de bloqueo desactivada'));
     });
 }
 
@@ -7330,6 +7781,8 @@ export async function renderPowerAdvanced(c){
 
 // ── Pantallas externas (kscreen-doctor) ────────────────────────────────
 export async function renderExternalDisplays(c){
+    // En sesión BookOS manda el compositor; kscreen-doctor no se llama siquiera.
+    if(await bookosDesktopReady())return renderPantallasBookOS(c);
     const title=_tr('Pantallas externas');
     c.innerHTML=renderHeader(title)+renderSkeleton(2);
 
@@ -7473,6 +7926,208 @@ export async function renderExternalDisplays(c){
             if(await apply([`output.${o.name}.priority.1`]))rerender();
         });
     });
+}
+
+
+// ── Pantallas, gestionadas por BookOS Desktop ───────────────────────────
+// Mismo diseño que la página de KScreen —las mismas tarjetas, filas y
+// popovers— pero hablando con el compositor. Lo que cambia es que aquí un
+// fallo se ve: cada acción enseña «aplicando…» y termina en aplicado o en el
+// error que devolvió el compositor, nunca en un éxito supuesto.
+export async function renderPantallasBookOS(c){
+    const title=_tr('Pantallas');
+    c.innerHTML=renderHeader(title)+renderSkeleton(2);
+
+    const [outs,caps]=await Promise.all([bkGetOutputs(),bkCapabilities()]);
+    const rerender=()=>renderPantallasBookOS(c);
+    // Toda acción reescribe la configuración entera y vuelve a dibujar con lo
+    // que diga el censo nuevo: así lo que se ve es el estado real y no lo que
+    // se pidió.
+    const aplicar=async(id,cambios)=>{
+        bkToast('pendiente',_tr('Aplicando')+'…');
+        const r=await bkApply(bkPeticiones(outs,id,cambios));
+        if(!r.ok){bkToast('error',r.error||_tr('Error al aplicar'));return false;}
+        bkToast('aplicado',_tr('Aplicado'));
+        rerender();
+        return true;
+    };
+
+    let h=renderHeader(title);
+    if(!outs.length){
+        h+=renderCard([`<div class="detail-item"><span class="dt">${_tr('No se detectó ninguna pantalla')}</span></div>`]);
+        c.innerHTML=h;
+        return;
+    }
+
+    const principal=outs.find(o=>o.principal&&o.activa)||outs.find(o=>o.activa)||outs[0];
+    const activas=outs.filter(o=>o.activa).length;
+
+    outs.forEach((o,idx)=>{
+        const p=`bk${idx}`;
+        const m=bkModoActual(o);
+        const hz=bkHz(m);
+        const nombre=[o.fabricante,o.modelo].filter(Boolean).join(' ')||o.conector;
+        const rows=[];
+        rows.push(renderRowItem(esc(nombre),esc(o.conector)+(o.mm_ancho?` · ${o.mm_ancho}×${o.mm_alto} mm`:''),
+            renderToggle(`${p}-en`,o.activa)));
+        if(o.activa){
+            rows.push(`<div class="detail-item" style="cursor:pointer" id="${p}-res">
+                <span class="dt">${_tr('Resolución')}</span>
+                <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px">${esc(bkRes(m))}</span>${chevron()}</div>
+            </div>`);
+            rows.push(`<div class="detail-item" style="cursor:pointer" id="${p}-hz">
+                <span class="dt">${_tr('Frecuencia de actualización')}</span>
+                <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px">${hz} Hz</span>${chevron()}</div>
+            </div>`);
+            rows.push(`<div class="detail-item" style="cursor:pointer" id="${p}-scale">
+                <span class="dt">${_tr('Escala')}</span>
+                <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px">${Math.round(o.escala*100)}% · ${o.logico_ancho}×${o.logico_alto}</span>${chevron()}</div>
+            </div>`);
+            if(caps.rotation)rows.push(`<div class="detail-item" style="cursor:pointer" id="${p}-rot">
+                <span class="dt">${_tr('Rotación')}</span>
+                <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px">${esc(_tr(_bkRotLabel(o.transformacion)))}</span>${chevron()}</div>
+            </div>`);
+            if(o.vrr_capaz)rows.push(renderRowItem(_tr('Frecuencia variable'),
+                _tr('Ajusta el refresco al contenido; ahorra batería'),renderToggle(`${p}-vrr`,o.vrr)));
+            if(o!==principal)rows.push(`<div class="detail-item" style="cursor:pointer" id="${p}-pos">
+                <span class="dt">${_tr('Posición')}</span>
+                <div style="display:flex;align-items:center;gap:6px"><span style="color:var(--blue);font-size:14px">${esc(_bkPosLabel(o,principal))}</span>${chevron()}</div>
+            </div>`);
+            if(!o.principal)rows.push(`<div class="detail-item" style="cursor:pointer" id="${p}-primary"><span class="dt" style="color:var(--blue)">${_tr('Establecer como principal')}</span></div>`);
+            const aviso=bkAvisoFluidez(o.escala,hz);
+            if(aviso)rows.push(`<div class="detail-item"><span class="ds">⚠︎ ${esc(aviso)}</span></div>`);
+        }
+        h+=renderSection(o.principal?_tr('Pantalla principal'):(o.activa?_tr('Pantalla'):_tr('Pantalla desconectada del escritorio')));
+        h+=renderCard(rows);
+    });
+
+    if(caps.multi_output===false&&outs.length>1){
+        h+=renderCard([`<div class="detail-item"><span class="ds">${_tr('Esta versión del escritorio dibuja en una sola pantalla a la vez. Las demás se detectan y se pueden consultar, pero todavía no encenderse.')}</span></div>`]);
+    }
+    c.innerHTML=h;
+
+    outs.forEach((o,idx)=>{
+        const p=`bk${idx}`;
+        const m=bkModoActual(o);
+        setupToggle(`${p}-en`,async a=>{
+            // La comprobación de aquí es cortesía: quien decide de verdad es el
+            // compositor, que rechaza cualquier configuración sin una pantalla
+            // encendida. Adelantarla evita el viaje al bus y da mejor mensaje.
+            if(!a&&activas<=1){bkToast('error',_tr('No puedes apagar la única pantalla encendida'));rerender();return;}
+            if(!await aplicar(o.id,{activa:a}))rerender();
+        });
+        document.getElementById(`${p}-res`)?.addEventListener('click',e=>{
+            const vistas=[...new Set((o.modos||[]).map(x=>`${x.ancho}x${x.alto}`))];
+            popoverSelect(e.currentTarget,{
+                title:_tr('Resolución'),
+                options:vistas.map(r=>({val:r,label:r})),
+                current:bkRes(m),
+                onSelect:async v=>{
+                    const [w,hh]=v.split('x').map(Number);
+                    const cand=(o.modos||[]).filter(x=>x.ancho===w&&x.alto===hh)
+                        .sort((a,b)=>(bkHz(b)===bkHz(m)?1:0)-(bkHz(a)===bkHz(m)?1:0)||b.refresco_mhz-a.refresco_mhz)[0];
+                    if(!cand){bkToast('error',_tr('Ese modo no existe en esta pantalla'));return;}
+                    await aplicar(o.id,{ancho:cand.ancho,alto:cand.alto,refresco_mhz:cand.refresco_mhz});
+                },
+            });
+        });
+        document.getElementById(`${p}-hz`)?.addEventListener('click',e=>{
+            // Solo los refrescos de la resolución puesta: cambiar las dos cosas
+            // a la vez desde un mismo menú es como se acaba pidiendo un modo
+            // que no existe.
+            const mismos=(o.modos||[]).filter(x=>x.ancho===m.ancho&&x.alto===m.alto)
+                .sort((a,b)=>b.refresco_mhz-a.refresco_mhz);
+            popoverSelect(e.currentTarget,{
+                title:_tr('Frecuencia de actualización'),
+                options:mismos.map(x=>({val:String(x.refresco_mhz),label:bkHz(x)+' Hz',
+                    sub:bkAvisoFluidez(o.escala,bkHz(x))||undefined})),
+                current:String(m.refresco_mhz),
+                onSelect:async v=>{await aplicar(o.id,{ancho:m.ancho,alto:m.alto,refresco_mhz:parseInt(v)});},
+            });
+        });
+        document.getElementById(`${p}-scale`)?.addEventListener('click',e=>{
+            const escalas=(o.escalas?.length?o.escalas:[1,1.25,1.5,1.75,2]);
+            popoverSelect(e.currentTarget,{
+                title:_tr('Escala'),
+                options:escalas.map(x=>{
+                    const [lw,lh]=_bkLogico(m,x,o.transformacion);
+                    return {val:String(x),label:Math.round(x*100)+'%',right:`${lw}×${lh}`,
+                        sub:bkAvisoFluidez(x,bkHz(m))||undefined};
+                }),
+                current:String(o.escala),
+                onSelect:async v=>{await aplicar(o.id,{escala:parseFloat(v)});},
+            });
+        });
+        document.getElementById(`${p}-rot`)?.addEventListener('click',e=>{
+            popoverSelect(e.currentTarget,{
+                title:_tr('Rotación'),
+                options:['normal','90','180','270'].map(x=>({val:x,label:_tr(_bkRotLabel(x))})),
+                current:o.transformacion,
+                onSelect:async v=>{await aplicar(o.id,{transformacion:v});},
+            });
+        });
+        setupToggle(`${p}-vrr`,async a=>{
+            if(!await aplicar(o.id,{vrr:a}))rerender();
+        });
+        document.getElementById(`${p}-pos`)?.addEventListener('click',e=>{
+            const [pw,ph]=[principal.logico_ancho,principal.logico_alto];
+            const [ow,oh]=_bkLogico(m,o.escala,o.transformacion);
+            popoverSelect(e.currentTarget,{
+                title:_tr('Posición'),
+                options:[
+                    {val:'right',label:_tr('A la derecha')},
+                    {val:'left',label:_tr('A la izquierda')},
+                    {val:'above',label:_tr('Arriba')},
+                    {val:'below',label:_tr('Abajo')},
+                    {val:'mirror',label:_tr('Duplicar pantalla')},
+                ],
+                current:'',
+                onSelect:async v=>{
+                    // Las posiciones son del conjunto: se recolocan las dos, y
+                    // la principal se ancla al origen para que el escritorio no
+                    // se vaya a coordenadas negativas.
+                    const destino=v==='mirror'?{x:principal.x,y:principal.y}
+                        :v==='left'?{x:principal.x-ow,y:principal.y}
+                        :v==='above'?{x:principal.x,y:principal.y-oh}
+                        :v==='below'?{x:principal.x,y:principal.y+ph}
+                        :{x:principal.x+pw,y:principal.y};
+                    bkToast('pendiente',_tr('Aplicando')+'…');
+                    const r=await bkApply(bkPeticiones(outs,o.id,destino));
+                    if(!r.ok){bkToast('error',r.error||_tr('Error al aplicar'));return;}
+                    bkToast('aplicado',_tr('Aplicado'));
+                    rerender();
+                },
+            });
+        });
+        document.getElementById(`${p}-primary`)?.addEventListener('click',async()=>{
+            bkToast('pendiente',_tr('Aplicando')+'…');
+            const r=await bkApply(bkPeticionesPrincipal(outs,o.id));
+            if(!r.ok){bkToast('error',r.error||_tr('Error al aplicar'));return;}
+            bkToast('aplicado',_tr('Aplicado'));
+            rerender();
+        });
+    });
+}
+
+function _bkRotLabel(t){
+    return {normal:'Sin rotar','90':'90°','180':'180°','270':'270°'}[t]||t;
+}
+
+function _bkLogico(m,escala,transformacion){
+    if(!m)return [0,0];
+    const gira=['90','270','flipped-90','flipped-270'].includes(transformacion);
+    const w=gira?m.alto:m.ancho,h=gira?m.ancho:m.alto;
+    // Hacia arriba, igual que el compositor: si aquí se redondease al más
+    // próximo, la posición calculada para «a la derecha» dejaría una columna de
+    // un píxel sin cubrir y el compositor lo rechazaría por solape.
+    return [Math.ceil(w/escala),Math.ceil(h/escala)];
+}
+
+function _bkPosLabel(o,principal){
+    const dx=o.x-principal.x,dy=o.y-principal.y;
+    if(dx===0&&dy===0)return _tr('Duplicada');
+    if(Math.abs(dy)>Math.abs(dx))return dy<0?_tr('Arriba'):_tr('Abajo');
+    return dx<0?_tr('A la izquierda'):_tr('A la derecha');
 }
 
 // ── Touchpad y ratón (KWin libinput vía DBus) — página del sidebar ─────
@@ -7859,14 +8514,67 @@ export async function renderEmergencia(c){
 }
 
 // ── Pantalla de inicio ────────────────────────────────────────────────────
+
+// BookOS: la configuración del dock vive dentro del applet icontasks del panel,
+// no en un rc suelto. Escribirla con kwriteconfig6 no la aplicaría hasta
+// reiniciar plasmashell, así que pasamos por la consola de scripts, que escribe
+// y recarga el applet en vivo.
+// El panel del dock es el que lleva el icontasks; `dockWidgets` recoge además
+// el Launchpad, que replica el mismo reposo encogido para no verse más grande.
+const DOCK_SCRIPT_HEAD=`
+var dockPanel = null;
+var dockWidgets = [];
+panels().forEach(function(p){
+    p.widgetIds.forEach(function(id){
+        var w = p.widgetById(id);
+        if (!w) { return; }
+        if (w.type === "org.kde.plasma.icontasks") {
+            if (!dockPanel) { dockPanel = p; }
+            w.currentConfigGroup = ["General"];
+            dockWidgets.push(w);
+        } else if (w.type === "com.bookos.launchpad") {
+            w.currentConfigGroup = ["General"];
+            dockWidgets.push(w);
+        }
+    });
+});
+`;
+async function dockScript(body){
+    try{
+        const r=JSON.parse(await tauriInvoke('run_command',{cmd:'qdbus6',args:[
+            'org.kde.plasmashell','/PlasmaShell','org.kde.PlasmaShell.evaluateScript',
+            DOCK_SCRIPT_HEAD+body,
+        ]}));
+        return (r.output||'').trim();
+    }catch(e){return '';}
+}
+// readConfig devuelve '' cuando la clave nunca se ha escrito -> vale el default
+const dockRead=(key,def)=>dockScript(
+    `if (dockWidgets.length) { print(String(dockWidgets[0].readConfig("${key}"))); }`)
+    .then(v=>v===''?def:v).catch(()=>def);
+const dockWrite=(key,val)=>dockScript(
+    `dockWidgets.forEach(function(w){ w.writeConfig("${key}", ${JSON.stringify(val)}); w.reloadConfig(); });`);
+// La posición del dock es del panel, no de un rc: plasmashellrc no la controla.
+const dockPosRead=()=>dockScript('if (dockPanel) { print(dockPanel.location); }')
+    .then(v=>v||'bottom').catch(()=>'bottom');
+const dockPosWrite=(loc)=>dockScript(`if (dockPanel) { dockPanel.location = "${loc}"; }`);
+// El grosor del panel manda sobre el tamaño de los iconos del dock: es
+// "height" en el API de scripting, tanto en horizontal como en vertical.
+const dockSizeRead=()=>dockScript('if (dockPanel) { print(dockPanel.height); }')
+    .then(v=>parseInt(v)||64).catch(()=>64);
+const dockSizeWrite=(px)=>dockScript(`if (dockPanel) { dockPanel.height = ${parseInt(px)}; }`);
+
 export async function renderPantallaInicio(c){
     c.innerHTML=renderHeader(t('hdr_homescreen'))+renderSkeleton(2);
-    const [desktopIcons,gridSnap,dockPos,iconSize,showLabels]=await Promise.all([
+    const [desktopIcons,gridSnap,dockPos,iconSize,showLabels,magnifyOn,magnifyScale,dockSize]=await Promise.all([
         getSetting('desktop_icons','true').then(v=>v==='true'),
         getSetting('desktop_grid','true').then(v=>v==='true'),
-        getSetting('dock_position','bottom'),
+        dockPosRead(),
         getSetting('icon_size','medium'),
         getSetting('icon_labels','true').then(v=>v==='true'),
+        dockRead('magnifyEnabled','true').then(v=>v!=='false'),
+        dockRead('magnifyScale','1.2').then(v=>parseFloat(v)||1.2),
+        dockSizeRead(),
     ]);
     let h=renderHeader(t('hdr_homescreen'));
     const sizes=[['small','Pequeño'],['medium','Mediano'],['large','Grande']];
@@ -7880,8 +8588,25 @@ export async function renderPantallaInicio(c){
             <div class="seg-ctrl">${sizes.map(([k,l])=>`<button class="seg-btn${iconSize===k?' active':''}" data-size="${k}">${l}</button>`).join('')}</div>
         </div>`,
     ]);
+    h+=renderSection(_tr('Dock'));
+    const magSteps=[['1.2',_tr('Suave')],['1.35',_tr('Normal')],['1.5',_tr('Fuerte')]];
+    const magCur=magSteps.reduce((best,[k])=>
+        Math.abs(parseFloat(k)-magnifyScale)<Math.abs(parseFloat(best)-magnifyScale)?k:best,'1.2');
+    h+=renderCard([
+        renderRowItem(_tr('Efecto lupa'),
+            _tr('Los iconos crecen al pasar el cursor, estilo macOS. Al desactivarlo se quedan siempre a tamaño completo'),
+            renderToggle('dock-magnify',magnifyOn)),
+        `<div class="detail-item detail-item-row" id="dock-magnify-scale-row" style="${magnifyOn?'':'display:none'}">
+            <div class="detail-texts"><span class="dt">${_tr('Intensidad de la lupa')}</span><span class="ds">${_tr('Cuánto crece el icono bajo el cursor')}</span></div>
+            <div class="seg-ctrl">${magSteps.map(([k,l])=>`<button class="seg-btn${magCur===k?' active':''}" data-mag="${k}">${l}</button>`).join('')}</div>
+        </div>`,
+        `<div class="detail-item">
+            <div class="detail-texts"><span class="dt">${_tr('Tamaño del dock')}</span><span class="ds">${_tr('Grosor del dock: cuanto más alto, más grandes los iconos')}</span></div>
+            ${renderSlider('dock-size',Math.min(120,Math.max(32,dockSize)),32,120)}
+        </div>`,
+    ]);
     h+=renderSection(t('sec_taskbar_pos'));
-    const dockPositions=[['bottom','Abajo'],['left','Izquierda'],['right','Derecha']];
+    const dockPositions=[['bottom','Abajo'],['top','Arriba'],['left','Izquierda'],['right','Derecha']];
     h+=renderCard(dockPositions.map(([k,l])=>`<div class="detail-item detail-item-row" style="cursor:pointer" data-dock="${k}">
         <span class="dt" style="flex:1">${l}</span>
         <div style="width:20px;height:20px;border-radius:50%;border:2px solid ${dockPos===k?'var(--blue)':'var(--brd)'};background:${dockPos===k?'var(--blue)':'transparent'};flex-shrink:0;display:flex;align-items:center;justify-content:center">
@@ -7892,6 +8617,20 @@ export async function renderPantallaInicio(c){
     setupToggle('desk-icons',async a=>{
         setSetting('desktop_icons',a);
         try{await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','plasma-org.kde.plasma.desktop-appletsrc','--group','Containments','--group','1','--group','General','--key','showToolTips',a?'true':'false']});}catch(e){}
+    });
+    setupToggle('dock-magnify',async a=>{
+        const row=document.getElementById('dock-magnify-scale-row');
+        if(row)row.style.display=a?'':'none';
+        await dockWrite('magnifyEnabled',!!a);
+        toast(a?_tr('Efecto lupa activado'):_tr('Efecto lupa desactivado'));
+    });
+    // Solo al soltar: cada cambio reconstruye el panel y arrastrar en vivo lo ahoga.
+    setupSlider('dock-size',v=>dockSizeWrite(v),false);
+    c.querySelectorAll('[data-mag]').forEach(btn=>{
+        btn.addEventListener('click',async()=>{
+            c.querySelectorAll('[data-mag]').forEach(b=>b.classList.toggle('active',b===btn));
+            await dockWrite('magnifyScale',parseFloat(btn.dataset.mag));
+        });
     });
     setupToggle('desk-grid',a=>setSetting('desktop_grid',a));
     setupToggle('desk-labels',a=>setSetting('icon_labels',a));
@@ -7907,7 +8646,7 @@ export async function renderPantallaInicio(c){
     c.querySelectorAll('[data-dock]').forEach(row=>{
         row.addEventListener('click',async()=>{
             setSetting('dock_position',row.dataset.dock);
-            try{await tauriInvoke('run_command',{cmd:'kwriteconfig6',args:['--file','plasmashellrc','--group','PlasmaViews','--group','Panel','--key','location',row.dataset.dock]});}catch(e){}
+            await dockPosWrite(row.dataset.dock);
             renderPantallaInicio(c);
         });
     });

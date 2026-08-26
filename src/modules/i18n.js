@@ -191,6 +191,25 @@ const ES={
     tst_autostart_on:'Configurado para inicio automático',
     tst_autostart_off:'Inicio automático desactivado',
     tst_app_lang_changed:'Idioma cambiado / Language changed — reinicia / restart',
+    // ── Pantalla de acceso y de bloqueo ──────────────────────────────────
+    // No las usa la interfaz de Settings: se ESCRIBEN en theme.conf al guardar
+    // el editor, y de ahí las leen el greeter de SDDM y la pantalla de bloqueo.
+    // Esos dos procesos no comparten el sistema de traducción de la app (uno
+    // arranca sin sesión), así que el idioma viaja con el texto ya traducido.
+    ls_battery:'Batería',
+    ls_charging:'Cargando',
+    ls_to_full:'%1 min para carga completa',
+    ls_no_events:'Sin eventos',
+    ls_notifications:'NOTIFICACIONES',
+    ls_notification:'Notificación',
+    ls_wrong_password:'Contraseña incorrecta',
+    ls_caps_lock:'Bloqueo de mayúsculas activado',
+    ls_session:'Sesión',
+    ls_exit:'✕  Salir (Esc)',
+    ls_started:'Inicio',
+    ls_finish:'Fin',
+    ls_objective:'Objetivo',
+    ls_deactivate_routine:'Desactivar rutina',
 };
 
 const EN={
@@ -376,6 +395,20 @@ const EN={
     tst_autostart_on:'Set to auto-start at login',
     tst_autostart_off:'Auto-start disabled',
     tst_app_lang_changed:'Idioma cambiado / Language changed — reinicia / restart',
+    ls_battery:'Battery',
+    ls_charging:'Charging',
+    ls_to_full:'%1 min to full charge',
+    ls_no_events:'No events',
+    ls_notifications:'NOTIFICATIONS',
+    ls_notification:'Notification',
+    ls_wrong_password:'Wrong password',
+    ls_caps_lock:'Caps Lock is on',
+    ls_session:'Session',
+    ls_exit:'✕  Exit (Esc)',
+    ls_started:'Started',
+    ls_finish:'Finish',
+    ls_objective:'Objective',
+    ls_deactivate_routine:'Deactivate routine',
 };
 
 const DICTS={es:ES,en:EN};
